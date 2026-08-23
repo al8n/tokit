@@ -110,3 +110,33 @@ fn input_as_ref_borrows_the_bound_emitter() {
   let input_ref = input.as_ref();
   let _ = input_ref;
 }
+
+/// The regime-id allocator's exhaustion forces *"the regime changed"*, never *"the regime is the
+/// same"* — the safe direction, because the unsafe one is a false stall.
+///
+/// `REGIME_EXHAUSTED` is the id `install_rekey` hands out once the allocator can no longer climb,
+/// so two different regimes really can wear it at once. Saturating into an ordinary value instead
+/// would make a re-key at the ceiling compare **equal**, and `InputRef::scanner_outcome` would
+/// answer `ScannerOutcome::Stalled` — *repeating reproduces the trip* — over an input whose regime
+/// the caller has just replaced. This pins the exclusion that stops it, which no parse could reach
+/// by re-keying.
+#[test]
+fn an_exhausted_regime_id_is_equal_to_nothing_including_itself() {
+  use super::{REGIME_EXHAUSTED, same_regime};
+
+  assert!(
+    same_regime(0, 0),
+    "the initial regime is the same as itself"
+  );
+  assert!(same_regime(7, 7), "an ordinary id is the same as itself");
+  assert!(!same_regime(7, 8), "different ids are different regimes");
+  assert!(
+    !same_regime(REGIME_EXHAUSTED, REGIME_EXHAUSTED),
+    "an exhausted allocator names every regime alike, so its id may never carry an equality — \
+     answering `true` here is exactly the false `Stalled` the sentinel exists to prevent"
+  );
+  assert!(
+    !same_regime(REGIME_EXHAUSTED, 7) && !same_regime(7, REGIME_EXHAUSTED),
+    "and it is not the same as any ordinary id either, in both argument orders"
+  );
+}

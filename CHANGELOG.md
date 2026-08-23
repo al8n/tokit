@@ -227,12 +227,28 @@ and will red until they do.
   arms are additive.
 
   **A `State` cannot be compared** — it is bounded `Debug + Clone` — so the crate now names one:
-  `Input::regime`, a generation stamped by `install_rekey`, the sole state-surgery site, and
-  **checkpointed** so a restore puts a regime's name back with the regime. There are exactly three
-  writers of `*state` — a commit (which moves the offset), a restore (which carries its own saved
-  generation) and a surgery — so **equal generation ∧ equal offset ⇒ equal `State`**. The
-  destructuring census in `input::lineage` classifies the new cell and is what keeps that trichotomy
-  from silently gaining a fourth member.
+  `Input::regime`, an **id** stamped by `install_rekey`, the sole state-surgery site, and
+  **checkpointed** so a restore puts a regime's name back with the regime. Three things make the
+  standing-in exact, and each is load-bearing:
+
+  - **the writers are three, and one names the regime.** A commit moves the committed offset, a
+    restore carries its own saved id, a surgery allocates a new one — so *equal id ∧ equal offset ⇒
+    equal `State`*. The destructuring census in `input::lineage` keeps that trichotomy from silently
+    gaining a fourth member;
+  - **there is no public path to the live `State`.** A census of assignment *sites* is a claim about
+    writes where the conclusion needed is about **values**, and the two coincide only for a type that
+    cannot be mutated through a shared reference — which `Debug + Clone` does not give. A `State`
+    holding a `Cell<Mode>` is valid, and a `&L::State` would let safe code flip it at the same
+    offset with no writer involved. **`InputRef::state`, `ParseState::state` and `Checkpoint::state`
+    therefore return owned clones** (breaking; see below). What is left is a `Clone` that *shares*
+    its interior mutability, which is the determinism clause's own named violation;
+  - **the id is allocated, not derived.** A separate monotone source, **outside** the rollback set,
+    for the reason the checkpoint-id source is: deriving the next id from the checkpointed cell is
+    not injective, and the counterexample is public — save at `g`, install B (`g+1`), roll back,
+    install C (`g+1`), two regimes wearing one name. At `REGIME_EXHAUSTED` the allocator stops and
+    that id is **excluded from equality**, so exhaustion forces `ReKeyed` rather than a false
+    `Stalled`. An earlier draft saturated an ordinary value and documented the harmless direction;
+    the harmful one was what it did.
 
   **`Stalled` cannot be permanent.** It clears when either input it tests moves: a commit past the
   capture (`Progressed`) or a regime replacement (`ReKeyed`). Measured:
@@ -661,6 +677,36 @@ and will red until they do.
   baseline in `input::input_ref::tests`.
 
 ### Changed (breaking)
+
+- **`InputRef::state`, `ParseState::state` and `Checkpoint::state` return the state BY VALUE**
+  (#311). They handed out `&L::State`; they now hand out an owned clone.
+
+  **A shared reference to the live state is a public path to scan-visible state that skips every
+  door this crate tracks.** `State` is bounded `Debug + Clone` and nothing more, so a valid one may
+  hold interior mutability — a `Cell<Mode>` a grammar flips to change how the region ahead lexes.
+  Through a `&L::State`, safe code could flip it without `set_state` or `state_mut`, and the input
+  would scan under a regime nothing on it records: `InputRef::scanner_outcome` would then answer
+  `ScannerOutcome::Stalled` — *repeating reproduces the trip* — over an input where repeating now
+  succeeds, and reject a recoverable parse. `Checkpoint::state` is the same hole one step back,
+  since the state a checkpoint holds is one a restore will install.
+
+  The alternative was to ask `State` implementors for a comparable identity. That moves an
+  obligation onto every downstream lexer that no compiler checks — a defaulted trait method walks
+  implementors straight past it, and a required one breaks all seven in-crate impls and every
+  downstream one while still being satisfiable by returning a constant. **Removing the capability
+  is enforced; requesting the discipline is not.**
+
+  **The blast radius is narrower than the signature suggests.** `inp.state().field` and
+  `inp.state().method()` both keep compiling, through auto-ref on the temporary; what breaks is
+  binding the reference (`let s: &L::State = inp.state();`) and dereferencing it. Measured across
+  this workspace: **two call sites**, both `*state.state()` in a test. The cost is one
+  `L::State::clone` per read — `state()` is a diagnostic accessor, not a scan path, and `state_mut`
+  (which re-keys eagerly) remains the way to change the regime.
+
+  What is **not** covered is a `Clone` that *shares* its interior mutability rather than
+  deep-copying it — an `Rc<Cell<_>>` tally and its family. That is already the `Lexer` determinism
+  clause's own named violation (*"a shared counter"*), and the input layer's behaviour under one is
+  unspecified-but-bounded, here as everywhere else on this branch.
 
 - **`RecursionLimiter::PARSE_DEFAULT_DEPTH` is 32, in every build, and was 16** (#297). Every
   unconfigured parse gets twice the depth. The profile arms hold the same number, deliberately, and

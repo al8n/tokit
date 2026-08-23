@@ -336,6 +336,9 @@ where
   /// The regime generation — see [`Input::regime`](super::Input). Borrowed beside the boundary it
   /// shares a restore group with.
   pub(super) regime: &'closure mut u64,
+  /// The regime-id allocator — see [`Input::regime_seq`](super::Input). Monotone, outside the
+  /// rollback set, and the only source `install_rekey` reads.
+  pub(super) regime_seq: &'closure mut u64,
   /// The **recursion budget**, borrowed from the owning [`Input`](super::Input) — see that field
   /// for why it is outside the rollback set. Read through [`recursion`](Self::recursion); its
   /// only writer is the [`Descent`] guard [`descend`](Self::descend) hands out.
@@ -669,10 +672,37 @@ where
     self.input
   }
 
-  /// Returns a reference to the current lexer state (extras).
+  /// Returns the current lexer state (extras), **by value**.
+  ///
+  /// # It hands out a clone, and that is a wall rather than a convenience
+  ///
+  /// A shared reference to the *live* state would be a public path to scan-visible state that
+  /// skips every door this crate tracks. [`State`](crate::state::State) is bounded
+  /// `Debug + Clone` and nothing more, so a perfectly valid one may hold interior mutability — a
+  /// `Cell<Mode>` a grammar flips to change how the region ahead lexes. Through a `&L::State`,
+  /// safe code could flip it without [`set_state`](Self::set_state) or
+  /// [`state_mut`](Self::state_mut), and the input would be scanning under a regime nothing on it
+  /// records. [`scanner_outcome`](Self::scanner_outcome) would then report
+  /// [`Stalled`](crate::input::ScannerOutcome::Stalled) — *repeating reproduces the trip* — over an
+  /// input where repeating can now succeed, and reject a recoverable parse.
+  ///
+  /// Cloning removes the capability rather than asking a `State` implementor not to use it: the
+  /// value handed back is the caller's own, and mutating it cannot reach the input. That is what
+  /// lets the regime generation stand for `State` **identity** — with this door closed, the only
+  /// writers of the live state are a commit, a restore, and the two surgery methods, and the last
+  /// two are exactly `install_rekey`, which stamps a fresh id. See
+  /// [`scanner_outcome`](Self::scanner_outcome) for the whole argument.
+  ///
+  /// The one shape it does not cover is a `State` whose `Clone` **shares** its interior mutability
+  /// rather than deep-copying it — an `Rc<Cell<_>>` tally and its family. That is already the
+  /// [`Lexer`](crate::Lexer) determinism clause's own named violation (*"a shared counter"*), and
+  /// the input layer's behaviour under one is unspecified-but-bounded, here as everywhere else.
+  ///
+  /// Costs one `L::State::clone`. To *change* the state, use [`state_mut`](Self::state_mut), which
+  /// re-keys eagerly, or [`set_state`](Self::set_state).
   #[inline(always)]
-  pub const fn state(&self) -> &L::State {
-    self.state
+  pub fn state(&self) -> L::State {
+    self.state.clone()
   }
 
   /// Returns whether this input is **final** — the last chunk of a stream, or a
@@ -922,12 +952,19 @@ where
     // Disarming after the clear instead leaves a window in which the front is gone and the
     // watermark still claims a live report for it. Measured, not hypothesized: with the disarm
     // below the clear, `a_rekey_interrupted_by_caller_code_still_witnesses_itself` fails.
-    // The regime's name changes with the regime. This is the ONE bump site, and it is what makes
-    // "equal generation and equal committed offset" imply an equal `State`: the other two writers
-    // of `*self.state` either advance the offset (a commit) or carry their own saved generation
-    // (a restore). Saturating for the trip counters' reason — an equality test needs consecutive
-    // values to differ, and the ceiling's tie is the conservative direction.
-    *self.regime = self.regime.saturating_add(1);
+    // The regime's name changes with the regime. This is the ONE allocation site.
+    //
+    // It reads the ALLOCATOR, not the current id: deriving the next name from the checkpointed
+    // cell is not injective, and the counterexample is public — save at `g`, install B (`g + 1`),
+    // roll back to `g`, install C (`g + 1`), and B and C wear one name. The allocator is outside
+    // the rollback set for exactly the reason the checkpoint-id source is.
+    //
+    // `saturating_add` here means the ceiling hands out `REGIME_EXHAUSTED` for ever, and that
+    // sentinel is excluded from equality at the reading — so exhaustion forces "changed", never
+    // "same". Saturating INTO an ordinary value would do the opposite and answer `Stalled` across
+    // a re-key, which is the false stop.
+    *self.regime_seq = self.regime_seq.saturating_add(1);
+    *self.regime = *self.regime_seq;
     let settled = (
       core::mem::replace(self.emitted_error_end, committed),
       // The front-report watermark dies with the regime that lexed its subject. Taken HERE,

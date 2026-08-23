@@ -240,9 +240,13 @@ where
     self.inp.cst_start_at(mark, kind);
   }
 
-  /// Returns the state of the lexer.
+  /// Returns the state of the lexer, **by value**.
+  ///
+  /// Forwards [`InputRef::state`](crate::InputRef::state), which hands out a clone so that no
+  /// public path reaches the live regime without going through a door that re-keys. See it for
+  /// the whole argument.
   #[inline(always)]
-  pub const fn state(&self) -> &L::State {
+  pub fn state(&self) -> L::State {
     self.inp.state()
   }
 

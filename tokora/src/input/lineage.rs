@@ -117,6 +117,7 @@
 //! | `emitted_error_end` (dedup watermark) | `Input` | lineage memo | pure-copy the saved value |
 //! | `front_reported_end` (front-report watermark) | `Input` | lineage memo | pure-copy the saved value — beside the emitter rewind, so the witness and the report it names move as one |
 //! | `poison_boundary` (sticky terminal frontier) | `Input` | lineage memo | pure-copy the saved value |
+//! | `regime_seq` (the id source those names come from) | `Input` | monotone session fact | **nothing** — a restored source would reissue a name, and two regimes sharing one name is exactly what an id must not allow |
 //! | `regime` (the installed lexer regime's name) | `Input` | lineage memo | pure-copy the saved value — a restore that puts a `State` back puts its name back with it, which is what lets a reader compare two regimes that `State`'s own bounds cannot |
 //! | [`cache_pushes`](Lineage::cache_pushes) | `Lineage` | lineage memo | pure-copy the saved value — the copy is what makes nested restores compose; see below |
 //! | [`live_ckpts`](Lineage) | `Lineage` | lineage memo | pop through the restored id |
@@ -199,6 +200,14 @@ pub(crate) fn census<'inp, L, Ctx, Lang, Cmpl>(
     //   from inside a scan, whose predicates take `&Token` and never `&mut InputRef`, so the
     //   generation cannot move across the pair that rewind restores.
     regime: _,
+    // — MONOTONE SESSION FACT: restore does NOT touch it, and must not — the same class, and the
+    //   same argument, as `next_ckp_id` below. It is the SOURCE the cell above is allocated from,
+    //   and a source a restore rewound would reissue a name two different regimes then share:
+    //   save at `g`, install B, roll back, install C, and a reader comparing names calls B and C
+    //   the same regime. Climbs only, at `install_rekey`; stops at `REGIME_EXHAUSTED`, which the
+    //   reading excludes from equality so an exhausted allocator forces "changed" rather than
+    //   "same".
+    regime_seq: _,
     // — CONTROL-STACK FACT: restore does NOT touch it, and must not. Depth is a property of the
     //   live frames, not of input progress: a save and the restore returning to it happen at the
     //   same depth by construction, so nothing observable changes across the pair; and an unwind
@@ -289,6 +298,9 @@ pub(crate) fn census<'inp, L, Ctx, Lang, Cmpl>(
     // — lineage memo (borrowed): pure-copied by a restore, bumped by `install_rekey`. Same class
     //   as the `Input` field above it.
     regime: _,
+    // — MONOTONE SESSION FACT (borrowed): the id source, climbed by `install_rekey`, never lowered
+    //   and never restored. Same class as the `Input` field above it.
+    regime_seq: _,
     // — CONTROL-STACK FACT (borrowed): raised by `descend`, lowered by the `Descent` guard's
     //   drop, never restored. Same class as the `Input` field above it.
     recursion: _,

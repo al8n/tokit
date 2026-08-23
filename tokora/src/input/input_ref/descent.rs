@@ -1321,16 +1321,37 @@ where
   ///   advance, and a capture describing a position the input has left supports no claim about the
   ///   one it is at now — that is [`Rewound`](ScannerOutcome::Rewound), and folding it into a stall
   ///   would be a repetition claim with nothing behind it;
-  /// - the **`State`** cannot be compared — it is bounded `Debug + Clone` and nothing more — so the
-  ///   generation stands in for it, and the standing-in is exact rather than approximate. There are
-  ///   exactly three writers of `*state`: a **commit**, which threads the lexer's post-token state
-  ///   forward and moves the committed span with it; a **restore**, which installs a checkpoint's
-  ///   saved pair *and* the generation that names it; and a **surgery**
-  ///   ([`set_state`](Self::set_state) / [`state_mut`](Self::state_mut)) through `install_rekey`,
-  ///   the sole bump site. Given that trichotomy, **equal generation ∧ equal committed offset ⇒
-  ///   equal `State`**: a commit would have moved the offset, a surgery would have moved the
-  ///   generation, and a restore carries both from the same saved pair. The write census in
-  ///   `input::lineage` is what keeps the trichotomy from silently gaining a fourth member.
+  /// - the **`State`** cannot be compared — it is bounded `Debug + Clone` and nothing more — so a
+  ///   regime **id** stands in for it, and the standing-in is exact rather than approximate. Two
+  ///   things make it so, and each is load-bearing:
+  ///
+  ///   **The writers are three, and one of them names the regime.** A **commit** threads the
+  ///   lexer's post-token state forward and moves the committed span with it; a **restore**
+  ///   installs a checkpoint's saved pair *and* the id that names it; a **surgery**
+  ///   ([`set_state`](Self::set_state) / [`state_mut`](Self::state_mut)) goes through
+  ///   `install_rekey`, the sole allocation site. So **equal id ∧ equal committed offset ⇒ equal
+  ///   `State`**: a commit would have moved the offset, a surgery the id, and a restore carries
+  ///   both from one saved pair. The destructuring census in `input::lineage` is what keeps that
+  ///   trichotomy from silently gaining a fourth member.
+  ///
+  ///   **And there is no public path to the live `State` at all.** A census of *assignment sites*
+  ///   is a claim about writes, and the conclusion needed is about **values** — the two coincide
+  ///   only for a type that cannot be mutated through a shared reference, which `Debug + Clone`
+  ///   does not give. A `State` holding a `Cell<Mode>` is perfectly valid, and a `&L::State`
+  ///   handed to safe code would let a grammar flip it at the same offset with no writer involved,
+  ///   leaving this reading to answer `Stalled` over an input where a repeat now succeeds.
+  ///   [`state`](Self::state) and [`Checkpoint::state`](crate::input::Checkpoint::state)
+  ///   therefore hand back **owned clones**; the capability is gone rather than deprecated. What
+  ///   is left is a `Clone` that *shares* its interior mutability rather than deep-copying it,
+  ///   which is the [`Lexer`](crate::Lexer) determinism clause's own named violation and out of
+  ///   scope here as everywhere else on this reading.
+  ///
+  ///   **The id is allocated, not derived.** Its source is monotone and outside the rollback set,
+  ///   because deriving the next id from the checkpointed cell is not injective: save at `g`,
+  ///   install B (`g + 1`), roll back to `g`, install C (`g + 1`) — two regimes, one name. At
+  ///   `REGIME_EXHAUSTED` the allocator stops and that id is
+  ///   excluded from equality, so exhaustion forces
+  ///   [`ReKeyed`](ScannerOutcome::ReKeyed) rather than a false stall.
   ///
   /// The predicate therefore matches the theorem rather than approximating it. An earlier version
   /// tested only "not advanced", which was strictly weaker in both directions — it called a
@@ -1382,7 +1403,7 @@ where
     }
     // The THIRD determinism input, before either position test: a replaced regime is the strongest
     // statement about repeatability there is, and it holds whatever the offset did.
-    if *self.regime != since.regime {
+    if !crate::input::same_regime(*self.regime, since.regime) {
       return ScannerOutcome::ReKeyed;
     }
     // Trichotomy on `Offset: Ord`, so the three arms below are exhaustive and disjoint by

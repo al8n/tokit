@@ -211,7 +211,15 @@ impl<'a, 'closure, L: Lexer<'a>> Checkpoint<'a, 'closure, L> {
 
   /// Returns the state of the checkpoint.
   #[inline(always)]
-  pub const fn state(&self) -> &L::State {
-    &self.state
+  /// Returns the state of the checkpoint, **by value**.
+  ///
+  /// A clone for [`InputRef::state`](crate::InputRef::state)'s reason, one step further back: the
+  /// state a checkpoint holds is the one a [`restore`](crate::InputRef::restore) will *install*,
+  /// so a shared reference to it is a path to a future live regime. A `State` carrying interior
+  /// mutability could be flipped through it and then restored, installing a regime under the
+  /// generation the checkpoint saved — the same untracked-surgery hole, taken through the
+  /// `unstable-raw` door instead of the ordinary one.
+  pub fn state(&self) -> L::State {
+    self.state.clone()
   }
 }

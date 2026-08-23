@@ -1356,6 +1356,78 @@ impl TokenTrait<'_> for CTok {
 
 type CLexer<'a> = LogosLexer<'a, CTok>;
 
+/// A lexing **mode** a grammar flips to change how the region ahead lexes — the ordinary reason a
+/// [`State`] carries interior mutability.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Mode {
+  #[default]
+  Narrow,
+  Wide,
+}
+
+/// A conforming [`State`] with interior mutability: a by-value [`TokenLimiter`] beside a
+/// `Cell<Mode>`.
+///
+/// It is **not** the determinism clause's named violation — the derived `Clone` deep-copies the
+/// cell, so a clone's mode is independent of the live one and a checkpoint restores what it saved.
+/// That is exactly why it is the right instrument for the accessor: the hole it probes is a public
+/// path to the *live* value, not a shared tally.
+///
+/// [`State`]: tokora::state::State
+/// [`TokenLimiter`]: tokora::state::token_tracker::TokenLimiter
+#[derive(Debug, Clone, Default)]
+struct ModeLimiter {
+  limiter: TokenLimiter,
+  mode: Cell<Mode>,
+}
+
+impl ModeLimiter {
+  fn with_limitation(limit: usize) -> Self {
+    Self {
+      limiter: TokenLimiter::with_limitation(limit),
+      mode: Cell::new(Mode::Narrow),
+    }
+  }
+}
+
+impl State for ModeLimiter {
+  type Error = TokenLimitExceeded;
+
+  fn check(&self) -> Result<(), Self::Error> {
+    self.limiter.check()
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Logos)]
+#[logos(crate = logos, extras = ModeLimiter, skip r"[ \t\r\n]+")]
+enum MTok {
+  #[regex(r"[0-9]+", |lex| { lex.extras.limiter.increase(); lex.slice().parse::<i64>().unwrap_or(0) })]
+  Num(i64),
+}
+
+impl core::fmt::Display for MTok {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    core::fmt::Display::fmt(&self.kind(), f)
+  }
+}
+
+impl TokenTrait<'_> for MTok {
+  type Kind = SKind;
+  type Error = SErr;
+
+  const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
+
+  fn kind(&self) -> SKind {
+    SKind::Num
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+type MLexer<'a> = LogosLexer<'a, MTok>;
+
 thread_local! {
   /// [`InputRef::at_scanner_stop`] read **inside** a speculative wrapper, at the failure.
   ///
@@ -2259,5 +2331,112 @@ fn a_recovery_the_rollback_undoes_is_a_stall_and_not_a_re_key() {
     Ok(ScannerOutcome::Stalled),
     "the regime the caller installed is gone with the rollback that discarded it, so all three \
      determinism inputs are back where the capture found them and a repeat reproduces the trip"
+  );
+}
+
+/// A regime id is **allocated**, never derived from the checkpointed cell — so two different
+/// regimes cannot come to wear one name across a rollback.
+///
+/// The public counterexample, built exactly as it reads: save at `g`, install regime **B**, capture
+/// an attempt and trip inside it, roll back to `g`, then install regime **C**. Deriving the next id
+/// from the current value hands B and C the same name, and at the original offset with the stop
+/// cleared the capture and the input compare equal — [`ScannerOutcome::Stalled`], *"repeating
+/// reproduces the trip"*, over an input whose regime the caller has just replaced twice. Allocating
+/// from a monotone source outside the rollback set is what makes C's name new.
+///
+/// [`ScannerOutcome::Stalled`]: tokora::input::ScannerOutcome::Stalled
+#[test]
+fn a_regime_id_is_not_reused_after_a_rollback_hands_its_predecessor_back() {
+  fn probe<'inp, Ctx>(
+    inp: &mut InputRef<'inp, '_, CLexer<'inp>, Ctx>,
+  ) -> Result<ScannerOutcome, SErr>
+  where
+    Ctx: ParseContext<'inp, CLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, CLexer<'inp>, Error = SErr>,
+  {
+    for _ in 0..S_TIGHT {
+      let _ = inp.try_expect_or_stop(|_| true)?;
+    }
+    let mut txn = inp.begin_stacked();
+    // Savepoint at generation `g`, with nothing consumed after it — so the rollback below lands
+    // the committed end exactly where the capture takes it.
+    let sp = txn.savepoint();
+    // Regime B: a budget already spent, so the scan below trips under it.
+    txn.set_state(TokenLimiter::with_limitation(0));
+    // The capture sees B's name.
+    let attempt = txn.scanner_attempt();
+    // Trip inside B — the event survives everything below, being outside the rollback set.
+    let _ = txn.try_expect_or_stop(|_| true);
+    // Back to `g`: the checkpointed id comes back, and a DERIVED allocator would hand the same
+    // next name — B's — to whatever is installed after this.
+    txn.rollback_to(sp);
+    // Regime C. Different regime, and it must not inherit B's name.
+    txn.set_state(TokenLimiter::with_limitation(1_000));
+    let outcome = txn.scanner_outcome(attempt);
+    txn.commit();
+    Ok(outcome)
+  }
+
+  let ctx: ParserContext<'_, CLexer<'_>, Fatal<SErr>> = ParserContext::new(Fatal::new());
+  let out = Parser::with_parser_and_context(probe, ctx)
+    .parse_str_with_state(S_SRC, TokenLimiter::with_limitation(S_TIGHT));
+  assert_eq!(
+    out,
+    Ok(ScannerOutcome::ReKeyed),
+    "the regime installed now is not the one the capture saw, and no rollback in between may hand \
+     its name back out"
+  );
+}
+
+/// Interior mutability is a legal [`State`], and there is no public path to the live one.
+///
+/// [`State`] is bounded `Debug + Clone`, so a `Cell<Mode>` a grammar flips to change how the region
+/// ahead lexes is a perfectly valid one. Handed a `&L::State`, safe code could flip it at the same
+/// offset with no writer involved and no id moving, and the reading would answer
+/// [`ScannerOutcome::Stalled`] — *repeating reproduces the trip* — over an input where repeating
+/// now succeeds.
+///
+/// [`InputRef::state`] returns an **owned clone**, so the flip lands on the caller's copy and the
+/// live regime is untouched: the parse really does repeat, and `Stalled` really is right. The cell
+/// measures both halves — that the clone is independent, and that the reading is unmoved by writing
+/// through it.
+///
+/// [`State`]: tokora::state::State
+/// [`InputRef::state`]: tokora::InputRef::state
+/// [`ScannerOutcome::Stalled`]: tokora::input::ScannerOutcome::Stalled
+#[test]
+fn a_cell_flipped_through_the_state_accessor_cannot_reach_the_live_regime() {
+  fn probe<'inp, Ctx>(
+    inp: &mut InputRef<'inp, '_, MLexer<'inp>, Ctx>,
+  ) -> Result<(bool, ScannerOutcome), SErr>
+  where
+    Ctx: ParseContext<'inp, MLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, MLexer<'inp>, Error = SErr>,
+  {
+    for _ in 0..S_TIGHT {
+      let _ = inp.try_expect_or_stop(|_| true)?;
+    }
+    let attempt = inp.scanner_attempt();
+    let _ = inp.try_attempt(|inp| {
+      let _ = inp.try_expect_or_stop(|_| true);
+      Err::<(), SErr>(SErr::Ordinary)
+    });
+    // The flip a grammar would make to change how the region ahead lexes — through the read
+    // accessor, with no `state_mut` and no `set_state`.
+    inp.state().mode.set(Mode::Wide);
+    // Did it reach the live regime?
+    let reached = inp.state().mode.get() == Mode::Wide;
+    Ok((reached, inp.scanner_outcome(attempt)))
+  }
+
+  let ctx: ParserContext<'_, MLexer<'_>, Fatal<SErr>> = ParserContext::new(Fatal::new());
+  let out = Parser::with_parser_and_context(probe, ctx)
+    .parse_str_with_state(S_SRC, ModeLimiter::with_limitation(S_TIGHT));
+  assert_eq!(
+    out,
+    Ok((false, ScannerOutcome::Stalled)),
+    "the accessor handed back a clone, so the flip never reached the live regime — and the reading \
+     is right that a repeat reproduces the trip, because nothing about the scan's three inputs \
+     moved"
   );
 }
