@@ -243,7 +243,6 @@ pub use cursor::Cursor;
 #[cfg(all(test, feature = "logos_0_16", feature = "std", feature = "combinators"))]
 pub(crate) use input_ref::ClosePayload;
 pub(crate) use input_ref::CloseStatus;
-pub(crate) use input_ref::ScannerTripBaseline;
 
 /// The value both trip counters stop at, and the reading that means "**at least** this many".
 ///
@@ -286,7 +285,7 @@ pub(crate) const TRIP_COUNTER_EXHAUSTED: u64 = u64::MAX;
 pub(crate) use input_ref::Session;
 pub use input_ref::{
   Balance, Commit, DelimClass, Descent, DropPolicy, Hole, InputRef, ResourceTripBaseline, Rollback,
-  Transaction,
+  ScannerTripBaseline, Transaction,
 };
 pub(crate) use lineage::Lineage;
 pub use session::{Budget, PartialSession, RedriveFromBase, ReplayMode, SessionRefusal};

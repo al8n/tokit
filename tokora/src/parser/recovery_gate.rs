@@ -219,7 +219,7 @@ fn judge<'inp, 'closure, L, O, Ctx, Lang: ?Sized, Cmpl, F>(
   f: F,
   latch: &Option<L::Offset>,
   trips: ResourceTripBaseline<'closure>,
-  scans: ScannerTripBaseline,
+  scans: ScannerTripBaseline<'closure>,
 ) -> Result<O, (Failure<'inp, L, Ctx, Lang>, bool)>
 where
   L: Lexer<'inp>,

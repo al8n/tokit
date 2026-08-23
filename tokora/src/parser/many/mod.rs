@@ -377,7 +377,7 @@ pub(super) fn file_element_failure<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl>(
   inp: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
   err: <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error,
   since: &Cursor<'inp, 'closure, L>,
-  scans: ScannerTripBaseline,
+  scans: ScannerTripBaseline<'closure>,
   trips: ResourceTripBaseline<'closure>,
 ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
 where
@@ -520,7 +520,7 @@ where
 pub(super) fn absence_after_element<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl>(
   inp: &InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
   latch: &Option<L::Offset>,
-  scans: ScannerTripBaseline,
+  scans: ScannerTripBaseline<'closure>,
   trips: ResourceTripBaseline<'closure>,
 ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
 where

@@ -87,24 +87,22 @@ and will red until they do.
   no argument, so there is no baseline for a caller to place wrongly, and it witnesses no event, so
   there is no comparison of a rollbackable cell to prove at any nesting depth.
 
-  **Where it holds, and where it does not, is on the method.** A restore reinstates the
-  checkpoint's cursor, lexer state **and** boundary, so a speculative wrapper whose begin point
-  predates a trip — `try_attempt`, `attempt_parse`, a rollback-on-drop `Transaction`, a raw
-  `restore` — leaves this reading clean on its far side. That is not one wrong answer to repair,
-  because the right answer there is decided by where the scanner bound lives, and the only thing
-  that knows is `L::State`. A `TokenLimiter` held **by value** in the state is refunded by the very
-  same restore, so the stop really is gone and `false` is right; a tally the state only **points
-  at** — a shared cell, an atomic, a global — is not refunded, so the next scan trips again and
-  `false` is wrong; a `TokenBudget` on the **input** is outside every checkpoint, so the verdict is
-  the same on both sides of the restore. The first two rows need **opposite** answers after the
-  *same* rollback, which is why no fact carried across it can serve both and why this is a reading
-  rather than a carrier — planting the monotone trip counter in its place, the simplest carrier that
-  does survive a restore, reports `at_scanner_stop() == true` over a restored state that hands the
-  very next call a token. A consumer that speculates reads this **where the failure is produced**,
-  inside the closure or through the guard, or puts the bound on the input. Section 5 of
-  `tokora/tests/root_loop_trip_witness.rs` drives all three wrappers over all three placements, and
-  measures what the wrong one costs: a root loop that files a report every turn and never advances
-  the cursor at all.
+  **What it is not is "what the next call would do", and the contract now says so.** The gate
+  drains a **cached** token before it consults either fact, and the budget half is durable and
+  non-positional — so with a lookahead's tokens still waiting at the front this answers `true`
+  while `try_expect_or_stop` hands one of them out. Measured: a `TokenBudget` of two and a
+  `peek::<U4>` over eight tokens leave the reading `true` and the very next call returning
+  `Ok(Some(_))` (`a_refusal_on_record_still_has_cached_tokens_in_front_of_it`). A `true` means *the
+  stream is truncated*, never *stop draining*.
+
+  **And it is narrowly a live query, which two other public contracts take out from under a
+  caller.** `state_mut`/`set_state` drop the poison boundary — the documented limit-recovery path —
+  and every speculative wrapper (`try_attempt`, `attempt_parse`, a rollback-on-drop `Transaction`,
+  a raw `restore`) reinstates a checkpoint that predates the trip. Both leave this reading clean
+  while the scanner may still be stopped, so a root loop is left with an ordering obligation —
+  read it before the re-key, and inside the wrapper — that a loop whose elements speculate cannot
+  always meet. `InputRef::scanner_stopped_during_attempt`, in the entry below, is the
+  attempt-relative reading that carries no such obligation.
 
   **Publishing `scanner_trip_snapshot` / `scanner_tripped_during_attempt` would not have closed
   this, and the entry above records why.** `set_state` / `state_mut` re-key the input's
@@ -128,13 +126,82 @@ and will red until they do.
   boundary by a rollback reads clean — the region behind the frontier is replayable, so a loop that
   carries on re-parses a prefix that really is there and re-reaches the stop, but what bounds that
   is the loop **keeping** the prefix, and one whose retry is itself inside a rolling-back wrapper
-  keeps nothing, consumes nothing and does not terminate — and a *met* ceiling whose one-shot probe
-  has not run yet reads clean (only running the lexer separates "would an item be refused" from "is
-  there an item", and answering `true` there would report a fully-parsed document as truncated).
+  keeps nothing, consumes nothing and does not terminate. That is the shape the attempt-relative
+  verdict below closes. And a *met* ceiling whose one-shot probe has not run yet reads clean (only
+  running the lexer separates "would an item be refused" from "is there an item", and answering
+  `true` there would report a fully-parsed document as truncated).
 
-  The `scanner_trip_snapshot` pair stays crate-internal. It answers a different question — *did a
-  trip happen inside the attempt I am judging*, which is what a driver needs — and that question
-  still has the `set_state` false positive.
+  The attempt-relative reading answers a different question — *did a trip happen inside the attempt
+  I am judging, and is it still in force* — and it is the entry directly below. The **raw**
+  `scanner_tripped_during_attempt` beside it stays crate-internal, because the drivers need the
+  event unconditioned by that second clause.
+
+- **`InputRef::scanner_trip_snapshot` / `InputRef::scanner_stopped_during_attempt` — the
+  **attempt-relative** scanner verdict, rollback-safe and recovery-aware** (#311). Take the baseline
+  once per collection, above the loop; read the verdict wherever the failure surfaces. Its baseline
+  is `input::ScannerTripBaseline`, the scanner twin of `input::ResourceTripBaseline`, carrying the
+  same nonce and the same `'closure` brand — a baseline judged against another input panics, and one
+  cannot be stashed and carried into a later handle invocation, which is what would quietly turn the
+  attempt-relative reading into a session-absolute one.
+
+  **It exists because `at_scanner_stop` is a live query and two public contracts take the record
+  away.** `state_mut`/`set_state` drop the poison boundary, and a speculative wrapper restores a
+  checkpoint predating the trip. A loop that must read the verdict *before* its own re-key, and
+  *inside* a wrapper several frames down, has an ordering obligation it cannot always meet.
+
+  **The counter alone was never publishable, and the entry below records why**: it is monotone, so
+  a loop that recovers exactly as documented reads its own finished document as truncated. What
+  closes that is not a second cell ordered against the trip — the design that would have had to
+  settle its own rollback behaviour at every nesting depth — but a second **question**, asked of
+  the present: the trip event, conjoined with the stop still being in force *now*. Being a question
+  rather than a record is what makes it need no ordering and no rollback proof.
+
+  **Two carriers can hold a scanner stop and they clear on opposite terms**, so both are asked. A
+  `TokenBudget` refusal is never cleared — no `Checkpoint` carries the tally, no re-key touches it,
+  and there is no `token_budget_mut` — so for a bound placed there the verdict is durable by
+  construction. A lexer-side trip clears exactly when the installed regime stops refusing.
+
+  **The residue it closes** is the one `at_scanner_stop` names first: a lookahead trips, latches
+  the frontier *ahead* of the committed cursor, and still returns `Ok` with a short window. Every
+  positional witness reads clean there, and stays clean while the cached pre-trip tokens drain,
+  because draining them never carries the cursor to the frontier. This reading is not positional —
+  it asks whether a stop is latched at all — so it answers `true` from the moment the lookahead
+  latched.
+
+  **A `true` is sound rather than conservative.** Both publishers of a scanner trip require an item
+  that exists — `latch_if_limit_tripped` is reached from `classify` about an item the lexer
+  produced, and `settle_met_ceiling` discards its staged stop when `lex()` yields nothing — so a
+  `true` means a real item is refused right now.
+
+  **What it does not answer is named on the method rather than left to be discovered.** A trip
+  inside a speculative wrapper is restored away *together with the tally that took it* — the refund
+  `TokenLimiter` documents as the correct answer for a bound on the committed stream — so both
+  readings correctly report that the scanner can scan again. The loop that keeps redoing that
+  refundable work is a resource-**placement** problem, and `TokenLimiter`'s own documentation names
+  the fix: a bound on *work performed* belongs on the input as a `TokenBudget`, where no rollback
+  reaches it and where this verdict is durable. Telling a refund-to-spent from a refund-to-usable
+  cannot be done from the stored regime — a limit trip is decided *after* a scan and the tripping
+  scan commits nothing, so `*self.state` is always the pre-trip one — and only running the lexer
+  separates them, which would be a **third** `Lexer::lex` site in a layer whose `RESUME_CENSUS`
+  refuses one and would put unbudgeted lexer work behind a public `&self` reader. The case is left
+  open and measured rather than closed by widening that gate.
+
+  **Measured in `tokora/tests/root_loop_trip_witness.rs` section 5**, whose lexer is deliberately
+  not the earlier sections': it holds the crate's own `TokenLimiter` **by value**, which is the
+  placement the `Lexer` determinism clause requires, where `SLexer`'s `Rc<Cell<_>>` tally is that
+  clause's own named violation (*"a shared counter"*) and cannot decide a question about restores.
+  The five-point table — latched ahead, draining, at the frontier, re-keyed, recovered — runs under
+  **both** emitters and answers `(false, true)`, `(false, true)`, `(true, true)`, `(false, false)`,
+  `(false, false)` against `at_scanner_stop`: the first two rows are the gain, and the last two are
+  where a monotone counter would be a permanent false positive.
+
+  **Costs** a nonce comparison and a `u64` comparison; then, only if those say a trip happened, a
+  `bool` load and an `Option::is_some`. No scan, no lookahead fill, no caller code at all.
+
+  The raw `scanner_tripped_during_attempt` stays crate-internal. The drivers need the event
+  **unconditioned** — a driver judging one element must re-raise a trip it caught even where
+  grammar code recovered the regime inside that element, which is precisely the conjunct the public
+  verdict drops.
 
 - **`ErrorContainer::clear`.** `Errors` is now the only door onto its container (#247), so it has
   to serve the removals that door used to reach through `DerefMut`. The method is defaulted
@@ -1956,6 +2023,15 @@ still compile on both revisions. **The fix is the same UFCS**: `MyExt::at_scanne
 `ci/name_collision/` scores its two rows `ok*` for the same narrow reason as the four above (the
 template's consumer takes `&mut self`; tokora's item takes `&self`), which is why this paragraph
 exists rather than the probe's baseline standing in for it.
+
+**`InputRef::scanner_trip_snapshot` and `InputRef::scanner_stopped_during_attempt` are the fourth
+and fifth**, and they are the scanner twins of the descent pair above, so every word of that
+paragraph transfers verbatim — including the part that matters. The paired call passes the baseline
+through inference (`let scan = inp.scanner_trip_snapshot(); … inp.scanner_stopped_during_attempt(scan)`),
+so a consumer whose extension items take `&self` keeps compiling on both revisions with the
+resolution silently switched. **The fix is the same UFCS**: `MyExt::scanner_trip_snapshot(inp)` and
+`MyExt::scanner_stopped_during_attempt(inp, scan)`. `input::ScannerTripBaseline` is a new
+glob-reachable name in `tokora::input` on the same terms as `input::ResourceTripBaseline` above.
 
 #247 removes `Errors`' `DerefMut` and replaces the three legitimate uses it served with inherent
 methods. `Errors` has shipped since 0.7.3 **with no inherent item of its own**, so a consumer who

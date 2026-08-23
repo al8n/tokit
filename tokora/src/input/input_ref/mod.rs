@@ -56,25 +56,48 @@ pub use descent::ResourceTripBaseline;
 /// The baseline half of the **scanner-trip witness**, and the reason the swap with
 /// [`ResourceTripBaseline`] does not compile.
 ///
-/// Crate-internal, like the pair that issues it — [`InputRef::scanner_trip_snapshot`] records why,
-/// and names [`InputRef::at_scanner_stop`] as the public reading a consumer takes instead.
 /// A distinct type rather than a bare `usize` because the two baselines have **opposite**
 /// granularities (this one per collection, the descent one per element) and every site that reads
 /// both takes both, so an argument swap was a plausible boolean and a silent wrong answer. It is
-/// a compile error now. The `'closure` brand its public sibling carries is deliberately absent:
-/// the impl block that issues this one elides the handle lifetime, and the misuse the brand rules
-/// out — a baseline escaping the handle — is not reachable from outside a crate that does not
-/// publish the pair.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ScannerTripBaseline {
+/// a compile error now.
+///
+/// Taken by [`InputRef::scanner_trip_snapshot`] and spent by
+/// [`InputRef::scanner_stopped_during_attempt`], which is the **public** verdict; the raw
+/// event-only reading beside it stays crate-internal, for the reason that method records.
+///
+/// It carries the same two guards its public sibling does, and for the same reasons: a `nonce`, so
+/// a baseline judged against a different input panics rather than answering about a parse that
+/// handle knows nothing about, and a `'closure` brand, so a baseline cannot be stashed and carried
+/// into another handle invocation — which would silently turn the attempt-relative reading into a
+/// session-absolute one. Those guards used to be absent here, justified by the pair being
+/// crate-internal; publishing it is what removed the justification.
+#[derive(Clone, Copy)]
+pub struct ScannerTripBaseline<'closure> {
   /// The counter's value when the baseline was taken.
   count: u64,
+  /// The identity of the input that issued it: the address of that input's scanner-trip slot.
+  /// Distinct inputs are distinct structs at distinct addresses, and the slot is a `u64` so it is
+  /// never zero-sized.
+  nonce: usize,
+  /// Invariant in `'closure`, through the fn-pointer form rather than a bare reference — the
+  /// shape [`ResourceTripBaseline`] documents the measured map for.
+  _brand: PhantomData<fn(&'closure ()) -> &'closure ()>,
+}
+
+/// Prints neither field, and that is the point rather than an omission — the reasoning is
+/// [`ResourceTripBaseline`]'s, verbatim. A derive would render `count`, which is the
+/// session-absolute reading the type exists to make unspellable, and `nonce`, which is the address
+/// of an internal slot.
+impl core::fmt::Debug for ScannerTripBaseline<'_> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str("ScannerTripBaseline")
+  }
 }
 
 #[cfg(test)]
-impl ScannerTripBaseline {
+impl ScannerTripBaseline<'_> {
   /// The raw count, for the in-crate cells that assert exact trip tallies rather than the
-  /// attempt-relative verdict. There is no such door on the public sibling.
+  /// attempt-relative verdict. There is no such door on the public surface.
   #[inline(always)]
   pub(crate) const fn count(self) -> u64 {
     self.count
@@ -956,13 +979,19 @@ where
   ///
   /// # It is a reading of NOW, which is what makes it right across the recovery path
   ///
-  /// It takes no baseline and witnesses no event. It answers *"is a scan from here already
-  /// refused, on the record this input holds?"* — which is the crate's own terminal gate inside
-  /// [`try_expect_or_stop`](Self::try_expect_or_stop), read without consuming: that gate drains a
-  /// cached token first and asks the same two facts only once nothing is waiting, which is exactly
-  /// when the committed cursor and the lex frontier are the same offset. So this never disagrees
-  /// with what the primitive beside it would do. The two facts are the two the scanner itself
-  /// refuses on:
+  /// It takes no baseline and witnesses no event. It answers *"is a stop on record at the
+  /// committed cursor?"* — the same two facts the crate's own terminal gate inside
+  /// [`try_expect_or_stop`](Self::try_expect_or_stop) consults, read without consuming.
+  ///
+  /// **It is not, however, "what that call would do next".** That gate drains a **cached** token
+  /// first and only then consults these facts, and the budget half below is durable and
+  /// *non-positional* — so with a lookahead's tokens still waiting at the front, this answers
+  /// `true` while `try_expect_or_stop` hands one of them out. Measured, not reasoned about: a
+  /// [`TokenBudget`](crate::input::TokenBudget) of two and a `peek::<U4>` over eight tokens leaves
+  /// this reading `true` and the very next `try_expect_or_stop` returning `Ok(Some(_))`
+  /// (`a_refusal_on_record_still_has_cached_tokens_in_front_of_it`). A loop that treats a `true`
+  /// as *"stop draining"* rather than as *"the stream is truncated"* therefore drops tokens that
+  /// are already lexed and paid for. The two facts are the two the scanner itself refuses on:
   ///
   /// - [`TokenBudgetTally::refused_an_item`](crate::input::TokenBudgetTally::refused_an_item) — the
   ///   input-layer budget's recorded refusal. No [`Checkpoint`](crate::input::Checkpoint) carries
@@ -997,40 +1026,41 @@ where
   /// rejecting emitter's ordinary-looking `Err` with nothing left on the input to read, and this
   /// answers `false`.
   ///
-  /// **That is not one wrong answer to repair, because the right answer there is not one answer.**
-  /// It depends on where the scanner bound lives, and the only thing that knows is `L::State`:
+  /// **That `false` is not wrong about the input — it is the wrong question for the caller.** The
+  /// [`Lexer`](crate::Lexer) contract requires limit accounting to derive entirely from source,
+  /// offset and [`State`](crate::state::State), and
+  /// [`TokenLimiter`](crate::state::token_tracker::TokenLimiter) documents the consequence from the
+  /// other side: a restore reinstalls the saved tally, *everything spent after it is given back*,
+  /// because an abandoned speculation's tokens are not in the committed stream. So after that
+  /// rollback a scan from the restored cursor really does yield a token, and this reading says so
+  /// correctly. What the caller has lost is not the state of the input but the **history of the
+  /// attempt**: the wrapper's next turn re-derives the identical trip, and a root loop reading only
+  /// this one files a report every turn without ever advancing the cursor.
   ///
-  /// - **by value in the state**, the placement
-  ///   [`TokenLimiter`](crate::state::token_tracker::TokenLimiter) documents — the restore
-  ///   reinstalls the saved tally, *everything spent after it is given back*, and an abandoned
-  ///   speculation's tokens are not in the committed stream. The stop really is gone, and `false`
-  ///   is the **right** answer;
-  /// - **reachable from the state rather than held in it** — a shared cell, an atomic, a global.
-  ///   The restore hands back a clone that still points at the spent tally, so the very next scan
-  ///   trips again: the stop is still in force and `false` is the **wrong** answer;
-  /// - **on the input**, as a [`TokenBudget`](crate::input::TokenBudget). No `Checkpoint` carries
-  ///   its tally, so the refusal — and this reading of it — survives every rollback at every depth.
+  /// The loop that keeps redoing refundable work is a resource-**placement** problem, and it is
+  /// named with its fix below. What *this* method does not answer, and
+  /// [`scanner_stopped_during_attempt`](Self::scanner_stopped_during_attempt) does, is the other
+  /// residue in this list: a stop latched **ahead** of the committed cursor by a lookahead, which
+  /// every positional reading — this one included — is blind to. **This method stays the narrow
+  /// live query**: is a stop on record *here*, now.
   ///
-  /// The first two rows need **opposite** answers after the *same* restore, so no fact carried
-  /// across that restore can serve both, at any placement: what separates them is `L::State`
-  /// itself, which is precisely the thing the restore puts back. What a consumer that speculates
-  /// does instead is itself a placement rather than a discipline, and there are two:
+  /// One bound belongs on neither of them but on the caller's choice of where to put it. A
+  /// [`TokenBudget`](crate::input::TokenBudget) on the **input** is outside every
+  /// [`Checkpoint`](crate::input::Checkpoint), so its refusal — and this reading of it — survives
+  /// any rollback; that is the placement for a bound on *work performed*, which is where
+  /// `TokenLimiter`'s own documentation sends it. A tally the state merely **points at** — a shared
+  /// counter, an ambient global — is not a third option: the [`Lexer`](crate::Lexer) determinism
+  /// clause names it as a contract violation, and the input layer's behaviour under one is
+  /// unspecified-but-bounded rather than a case either reading owes an answer to.
   ///
-  /// - **read this where the failure is produced** — inside the closure, or through the guard,
-  ///   before the wrapper decides. The record is there; the rollback is what discards it, together
-  ///   with everything else the attempt did;
-  /// - or **put the scanner bound on the input**, which is what
-  ///   [`TokenBudget`](crate::input::TokenBudget) is for and what
-  ///   [`TokenLimiter`](crate::state::token_tracker::TokenLimiter)'s own documentation ends on: a
-  ///   bound on *work performed* belongs where no rollback reaches, because work an attempt
-  ///   performed and then rolled back was still performed.
-  ///
-  /// Measured in `tests/root_loop_trip_witness.rs` — the three rows are
-  /// `every_speculative_wrapper_restores_a_checkpoint_that_predates_the_trip`,
-  /// `a_by_value_state_bound_makes_the_same_false_the_right_answer` and
-  /// `an_input_side_bound_outlives_every_one_of_the_three_rollbacks`, each driven through all
-  /// three wrappers; what the wrong placement costs is
-  /// `the_verdict_read_after_the_rollback_leaves_the_loop_without_progress`.
+  /// Measured in `tests/root_loop_trip_witness.rs` section 5:
+  /// `every_speculative_wrapper_restores_a_checkpoint_that_predates_the_trip` drives all three
+  /// wrappers over a conforming limiter,
+  /// `an_input_side_bound_outlives_every_one_of_the_three_rollbacks` is the `TokenBudget` row,
+  /// `the_attempt_relative_verdict_answers_where_the_positional_reading_is_blind` is the
+  /// five-point table the two readings differ in, and
+  /// `a_state_side_bound_under_speculation_is_refunded_and_neither_reading_closes_it` measures the
+  /// loop that neither reading ends and the placement that does.
   ///
   /// # What a `false` does not promise
   ///
@@ -1042,9 +1072,10 @@ where
   ///   reads clean there. Lexing *strictly before* the frontier still proceeds, so a loop that
   ///   carries on re-parses a prefix that really is there and re-reaches the stop — but what bounds
   ///   it is the loop **keeping** that prefix. One whose retry is itself inside a rolling-back
-  ///   wrapper keeps nothing and consumes nothing, and then does not terminate at all; a root loop
-  ///   needs its own no-progress guard for the same reason every collection driver in this crate
-  ///   has one;
+  ///   wrapper keeps nothing and consumes nothing, and then does not terminate at all — which is
+  ///   the shape [`scanner_stopped_during_attempt`](Self::scanner_stopped_during_attempt) exists
+  ///   for, and which a root loop otherwise needs its own no-progress guard against, for the same
+  ///   reason every collection driver in this crate has one;
   /// - **a met ceiling with the one-shot probe unspent.** A budget of `N` over a document of `N`
   ///   items has met its ceiling and refused nothing, and *"would an item be refused?"* is not
   ///   *"is there an item?"* — only running the lexer separates them, which is what the probe is
@@ -1100,145 +1131,6 @@ where
   #[inline(always)]
   pub(crate) fn latched_during_attempt(&self, since: &Option<L::Offset>) -> bool {
     self.poison_boundary.is_some() && *self.poison_boundary != *since
-  }
-
-  /// Snapshots the session's **scanner-trip counter** — how many times the scanner has tripped a
-  /// lexer resource limit in this input session — for a rollback-proof terminality witness.
-  ///
-  /// The scanner twin of [`trip_snapshot`](Self::trip_snapshot), used identically: take the
-  /// baseline once per attempt, hand it back to
-  /// [`scanner_tripped_during_attempt`](Self::scanner_tripped_during_attempt) when judging that
-  /// attempt.
-  ///
-  /// **This, and not the poison boundary beside it, is what a recovery gate judges a scanner stop
-  /// with.** The latch is a lineage memo: a [`Checkpoint`](crate::input::Checkpoint) carries it
-  /// and a restore copies it back, so comparing it across a rollback compares a restored value
-  /// against what it was restored to. Reading it inside the attempt fixes one level and the level
-  /// below reopens it — grammar code that catches a stop inside an inner
-  /// [`try_attempt`](Self::try_attempt) has that rollback erase the latch before an outer gate
-  /// looks. This counter is outside the rollback set entirely and is therefore depth-independent.
-  ///
-  /// # Per COLLECTION, where the descent baseline is per ELEMENT
-  ///
-  /// The two facts decay differently, so their baselines belong at different units and neither can
-  /// be derived from the other. A descent trip that grammar code caught and parsed past stops
-  /// being true of the input; a spent scanner budget does not — the token stream ends where it
-  /// ended, and every attempt after it reads a view the stop truncated. So this baseline is taken
-  /// **once per collection**, above the loop, where hoisting the descent one would be the defect:
-  /// taken per element it is re-read after the trip an earlier element caught, and *element 1
-  /// tripped and accepted, element 2 declines* then concludes cleanly over a spent budget. That
-  /// asymmetry is why the two baselines are two **types**: the swap does not compile, in either
-  /// direction, at any of the sites that take both.
-  ///
-  /// # Why this pair is NOT public, where the descent pair is
-  ///
-  /// It was published for one round and withdrawn before release, and the reason is a second
-  /// public contract it cannot see. [`set_state`](Self::set_state) and
-  /// [`state_mut`](Self::state_mut) re-key the input's forward-scanning facts, and dropping the
-  /// poison boundary there is **the documented limit-recovery path** — swap in a fresh or
-  /// bigger-budget state and scanning resumes past the old boundary. Neither touches this counter,
-  /// which is monotone and never cleared. So a loop doing exactly what the section above
-  /// prescribes — one baseline, taken above the loop — can trip, recover through the documented
-  /// path, read the rest of the document and reach a genuine end of input with this witness still
-  /// answering `true`, rejecting a fully recovered parse as truncated. Measured, not reasoned
-  /// about: an eight-token source under a scan budget of three, recovered with `set_state`,
-  /// consumed all eight and the witness still said tripped.
-  ///
-  /// That is correct use under two conflicting public contracts rather than caller misuse, and
-  /// making the verdict account for a state-regime recovery is a change to this crate's terminal
-  /// law — a recovery generation ordered against the trip, in a cell whose own rollback behaviour
-  /// has to be settled — which every one of the twelve collection drivers, the recovery gate and
-  /// `skip_then_retry` would inherit. That is a design round, not a visibility change, so the pair
-  /// stays crate-internal until it has had one.
-  ///
-  /// # What a consumer reads instead, and why it is not this
-  ///
-  /// [`at_scanner_stop`](Self::at_scanner_stop) is the public scanner verdict, and it is a reading
-  /// of **now** rather than a comparison against a baseline: the input-layer budget's recorded
-  /// refusal, or the poison boundary at the committed cursor. That is what lets it be published
-  /// where this pair cannot be. It goes clean across the `set_state` recovery, because the boundary
-  /// dies with the regime that owned it and there is nothing left to read — where this counter,
-  /// being monotone, keeps answering `true` over a document the recovery finished. Planting the
-  /// counter reading in its place reds
-  /// `a_documented_widening_leaves_the_witness_reporting_a_finished_document`, at `Err(Eot)` for an
-  /// `Ok(7)`: a fully recovered document reported as truncated.
-  ///
-  /// It answers the **rejecting-emitter** path this pair exists for, and answers it without a
-  /// baseline. A rejecting (fail-fast) emitter reports a lexer-resource trip by returning the value
-  /// its `From<<L::Token as Token>::Error>` builds, and `scan_with(..)?` propagates that value from
-  /// **inside** [`try_expect_or_stop`](Self::try_expect_or_stop), before the call can reach the arm
-  /// that raises a terminal stop; no care in the grammar's
-  /// [`MaybeTerminal`](crate::error::MaybeTerminal) repairs that, because nothing on the path is
-  /// terminal-marked to delegate to. The **boundary is latched anyway** — inside the crate's
-  /// terminal predicate, ahead of the diagnostic ever being offered to the emitter — so the stop is
-  /// on record when the rejection arrives, and the live reading finds it.
-  /// `tokora/tests/root_loop_trip_witness.rs` section 4 is the measurement, including the growth
-  /// the reading removes: without it a re-keying root loop files one diagnostic per remaining
-  /// token, at three document lengths.
-  ///
-  /// [`try_expect_or_stop`](Self::try_expect_or_stop) still covers **the declining exits** and is
-  /// still the primitive to build a decline on: its contract is that a terminal stop is an error
-  /// and never a decline, and it reads the same live boundary. What it cannot do is speak on the
-  /// path where the emitter's `Err` overtakes it, which is why the verdict above exists beside it.
-  ///
-  /// None of that changes this pair's own answer or its visibility. An **attempt-relative** verdict
-  /// is a different question from a live one — this one is what a *driver* judging one element or
-  /// one speculative parse needs, where the live reading is what a *root loop* holding an `Err`
-  /// needs — and the `set_state` false positive above is the reason it stays where it is.
-  ///
-  /// Costs one `u64` load per attempt — one machine word on a 64-bit target, two on a 32-bit one
-  /// — and no scan, no lookahead fill and no token commit reads it. Unlike its descent twin this
-  /// baseline is taken **once per collection** rather than per element, so the 32-bit cost lands
-  /// once per driver rather than once per element.
-  #[inline(always)]
-  pub(crate) const fn scanner_trip_snapshot(&self) -> ScannerTripBaseline {
-    ScannerTripBaseline {
-      count: *self.scanner_trips,
-    }
-  }
-
-  /// Whether the **scanner tripped a resource limit during the attempt** that took `since` as its
-  /// [`scanner_trip_snapshot`](Self::scanner_trip_snapshot) baseline.
-  ///
-  /// The depth-proof input-side witness for scanner terminality, read by the recovery gate beside
-  /// [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal) and
-  /// [`tripped_during_attempt`](Self::tripped_during_attempt). It answers where the error value
-  /// cannot: a *rejecting* emitter reports a scanner trip by returning the value its
-  /// `From<<L::Token as Token>::Error>` builds, and nothing on that path constructs an
-  /// [`UnexpectedEnd`](crate::error::UnexpectedEnd) for
-  /// [`into_terminal`](crate::error::UnexpectedEnd::into_terminal) to mark.
-  ///
-  /// It is not the only thing that answers there any more, and it is not the public one:
-  /// [`at_scanner_stop`](Self::at_scanner_stop) reads the same fact **live** — no baseline, no
-  /// placement — which is what makes it publishable where this is not. The two are different
-  /// questions, not two spellings of one: this is *did a trip happen inside the attempt I am
-  /// judging*, which is what a driver needs; that is *is the scanner stopped here now*, which is
-  /// what a root loop holding an `Err` needs.
-  ///
-  /// **Attempt-relative, not session-absolute**, and a **count** rather than a flag — the same two
-  /// disciplines [`tripped_during_attempt`](Self::tripped_during_attempt) documents at length, for
-  /// the same two reasons. Its granularity floor is the same as well: this witnesses that *a* trip
-  /// happened while the attempt ran, not that the `Err` in hand *is* that trip, so a unit that
-  /// catches a trip and then fails ordinarily is re-raised. It fails closed, never open — with the
-  /// one exception [`scanner_trip_snapshot`](Self::scanner_trip_snapshot) records, which is a
-  /// state-regime recovery it cannot see, and which is why that pair is crate-internal.
-  ///
-  /// Its baseline's granularity is **not** the descent one's: see
-  /// [`scanner_trip_snapshot`](Self::scanner_trip_snapshot), which is per *collection* where the
-  /// descent baseline is per *element*.
-  ///
-  /// Costs one `u64` load and a comparison.
-  ///
-  /// **When it runs is not this doc's to state**, and the only thing worth adding here is that it
-  /// is not the same answer as its twin's.
-  /// [`tripped_during_attempt`](Self::tripped_during_attempt) carries the one copy of that model,
-  /// derived from every call site in the crate; this verdict is its **own column** in that table,
-  /// differing from the descent column in both the order it is evaluated in and which closer
-  /// classes reach it. Read the values there rather than here — a copy of them here is how the
-  /// three previous versions of that model each went stale.
-  #[inline(always)]
-  pub(crate) const fn scanner_tripped_during_attempt(&self, since: ScannerTripBaseline) -> bool {
-    *self.scanner_trips == super::TRIP_COUNTER_EXHAUSTED || *self.scanner_trips != since.count
   }
 
   /// The **token budget** this parse's lexer produces items against: the ceiling, and what has

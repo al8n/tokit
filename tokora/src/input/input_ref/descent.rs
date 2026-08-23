@@ -921,6 +921,336 @@ where
     *self.resource_trips == crate::input::TRIP_COUNTER_EXHAUSTED
       || *self.resource_trips != since.count
   }
+
+  /// Snapshots the session's **scanner-trip counter** — how many times the scanner has tripped a
+  /// lexer resource limit in this input session — for a rollback-proof terminality witness.
+  ///
+  /// The scanner twin of [`trip_snapshot`](Self::trip_snapshot), used identically: take the
+  /// baseline once per **collection**, hand it back to
+  /// [`scanner_stopped_during_attempt`](Self::scanner_stopped_during_attempt) when judging that
+  /// attempt. The crate's own drivers spend it on the raw, unconditioned
+  /// `scanner_tripped_during_attempt` instead, which stays private for the reason that verdict's
+  /// docs give.
+  ///
+  /// **This, and not the poison boundary beside it, is what a recovery gate judges a scanner stop
+  /// with.** The latch is a lineage memo: a [`Checkpoint`](crate::input::Checkpoint) carries it
+  /// and a restore copies it back, so comparing it across a rollback compares a restored value
+  /// against what it was restored to. Reading it inside the attempt fixes one level and the level
+  /// below reopens it — grammar code that catches a stop inside an inner
+  /// [`try_attempt`](Self::try_attempt) has that rollback erase the latch before an outer gate
+  /// looks. This counter is outside the rollback set entirely and is therefore depth-independent.
+  ///
+  /// # Per COLLECTION, where the descent baseline is per ELEMENT
+  ///
+  /// The two facts decay differently, so their baselines belong at different units and neither can
+  /// be derived from the other. A descent trip that grammar code caught and parsed past stops
+  /// being true of the input; a spent scanner budget does not — the token stream ends where it
+  /// ended, and every attempt after it reads a view the stop truncated. So this baseline is taken
+  /// **once per collection**, above the loop, where hoisting the descent one would be the defect:
+  /// taken per element it is re-read after the trip an earlier element caught, and *element 1
+  /// tripped and accepted, element 2 declines* then concludes cleanly over a spent budget. That
+  /// asymmetry is why the two baselines are two **types**: the swap does not compile, in either
+  /// direction, at any of the sites that take both.
+  ///
+  /// # The monotone counter alone is not publishable, and this is why
+  ///
+  /// [`set_state`](Self::set_state) and [`state_mut`](Self::state_mut) re-key the input's
+  /// forward-scanning facts, and dropping the poison boundary there is **the documented
+  /// limit-recovery path** — swap in a fresh or bigger-budget state and scanning resumes past the
+  /// old boundary. Neither touches this counter, which is monotone and never cleared. So a loop
+  /// doing exactly what the section above prescribes — one baseline, taken above the loop — can
+  /// trip, recover through the documented path, read the rest of the document and reach a genuine
+  /// end of input with the raw event still answering `true`, rejecting a fully recovered parse as
+  /// truncated. Measured, not reasoned about: an eight-token source under a scan budget of three,
+  /// recovered with `set_state`, consumed all eight and the witness still said tripped.
+  ///
+  /// That is correct use under two conflicting public contracts rather than caller misuse. What
+  /// closes it is **not** a second cell ordered against the trip — the design that had to settle
+  /// its own rollback behaviour at every nesting depth — but a second *question*, asked of the
+  /// regime that is installed now: [`scanner_stopped_during_attempt`](Self::scanner_stopped_during_attempt)
+  /// is this event **and** [`Lexer::check`](crate::Lexer::check) still refusing, and that is the
+  /// public pair. The raw event stays crate-internal because the drivers need it unconditioned:
+  /// a driver judging one element must re-raise a trip it caught even where grammar code recovered
+  /// the regime inside that element, which is precisely the conjunct the public verdict drops.
+  ///
+  /// # The two public readings beside this one, and which question each answers
+  ///
+  /// [`at_scanner_stop`](Self::at_scanner_stop) is the **positional** reading: is a stop on record
+  /// *at the committed cursor*, now. It takes no baseline, it goes clean across a `set_state`
+  /// recovery because the boundary dies with the regime that owned it — and it also goes clean
+  /// across a speculative wrapper's rollback, because that restores a checkpoint predating the
+  /// trip. Planting this monotone counter in its place reds
+  /// `a_documented_widening_leaves_the_witness_reporting_a_finished_document`, at `Err(Eot)` for an
+  /// `Ok(7)`: a fully recovered document reported as truncated.
+  ///
+  /// [`scanner_stopped_during_attempt`](Self::scanner_stopped_during_attempt) is the
+  /// **attempt-relative** reading, and it is this counter conjoined with a stop still being
+  /// latched — positionally unqualified, which is how it answers the lookahead residue the
+  /// positional reading is blind to. The latch supplies what the counter alone gets wrong at a
+  /// recovery, since both state-surgery doors drop it. Neither half is publishable on its own,
+  /// which is why the raw event is still not.
+  ///
+  /// It answers the **rejecting-emitter** path this pair exists for, and answers it without a
+  /// baseline. A rejecting (fail-fast) emitter reports a lexer-resource trip by returning the value
+  /// its `From<<L::Token as Token>::Error>` builds, and `scan_with(..)?` propagates that value from
+  /// **inside** [`try_expect_or_stop`](Self::try_expect_or_stop), before the call can reach the arm
+  /// that raises a terminal stop; no care in the grammar's
+  /// [`MaybeTerminal`](crate::error::MaybeTerminal) repairs that, because nothing on the path is
+  /// terminal-marked to delegate to. The **boundary is latched anyway** — inside the crate's
+  /// terminal predicate, ahead of the diagnostic ever being offered to the emitter — so the stop is
+  /// on record when the rejection arrives, and the live reading finds it.
+  /// `tokora/tests/root_loop_trip_witness.rs` section 4 is the measurement, including the growth
+  /// the reading removes: without it a re-keying root loop files one diagnostic per remaining
+  /// token, at three document lengths.
+  ///
+  /// [`try_expect_or_stop`](Self::try_expect_or_stop) still covers **the declining exits** and is
+  /// still the primitive to build a decline on: its contract is that a terminal stop is an error
+  /// and never a decline, and it reads the same live boundary. What it cannot do is speak on the
+  /// path where the emitter's `Err` overtakes it, which is why the verdict above exists beside it.
+  ///
+  /// None of that changes this pair's own answer or its visibility. An **attempt-relative** verdict
+  /// is a different question from a live one — this one is what a *driver* judging one element or
+  /// one speculative parse needs, where the live reading is what a *root loop* holding an `Err`
+  /// needs — and the `set_state` false positive above is the reason it stays where it is.
+  ///
+  /// Costs one `u64` load per attempt — one machine word on a 64-bit target, two on a 32-bit one
+  /// — and no scan, no lookahead fill and no token commit reads it. Unlike its descent twin this
+  /// baseline is taken **once per collection** rather than per element, so the 32-bit cost lands
+  /// once per driver rather than once per element.
+  #[inline(always)]
+  pub fn scanner_trip_snapshot(&self) -> ScannerTripBaseline<'closure> {
+    ScannerTripBaseline {
+      count: *self.scanner_trips,
+      nonce: self.scanner_trip_nonce(),
+      _brand: PhantomData,
+    }
+  }
+
+  /// The identity of **this** input, for [`ScannerTripBaseline`]'s nonce: the address of the
+  /// scanner-trip slot it borrows.
+  ///
+  /// The same derivation the descent baseline's `trip_nonce` uses, off this witness's own cell.
+  /// Two simultaneously-live inputs are distinct structs at distinct addresses and the slot is a
+  /// `u64`, so it is never zero-sized and the two can never collide.
+  #[inline(always)]
+  fn scanner_trip_nonce(&self) -> usize {
+    core::ptr::from_ref(&*self.scanner_trips).addr()
+  }
+
+  /// Whether the **scanner tripped a resource limit during the attempt** that took `since` as its
+  /// [`scanner_trip_snapshot`](Self::scanner_trip_snapshot) baseline.
+  ///
+  /// The depth-proof input-side witness for scanner terminality, read by the recovery gate beside
+  /// [`MaybeTerminal::is_terminal`](crate::error::MaybeTerminal) and
+  /// [`tripped_during_attempt`](Self::tripped_during_attempt). It answers where the error value
+  /// cannot: a *rejecting* emitter reports a scanner trip by returning the value its
+  /// `From<<L::Token as Token>::Error>` builds, and nothing on that path constructs an
+  /// [`UnexpectedEnd`](crate::error::UnexpectedEnd) for
+  /// [`into_terminal`](crate::error::UnexpectedEnd::into_terminal) to mark.
+  ///
+  /// It is not the only thing that answers there any more, and it is not the public one:
+  /// [`at_scanner_stop`](Self::at_scanner_stop) reads the same fact **live** — no baseline, no
+  /// placement — which is what makes it publishable where this is not. The two are different
+  /// questions, not two spellings of one: this is *did a trip happen inside the attempt I am
+  /// judging*, which is what a driver needs; that is *is the scanner stopped here now*, which is
+  /// what a root loop holding an `Err` needs.
+  ///
+  /// **Attempt-relative, not session-absolute**, and a **count** rather than a flag — the same two
+  /// disciplines [`tripped_during_attempt`](Self::tripped_during_attempt) documents at length, for
+  /// the same two reasons. Its granularity floor is the same as well: this witnesses that *a* trip
+  /// happened while the attempt ran, not that the `Err` in hand *is* that trip, so a unit that
+  /// catches a trip and then fails ordinarily is re-raised. It fails closed, never open — with the
+  /// one exception [`scanner_trip_snapshot`](Self::scanner_trip_snapshot) records, which is a
+  /// state-regime recovery it cannot see, and which is why that pair is crate-internal.
+  ///
+  /// Its baseline's granularity is **not** the descent one's: see
+  /// [`scanner_trip_snapshot`](Self::scanner_trip_snapshot), which is per *collection* where the
+  /// descent baseline is per *element*.
+  ///
+  /// Costs one `u64` load and a comparison.
+  ///
+  /// **When it runs is not this doc's to state**, and the only thing worth adding here is that it
+  /// is not the same answer as its twin's.
+  /// [`tripped_during_attempt`](Self::tripped_during_attempt) carries the one copy of that model,
+  /// derived from every call site in the crate; this verdict is its **own column** in that table,
+  /// differing from the descent column in both the order it is evaluated in and which closer
+  /// classes reach it. Read the values there rather than here — a copy of them here is how the
+  /// three previous versions of that model each went stale.
+  ///
+  /// # Panics
+  ///
+  /// If `since` came from a different input than `self`.
+  #[inline(always)]
+  pub(crate) fn scanner_tripped_during_attempt(
+    &self,
+    since: ScannerTripBaseline<'closure>,
+  ) -> bool {
+    assert!(
+      since.nonce == self.scanner_trip_nonce(),
+      "ScannerTripBaseline came from a different input than the one judging it. A baseline is \
+       only meaningful against its own input's counter; comparing it here would answer about a \
+       parse this handle knows nothing about. Take the baseline from the same handle that reads \
+       the verdict."
+    );
+    *self.scanner_trips == crate::input::TRIP_COUNTER_EXHAUSTED
+      || *self.scanner_trips != since.count
+  }
+
+  /// Whether the **scanner is stopped for the attempt** that took `since` as its
+  /// [`scanner_trip_snapshot`](Self::scanner_trip_snapshot) baseline: a trip was recorded while
+  /// that attempt ran, **and** a stop is still latched.
+  ///
+  /// This is the public **attempt-relative** scanner verdict.
+  /// [`at_scanner_stop`](Self::at_scanner_stop) beside it is the **positional** one — is a stop on
+  /// record *at the committed cursor*, now — and the two are not two spellings of one question.
+  ///
+  /// ```text
+  /// loop {
+  ///   let scan = inp.scanner_trip_snapshot();      // per COLLECTION, above the loop
+  ///   match definition(inp) {
+  ///     Ok(true)  => {}
+  ///     Ok(false) => return Ok(()),
+  ///     Err(e) => {
+  ///       if e.is_terminal() || inp.scanner_stopped_during_attempt(scan) {
+  ///         return Err(e);                         // the document is over
+  ///       }
+  ///       report();
+  ///     }
+  ///   }
+  /// }
+  /// ```
+  ///
+  /// # The residue it closes: a stop latched AHEAD of the cursor
+  ///
+  /// An element's own lookahead ([`peek`](Self::peek), [`peek_one`](Self::peek_one)) can trip,
+  /// latch the frontier *ahead* of the committed cursor, and still return `Ok` with a short
+  /// window. Every positional witness reads clean there while the stop is live and already
+  /// diagnosed — that is the first residue [`at_scanner_stop`](Self::at_scanner_stop) names, and
+  /// it stays clean as the cached pre-trip tokens drain, because draining them does not carry the
+  /// cursor to the frontier. This reading is **not positional**: it asks whether a stop is latched
+  /// at all, so it answers `true` from the moment the lookahead latched.
+  ///
+  /// Measured as rows 1 and 2 of
+  /// `the_attempt_relative_verdict_answers_where_the_positional_reading_is_blind`, under both
+  /// emitters: `(at_scanner_stop, this) == (false, true)`.
+  ///
+  /// # The conjunct is the whole design, and it is what makes publishing possible
+  ///
+  /// A carrier that only records the **event** is a permanent false positive: the counter is
+  /// monotone, nothing clears it, and a loop that recovers exactly as this crate documents then
+  /// reads its own finished document as truncated. That is what kept the raw pair crate-internal,
+  /// and a recovery *generation* — a second cell ordered against the trip — is the design that
+  /// would have had to settle its own rollback behaviour at every nesting depth to fix it.
+  ///
+  /// The second conjunct is no such cell. It is the state the crate already keeps, asked in the
+  /// present tense, and both public state-surgery doors clear it as a side effect of what they
+  /// already do.
+  ///
+  /// # Which carrier is still in force, and what clears each
+  ///
+  /// The counter records that *a* scanner trip happened; it does not record **which** of the two
+  /// carriers took it, so both are asked. They clear on opposite terms, and that asymmetry is the
+  /// contract rather than an implementation detail:
+  ///
+  /// - a [`TokenBudget`](crate::input::TokenBudget) refusal —
+  ///   [`TokenBudgetTally::refused_an_item`](crate::input::TokenBudgetTally::refused_an_item) — is
+  ///   **never** cleared. No [`Checkpoint`](crate::input::Checkpoint) carries the tally, no re-key
+  ///   touches it, and there is no `token_budget_mut` to lower it. For a bound placed there the
+  ///   verdict is durable by construction, at any depth, across every rollback;
+  /// - a **lexer-side** trip is carried by the poison boundary, and clears exactly where that
+  ///   boundary dies: [`set_state`](Self::set_state) and [`state_mut`](Self::state_mut), which is
+  ///   the documented limit-recovery path, and a [`Checkpoint`](crate::input::Checkpoint) restore
+  ///   whose saved boundary is `None`.
+  ///
+  /// # Why a `true` is sound
+  ///
+  /// Both publishers of a scanner trip require an item that **exists** —
+  /// `latch_if_limit_tripped` is reached from `classify` about an item the lexer produced, and
+  /// `settle_met_ceiling` discards its staged stop without publishing when `lexer.lex()` yields
+  /// nothing. So a `true` means a real item was refused and the record of it is still standing.
+  ///
+  /// The **granularity floor** its raw half documents is unchanged: this witnesses that *a* trip
+  /// happened while the attempt ran, not that the `Err` in hand **is** that trip. A unit that
+  /// catches a trip, does not recover the regime, and then fails ordinarily is re-raised as a
+  /// stop. It fails closed, never open.
+  ///
+  /// # What it does NOT answer, and why
+  ///
+  /// **A trip inside a speculative wrapper that rolled back.**
+  /// [`try_attempt`](Self::try_attempt), [`attempt_parse`](Self::attempt_parse) and a
+  /// rollback-on-drop [`Transaction`] restore a checkpoint that predates the trip, so the boundary
+  /// comes back as `None` and this reads clean. The *event* survives — the counter is outside the
+  /// rollback set — but the second conjunct does not, and that is not a defect of the conjunct:
+  /// the same restore reinstates the tally the checkpoint saved, which is the refund
+  /// [`TokenLimiter`](crate::state::token_tracker::TokenLimiter) documents as *the correct answer*
+  /// for a bound on the committed stream. After that rollback the scanner really can scan again,
+  /// and both readings say so correctly.
+  ///
+  /// What is left over is a **loop** that keeps redoing refundable work: it trips, rolls back, and
+  /// retries from the state it just failed in, never advancing. That is a resource-**placement**
+  /// problem, and `TokenLimiter`'s own documentation names the fix — a bound on *work performed*
+  /// belongs on the input, as a [`TokenBudget`](crate::input::TokenBudget), where no rollback
+  /// reaches it and where this verdict is durable. Measured both ways in
+  /// `a_state_side_bound_under_speculation_is_refunded_and_neither_reading_closes_it`.
+  ///
+  /// Telling *"the tally was refunded to a spent state"* from *"the tally was refunded to a
+  /// usable one"* cannot be done from the stored regime, because a limit trip is decided **after**
+  /// a scan and the tripping scan commits nothing — so `*self.state` is always the pre-trip regime
+  /// and answers `Ok` over a scanner that is stopped. Only running the lexer separates them, which
+  /// is the same sentence `settle_met_ceiling`'s one-shot probe is built on; and a probe here would
+  /// be a **third** `Lexer::lex` site in this layer, which `RESUME_CENSUS`
+  /// (`resume_census_one_pairing_site`) refuses — *"a third invocation is a third way to produce an
+  /// item"* — and which would put unbudgeted lexer work behind a public `&self` reader. So the case
+  /// is left open and named rather than closed by widening that gate.
+  ///
+  /// # Measured
+  ///
+  /// `tokora/tests/root_loop_trip_witness.rs` section 5.
+  /// `the_attempt_relative_verdict_answers_where_the_positional_reading_is_blind` is the five-point
+  /// table — latched ahead, draining, at the frontier, re-keyed, recovered — under **both**
+  /// emitters; `a_baseline_taken_after_the_trip_does_not_charge_this_attempt_with_it` pins that it
+  /// is attempt-relative and not *"is this scanner spent"*;
+  /// `an_input_side_bound_outlives_every_one_of_the_three_rollbacks` is the durable carrier through
+  /// all three wrappers.
+  ///
+  /// # Costs
+  ///
+  /// A nonce comparison and a `u64` comparison — the raw event's whole cost — then, only if those
+  /// say a trip happened, a `bool` load and an `Option::is_some`. No scan, no lookahead fill, no
+  /// caller code at all.
+  ///
+  /// # Panics
+  ///
+  /// If `since` came from a different input than `self`.
+  #[inline]
+  pub fn scanner_stopped_during_attempt(&self, since: ScannerTripBaseline<'closure>) -> bool {
+    // The event first, and it is also the short circuit: no trip inside the attempt means no
+    // verdict, and nothing below is read. This ordering is the cost claim.
+    if !self.scanner_tripped_during_attempt(since) {
+      return false;
+    }
+    // Two carriers can hold a scanner stop and the trip counter does not say which one did, so
+    // both are asked. The budget's is the durable one and is asked first.
+    self.token_budget.refused_an_item() || self.stop_still_latched()
+  }
+
+  /// Whether a terminal scanner stop is latched **anywhere**, positionally unqualified — the
+  /// recovery-aware conjunct of
+  /// [`scanner_stopped_during_attempt`](Self::scanner_stopped_during_attempt).
+  ///
+  /// Deliberately not [`reached_boundary`](Self::reached_boundary): the whole residue this verdict
+  /// closes is a boundary latched *ahead* of the committed cursor by a lookahead, which every
+  /// positional reading is blind to. Presence, not position — the same fact
+  /// `latched_during_attempt` compares for the drivers' absence exits, without the comparison.
+  ///
+  /// Being the boundary rather than a cell of its own is what makes it recovery-aware for free:
+  /// [`set_state`](Self::set_state) and [`state_mut`](Self::state_mut) drop it, and that *is* the
+  /// documented limit-recovery path, so nothing has to decide separately what counts as a
+  /// recovery.
+  #[inline]
+  fn stop_still_latched(&self) -> bool {
+    self.poison_boundary.is_some()
+  }
 }
 
 /// One live level of recursive descent, held for the length of the frame that entered it.
