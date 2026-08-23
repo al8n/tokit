@@ -211,20 +211,49 @@ and will red until they do.
   guarded on `at_scanner_stop` or `scanner_stopped_during_attempt` retries the identical scan and can
   burn unbounded CPU on attacker-controlled input.
 
-  **The fact that separates that from a real recovery is committed progress, not the scanner's
-  current regime** — which is why the arm needs no scan, no regime probe, and no third `Lexer::lex`
-  site. The trip event survives the rollback because the counter is outside the rollback set, and
-  the committed position is observable without lexing. `Stalled` is *a trip, no stop in force, no
-  committed progress*, and it is **sound rather than heuristic**: the `Lexer` determinism clause
-  says every scan-visible result derives entirely from source, offset and `State`, so an unmoved
-  committed offset means a repeat reproduces the trip.
+  **The partition is the `Lexer` determinism clause's own three inputs, and none of them needs a
+  scan to read** — so no regime probe and no third `Lexer::lex` site. `Stalled` is *a trip, no stop
+  in force, and all three inputs unchanged*: the source (constant), an offset **equal** to the
+  capture's, and the same lexer regime. It is sound rather than heuristic, because that is exactly
+  the clause's own precondition for a scan reproducing its result.
 
-  **`Stalled` cannot be permanent.** It clears the moment the parse commits anything past where the
-  attempt began — which is exactly what a successful recovery produces — and it is a claim about the
-  attempt that just ran, so a caller that answers it by installing a fresh regime has changed the
-  third input and the *next* capture judges that. Measured:
+  Each way the third clause can fail is its **own arm** rather than folded into the stall, because
+  they license opposite decisions. `ReKeyed` — the documented `set_state` / `state_mut` recovery
+  replaced the regime, typically **without moving the committed end**; calling that a stall would
+  reject a parse the fresh regime can finish. `Rewound` — a rollback landed *below* the capture, so
+  the capture describes a position the input has left and supports no claim about the one it is at.
+  `Progressed` — the parse committed past the capture. Testing "did not advance" instead of
+  "equals" folded both of the first two into `Stalled`; the enum is `#[non_exhaustive]`, so the
+  arms are additive.
+
+  **A `State` cannot be compared** — it is bounded `Debug + Clone` — so the crate now names one:
+  `Input::regime`, a generation stamped by `install_rekey`, the sole state-surgery site, and
+  **checkpointed** so a restore puts a regime's name back with the regime. There are exactly three
+  writers of `*state` — a commit (which moves the offset), a restore (which carries its own saved
+  generation) and a surgery — so **equal generation ∧ equal offset ⇒ equal `State`**. The
+  destructuring census in `input::lineage` classifies the new cell and is what keeps that trichotomy
+  from silently gaining a fourth member.
+
+  **`Stalled` cannot be permanent.** It clears when either input it tests moves: a commit past the
+  capture (`Progressed`) or a regime replacement (`ReKeyed`). Measured:
   `a_recovery_answering_the_stall_makes_progress_and_the_next_attempt_says_so` sees `[Stalled]` —
   one turn, not one per turn — and reads the whole document.
+
+  **The capture is affine, and that is load-bearing rather than tidy.** `ScannerAttempt` is not
+  `Clone` and `scanner_outcome` consumes it, because a reusable capture recreates the retry the arm
+  exists to close: hoist one out of the loop — the natural thing to write — and once any turn
+  retains progress past its `at`, every later rolled-back turn still compares *greater* than that
+  stale offset and reads `Progressed`. Three doctests pin it: the one-capture control compiles, and
+  spending one twice or cloning it does not. It is also why the pair is two types —
+  `ScannerTripBaseline` must stay `Copy` for the drivers that read a baseline more than once per
+  element loop, and because the split already existed for the `L::Offset`, making the attempt half
+  one-shot costs the driver half nothing.
+
+  **`InputRef::judge_scanner`** is the shape a root loop should reach for: it takes the capture,
+  runs the closure and returns `(ScannerOutcome, T)`, binding capture, judged work and verdict into
+  one turn, so neither placement exists to get wrong. The pair stays public as the lower-level
+  surface; affinity is what stops it being misused, and a capture held across turns and spent late
+  costs one stale verdict rather than a loop.
 
   The capture holds `ScannerTripBaseline` rather than restating it, so the nonce and the `'closure`
   brand carry over; it adds `span().end()`, **committed consumption**, never a cache-front reading —
@@ -2082,6 +2111,11 @@ UFCS spellings are `MyExt::scanner_attempt(inp)` and `MyExt::scanner_outcome(inp
 `input::ScannerAttempt` and `input::ScannerOutcome` are new glob-reachable names in `tokora::input`.
 `ScannerOutcome` is `#[non_exhaustive]`, so a downstream `match` must carry a wildcard arm and a
 later arm cannot break it.
+
+**`InputRef::judge_scanner` is the eighth**, on the same terms — `&mut self` this time, so it
+competes at the *same* first step the `inherent_method` template's consumer does; its two rows score
+`loud` rather than `ok*`, which is the counter-control the paragraphs above describe and not an
+exception to them. The UFCS spelling is `MyExt::judge_scanner(inp, f)`.
 
 #247 removes `Errors`' `DerefMut` and replaces the three legitimate uses it served with inherent
 methods. `Errors` has shipped since 0.7.3 **with no inherent item of its own**, so a consumer who

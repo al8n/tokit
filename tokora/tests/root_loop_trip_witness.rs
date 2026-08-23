@@ -104,9 +104,17 @@
 //! shape that is. A trip inside a speculative wrapper is restored away together with the tally
 //! that took it, so every live reading of the input is correctly clean while the caller holds the
 //! trip-derived error at the position the attempt began — a loop guarded on a boolean retries the
-//! identical scan for ever. `ScannerOutcome::Stalled` is that state named: a trip, no stop in
-//! force, and no committed progress. It needs no scan, because the fact that separates a futile
-//! retry from a real recovery is progress, not the scanner's current regime.
+//! identical scan for ever.
+//!
+//! The outcome partitions that by the `Lexer` determinism clause's own three inputs. `Stalled`
+//! means all three are unchanged — source, an offset **equal** to the capture's, and the same
+//! lexer regime — so a repeat reproduces the trip. Each way that can fail has its own arm rather
+//! than being folded in: `ReKeyed` when the documented `set_state`/`state_mut` recovery replaced
+//! the regime without moving the offset, `Rewound` when a rollback landed below the capture,
+//! `Progressed` when the parse committed past it. The capture is **affine** — one capture judges
+//! one attempt — because a reusable one recreates the very retry the arm exists to close, and
+//! `InputRef::judge_scanner` binds capture, work and verdict into a single turn so neither
+//! placement exists to get wrong.
 //!
 //! Its lexer is deliberately **not** the earlier sections': `SLexer`'s tally lives behind an
 //! `Rc<Cell<_>>`, which the `Lexer` determinism clause names as a contract violation — *"a shared
@@ -1418,7 +1426,7 @@ where
 fn after_rollback<'inp, 'closure, L, Ctx>(
   inp: &mut InputRef<'inp, 'closure, L, Ctx>,
   since: ScannerTripBaseline<'closure>,
-  attempt: &ScannerAttempt<'inp, 'closure, L>,
+  attempt: ScannerAttempt<'inp, 'closure, L>,
 ) -> AcrossRollback
 where
   L: tokora::Lexer<'inp>,
@@ -1457,7 +1465,7 @@ macro_rules! probe_bodies {
       let scan = inp.scanner_trip_snapshot();
       let attempt = inp.scanner_attempt();
       let _ = inp.try_attempt(drain_recording);
-      Ok(after_rollback(inp, scan, &attempt))
+      Ok(after_rollback(inp, scan, attempt))
     }
 
     /// `attempt_parse`: the same rollback, reached through the three-way vocabulary.
@@ -1472,7 +1480,7 @@ macro_rules! probe_bodies {
       let scan = inp.scanner_trip_snapshot();
       let attempt = inp.scanner_attempt();
       let _ = inp.attempt_parse(|inp| drain_recording(inp).map(ParseAttempt::Accept));
-      Ok(after_rollback(inp, scan, &attempt))
+      Ok(after_rollback(inp, scan, attempt))
     }
 
     /// A rollback-on-drop [`Transaction`]: no verb at all, just the guard going out of scope.
@@ -1492,7 +1500,7 @@ macro_rules! probe_bodies {
         let mut txn = inp.begin();
         let _ = drain_recording(&mut txn);
       }
-      Ok(after_rollback(inp, scan, &attempt))
+      Ok(after_rollback(inp, scan, attempt))
     }
   };
 }
@@ -1819,7 +1827,7 @@ fn the_stall_outcome_ends_a_speculating_loop_the_boolean_cannot() {
         Err(e) => {
           let done = if match_outcome {
             matches!(
-              inp.scanner_outcome(&attempt),
+              inp.scanner_outcome(attempt),
               ScannerOutcome::Stopped | ScannerOutcome::Stalled
             )
           } else {
@@ -1925,7 +1933,7 @@ fn a_recovery_answering_the_stall_makes_progress_and_the_next_attempt_says_so() 
         Ok(true) => parsed += 1,
         Ok(false) => return Ok((parsed, seen)),
         Err(e) => {
-          let outcome = inp.scanner_outcome(&attempt);
+          let outcome = inp.scanner_outcome(attempt);
           seen.push(outcome);
           match outcome {
             // The documented limit recovery, taken in answer to the stall.
@@ -2017,4 +2025,239 @@ fn a_shared_counter_is_the_named_contract_violation_and_this_is_its_consequence(
        divergence the determinism clause exists to keep out of the supported surface"
     );
   }
+}
+
+/// The documented recovery, taken **inside** the judged attempt: a trip, then `set_state`, and no
+/// committed progress between the capture and the reading.
+///
+/// The offset is unmoved, so a predicate testing only *"did the committed end advance"* answers
+/// `Stalled` here — and `Stalled` is a claim that repeating the attempt reproduces the trip, which
+/// is false: the third determinism input was replaced and a retry under the fresh regime succeeds.
+/// [`ScannerOutcome::ReKeyed`] is that transition with a name.
+///
+/// The control below it is the same probe without the recovery, which must still be `Stalled` — so
+/// what the pair pins is the `set_state`, not the shape of the probe.
+///
+/// [`ScannerOutcome::ReKeyed`]: tokora::input::ScannerOutcome::ReKeyed
+#[test]
+fn a_documented_recovery_inside_the_attempt_is_a_re_key_and_not_a_stall() {
+  fn probe<'inp, Ctx>(
+    inp: &mut InputRef<'inp, '_, CLexer<'inp>, Ctx>,
+    recover: bool,
+  ) -> Result<ScannerOutcome, SErr>
+  where
+    Ctx: ParseContext<'inp, CLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, CLexer<'inp>, Error = SErr>,
+  {
+    // Consume up to the ceiling, so the capture below sits exactly where the next scan trips and
+    // nothing is committed between it and the reading.
+    for _ in 0..S_TIGHT {
+      let _ = inp.try_expect_or_stop(|_| true)?;
+    }
+    let attempt = inp.scanner_attempt();
+    // The judged production speculates: it trips, and its rollback takes the latch and the
+    // position back to exactly where the capture was taken. That is the shape in which a stall is
+    // even possible — with the latch standing the answer is `Stopped` and the position never
+    // arises.
+    let _ = inp.try_attempt(|inp| {
+      let _ = inp.try_expect_or_stop(|_| true);
+      Err::<(), SErr>(SErr::Ordinary)
+    });
+    if recover {
+      // The documented limit-recovery path: a regime whose budget is not spent. It replaces the
+      // state, and it moves the committed end by nothing at all.
+      inp.set_state(TokenLimiter::with_limitation(1_000));
+    }
+    Ok(inp.scanner_outcome(attempt))
+  }
+
+  fn recovering<'inp, Ctx>(
+    inp: &mut InputRef<'inp, '_, CLexer<'inp>, Ctx>,
+  ) -> Result<ScannerOutcome, SErr>
+  where
+    Ctx: ParseContext<'inp, CLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, CLexer<'inp>, Error = SErr>,
+  {
+    probe(inp, true)
+  }
+
+  fn plain<'inp, Ctx>(
+    inp: &mut InputRef<'inp, '_, CLexer<'inp>, Ctx>,
+  ) -> Result<ScannerOutcome, SErr>
+  where
+    Ctx: ParseContext<'inp, CLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, CLexer<'inp>, Error = SErr>,
+  {
+    probe(inp, false)
+  }
+
+  let ctx: ParserContext<'_, CLexer<'_>, Fatal<SErr>> = ParserContext::new(Fatal::new());
+  let recovered = Parser::with_parser_and_context(recovering, ctx)
+    .parse_str_with_state(S_SRC, TokenLimiter::with_limitation(S_TIGHT));
+  assert_eq!(
+    recovered,
+    Ok(ScannerOutcome::ReKeyed),
+    "the committed end did not move, and reporting that as a stall would reject a parse the fresh \
+     regime can finish — the regime generation is what tells the two apart"
+  );
+
+  let ctx: ParserContext<'_, CLexer<'_>, Fatal<SErr>> = ParserContext::new(Fatal::new());
+  let stalled = Parser::with_parser_and_context(plain, ctx)
+    .parse_str_with_state(S_SRC, TokenLimiter::with_limitation(S_TIGHT));
+  assert_eq!(
+    stalled,
+    Ok(ScannerOutcome::Stalled),
+    "the identical probe without the recovery: the rollback took the latch and the position back \
+     to the capture and moved no regime, so all three determinism inputs are unmoved and \
+     repeating it reproduces the trip"
+  );
+}
+
+/// A rollback that lands **below** the capture is neither a stall nor progress.
+///
+/// The transaction opens before the capture, so its rollback carries the committed end past the
+/// position the capture describes. A predicate testing *"did the end advance"* folds that into
+/// [`ScannerOutcome::Stalled`] and claims a repetition the capture cannot support — it describes a
+/// position the input has left. Testing **equality** puts it in its own arm.
+///
+/// [`ScannerOutcome::Stalled`]: tokora::input::ScannerOutcome::Stalled
+#[test]
+fn a_rollback_below_the_capture_is_a_rewind_and_not_a_stall() {
+  fn probe<'inp, Ctx>(
+    inp: &mut InputRef<'inp, '_, CLexer<'inp>, Ctx>,
+  ) -> Result<ScannerOutcome, SErr>
+  where
+    Ctx: ParseContext<'inp, CLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, CLexer<'inp>, Error = SErr>,
+  {
+    let attempt = {
+      // The guard's base is HERE, before anything below it runs.
+      let mut txn = inp.begin();
+      // Consume up to the ceiling inside the transaction, so the capture sits above the base.
+      for _ in 0..S_TIGHT {
+        let _ = txn.try_expect_or_stop(|_| true)?;
+      }
+      let attempt = txn.scanner_attempt();
+      // Trips, and commits nothing.
+      let _ = txn.try_expect_or_stop(|_| true);
+      attempt
+      // Dropped without deciding: rolls back to the base, which is below the capture.
+    };
+    Ok(inp.scanner_outcome(attempt))
+  }
+
+  let ctx: ParserContext<'_, CLexer<'_>, Fatal<SErr>> = ParserContext::new(Fatal::new());
+  let out = Parser::with_parser_and_context(probe, ctx)
+    .parse_str_with_state(S_SRC, TokenLimiter::with_limitation(S_TIGHT));
+  assert_eq!(
+    out,
+    Ok(ScannerOutcome::Rewound),
+    "the trip is still counted — the counter is outside the rollback set — but the committed end \
+     is below the capture, so the capture describes a position the input has left"
+  );
+}
+
+/// [`InputRef::judge_scanner`] binds capture, judged work and verdict into one turn, and the loop
+/// written with it ends at the stop having filed nothing — the same result as the hand-placed pair,
+/// with neither placement left to get wrong.
+///
+/// [`InputRef::judge_scanner`]: tokora::InputRef::judge_scanner
+#[test]
+fn the_closure_form_guards_the_same_loop_with_no_placement_to_get_wrong() {
+  fn root<'inp, Ctx>(inp: &mut InputRef<'inp, '_, CLexer<'inp>, Ctx>) -> Result<usize, SErr>
+  where
+    Ctx: ParseContext<'inp, CLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, CLexer<'inp>, Error = SErr>,
+  {
+    let mut parsed = 0usize;
+    loop {
+      let (outcome, element) = inp.judge_scanner(|inp| {
+        inp.try_attempt(|inp| match inp.try_expect_or_stop(|_| true) {
+          Ok(Some(_)) => Ok(true),
+          Ok(None) => Ok(false),
+          Err(e) => Err(e),
+        })
+      });
+      match element {
+        Ok(true) => parsed += 1,
+        Ok(false) => return Ok(parsed),
+        Err(e) => {
+          if e.is_terminal() || matches!(outcome, ScannerOutcome::Stopped | ScannerOutcome::Stalled)
+          {
+            return Err(e);
+          }
+          note_report();
+          if reports() >= S_REPORT_CAP {
+            return Ok(parsed);
+          }
+        }
+      }
+    }
+  }
+
+  reset();
+  let ctx: ParserContext<'_, CLexer<'_>, Fatal<SErr>> = ParserContext::new(Fatal::new());
+  let tight = Parser::with_parser_and_context(root, ctx)
+    .parse_str_with_state(S_SRC, TokenLimiter::with_limitation(S_TIGHT));
+  assert_eq!(tight, Err(SErr::Limit), "ends on the first futile turn");
+  assert_eq!(reports(), 0, "and files nothing");
+
+  reset();
+  let ctx: ParserContext<'_, CLexer<'_>, Fatal<SErr>> = ParserContext::new(Fatal::new());
+  let roomy = Parser::with_parser_and_context(root, ctx)
+    .parse_str_with_state(S_SRC, TokenLimiter::with_limitation(1_000));
+  assert_eq!(
+    roomy,
+    Ok(S_UNITS),
+    "and reads the whole document with room to spare"
+  );
+  assert_eq!(reports(), 0, "with nothing to file");
+}
+
+/// A recovery the attempt's own rollback **undoes** is not a recovery, and the regime generation
+/// says so because a [`Checkpoint`] carries it.
+///
+/// This is the objection that sank the original "recovery generation" design: a cell outside the
+/// rollback set counts a `set_state` a rollback undid as a recovery, and the loop then carries on
+/// against a regime that is spent again. Naming the regime inside the restore group answers it —
+/// the restore puts the generation back with the `State` it names, so the capture and the input
+/// agree again and the outcome is [`ScannerOutcome::Stalled`], not
+/// [`ScannerOutcome::ReKeyed`].
+///
+/// [`Checkpoint`]: tokora::input::Checkpoint
+/// [`ScannerOutcome::Stalled`]: tokora::input::ScannerOutcome::Stalled
+/// [`ScannerOutcome::ReKeyed`]: tokora::input::ScannerOutcome::ReKeyed
+#[test]
+fn a_recovery_the_rollback_undoes_is_a_stall_and_not_a_re_key() {
+  fn probe<'inp, Ctx>(
+    inp: &mut InputRef<'inp, '_, CLexer<'inp>, Ctx>,
+  ) -> Result<ScannerOutcome, SErr>
+  where
+    Ctx: ParseContext<'inp, CLexer<'inp>>,
+    Ctx::Emitter: Emitter<'inp, CLexer<'inp>, Error = SErr>,
+  {
+    for _ in 0..S_TIGHT {
+      let _ = inp.try_expect_or_stop(|_| true)?;
+    }
+    let attempt = inp.scanner_attempt();
+    let _ = inp.try_attempt(|inp| {
+      // Trips…
+      let _ = inp.try_expect_or_stop(|_| true);
+      // …and recovers, INSIDE the speculation.
+      inp.set_state(TokenLimiter::with_limitation(1_000));
+      Err::<(), SErr>(SErr::Ordinary)
+    });
+    // The rollback undid the recovery along with everything else the attempt did.
+    Ok(inp.scanner_outcome(attempt))
+  }
+
+  let ctx: ParserContext<'_, CLexer<'_>, Fatal<SErr>> = ParserContext::new(Fatal::new());
+  let out = Parser::with_parser_and_context(probe, ctx)
+    .parse_str_with_state(S_SRC, TokenLimiter::with_limitation(S_TIGHT));
+  assert_eq!(
+    out,
+    Ok(ScannerOutcome::Stalled),
+    "the regime the caller installed is gone with the rollback that discarded it, so all three \
+     determinism inputs are back where the capture found them and a repeat reproduces the trip"
+  );
 }

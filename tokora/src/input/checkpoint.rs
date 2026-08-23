@@ -125,6 +125,14 @@ pub struct Checkpoint<'a, 'closure, L: Lexer<'a>> {
   /// the restored frontier stays paired with it; a saved `None` re-lexes and re-trips
   /// if the limit is reached again.
   pub(crate) poison_boundary: Option<L::Offset>,
+  /// The **regime generation** at save time (see [`Input::regime`](crate::input::Input)).
+  ///
+  /// In the same restore group as the boundary above and the `state` field, and for one reason: a
+  /// restore that puts a regime back must put back its name. Without it a state surgery performed
+  /// after the save and then rolled back would leave the input holding the *saved* `State` under a
+  /// *post-surgery* generation, and every reader that compares the two would call an identical
+  /// regime a different one.
+  pub(crate) regime: u64,
   /// The cache's monotone push count at save time.
   ///
   /// The cache memoizes token *values* but not the scan *side effects* of the region a
@@ -163,6 +171,7 @@ impl<'a, 'closure, L: Lexer<'a>> Checkpoint<'a, 'closure, L> {
     emitted_error_end: L::Offset,
     front_reported_end: Option<L::Offset>,
     poison_boundary: Option<L::Offset>,
+    regime: u64,
     cache_pushes: u64,
     #[cfg(all(
       debug_assertions,
@@ -180,6 +189,7 @@ impl<'a, 'closure, L: Lexer<'a>> Checkpoint<'a, 'closure, L> {
       emitted_error_end,
       front_reported_end,
       poison_boundary,
+      regime,
       cache_pushes,
       #[cfg(all(
         debug_assertions,

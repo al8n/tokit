@@ -721,6 +721,36 @@ where
   /// [the law](crate::input#terminal-beats-incomplete-and-they-never-substitute) for why the ranking
   /// is total, and what an attacker could do without it.
   poison_boundary: Option<L::Offset>,
+  /// The identity of the **lexer regime** installed now — a generation stamped on every state
+  /// surgery, and the third determinism input made comparable.
+  ///
+  /// [`Lexer`](crate::Lexer)'s determinism clause says a scan is decided by source, offset and
+  /// [`State`](crate::state::State). The first two are readable; the third is not — `State` is
+  /// bounded `Debug + Clone` and nothing more, so no handle can compare two of them. This counts
+  /// the one class of event that replaces a regime rather than advancing it.
+  ///
+  /// **Three writers of `*state`, and only one of them lands here.** A *commit* threads the lexer's
+  /// own post-token state forward and advances the committed span with it; a *restore* installs a
+  /// checkpoint's saved pair; a *surgery* ([`InputRef::set_state`], [`InputRef::state_mut`])
+  /// replaces the regime outright through `install_rekey`, which is the sole bump site. So
+  /// **equal generation and equal committed offset together imply an equal `State`**: a commit
+  /// would have moved the offset, and a restore carries the generation of the regime it puts back.
+  /// That pair is what [`InputRef::scanner_outcome`] tests, and it is why it can say a repeat
+  /// reproduces a trip without running one.
+  ///
+  /// **A lineage memo, not a session fact**: a [`Checkpoint`] carries it and a restore pure-copies
+  /// it back, exactly like the `poison_boundary` above — because it describes the same thing that
+  /// boundary does, the regime that produced it, and a restore that puts back a regime must put
+  /// back its name. Saturating, like the trip counters, and for the same reason: an equality test
+  /// needs consecutive values to differ, and at the ceiling every regime compares equal, which is
+  /// the conservative direction (a stall reads as a re-key, so a loop carries on rather than
+  /// stopping early).
+  ///
+  /// Not in `ThroughEntry`. The sync family's positional rewind restores a `State` it captured
+  /// inside one scan call, and no surgery door is reachable from there — the predicates it hands
+  /// out take `&Token`, never `&mut InputRef` — so the generation cannot have moved across the
+  /// pair it rewinds.
+  regime: u64,
   /// The **recursion budget** this parse descends against: live descent depth plus the limit it
   /// may not exceed, configured at [`with_state_and_context`](Self::with_state_and_context) from
   /// [`InputContext::with_recursion_limiter`] and defaulting to
@@ -1123,6 +1153,8 @@ where
       emitted_error_end: L::Offset::default(),
       front_reported_end: None,
       poison_boundary: None,
+      // Generation zero: the regime the caller handed in, before any surgery has replaced it.
+      regime: 0,
       // The caller's budget, moved in as given. Every constructor of `RecursionLimiter` starts
       // at depth 0, so this is depth 0 for every context the crate or a caller can build without
       // deliberately walking one deeper first — and a deliberately-deep one is a caller stating
@@ -1286,6 +1318,9 @@ where
       emitted_error_end: &mut self.emitted_error_end,
       front_reported_end: &mut self.front_reported_end,
       poison_boundary: &mut self.poison_boundary,
+      // The regime generation, borrowed beside the boundary it shares a restore group with: a
+      // surgery through this handle replaces the regime for the session, not for the handle.
+      regime: &mut self.regime,
       // The recursion budget, borrowed like the ground-truth cells above rather than snapshotted
       // like `finality`: a handle's frames raise and lower it, and the value must outlive them.
       recursion: &mut self.recursion,

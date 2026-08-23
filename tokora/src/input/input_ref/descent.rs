@@ -1240,6 +1240,9 @@ where
   pub fn scanner_attempt(&self) -> ScannerAttempt<'inp, 'closure, L> {
     ScannerAttempt {
       trips: self.scanner_trip_snapshot(),
+      // The third determinism input's name. Read before the position for no reason but order;
+      // both are plain reads off cells this handle borrows.
+      regime: *self.regime,
       // PROGRESS_CENSUS — committed consumption, never the cache-front reading. A lookahead fill
       // moves that reading across skipped trivia without consuming anything, and a no-progress
       // guard counting it would call a stalled attempt progress. Same rule, and the same reason,
@@ -1279,26 +1282,60 @@ where
   /// state are exactly where the attempt began. A loop guarded on the boolean retries the identical
   /// scan and can burn unbounded CPU on attacker-controlled input.
   ///
-  /// The fact that separates that from a real recovery is not the scanner's current regime — which
-  /// is why no probe of the regime, and no scan, is needed — but **committed progress**. The trip
-  /// event survives the rollback because the counter is outside the rollback set, and the committed
-  /// position is observable without lexing. A trip with no committed progress after it is
-  /// [`Stalled`](ScannerOutcome::Stalled); a trip with progress is
-  /// [`Progressed`](ScannerOutcome::Progressed).
+  /// The facts that separate that from a real recovery are the determinism clause's own inputs, and
+  /// none of them needs a scan to read. The trip event survives the rollback because the counter is
+  /// outside the rollback set; the committed offset is observable directly; and the regime has a
+  /// name (`Input::regime`) because a `State` cannot be compared. A trip
+  /// after which all three are unchanged is [`Stalled`](ScannerOutcome::Stalled), and each way that
+  /// can fail is its own arm.
   ///
-  /// # Why `Stalled` is sound rather than a guess
+  /// # The partition, and why it is exhaustive and disjoint
   ///
-  /// The [`Lexer`](crate::Lexer) contract's determinism clause is the proof: *every scan-visible
+  /// Four facts are read, in this order, first match winning:
+  ///
+  /// 1. **did a trip happen inside the attempt** — the session counter against the capture's, which
+  ///    is outside the rollback set. `no` ⇒ [`NoTrip`](ScannerOutcome::NoTrip).
+  /// 2. **is a stop in force now** — the input budget's durable refusal, or a latched frontier.
+  ///    `yes` ⇒ [`Stopped`](ScannerOutcome::Stopped).
+  /// 3. **is the lexer regime the one the capture saw** — the
+  ///    `Input::regime` generation. `no` ⇒
+  ///    [`ReKeyed`](ScannerOutcome::ReKeyed).
+  /// 4. **where is the committed end relative to the capture's** — an `Ord` comparison, whose three
+  ///    outcomes are [`Progressed`](ScannerOutcome::Progressed),
+  ///    [`Stalled`](ScannerOutcome::Stalled) and [`Rewound`](ScannerOutcome::Rewound).
+  ///
+  /// **Disjoint** because the arms are the branches of a single `if`/`if`/`if`/`match` chain — no
+  /// input reaches two of them. **Exhaustive** because the first three are booleans whose `false`
+  /// falls through and the fourth is a total trichotomy on [`Ord`], so every combination of the
+  /// four facts lands in exactly one arm.
+  ///
+  /// # Why `Stalled` is sound rather than a guess, and why it is the EQUAL arm
+  ///
+  /// The [`Lexer`](crate::Lexer) contract's determinism clause is the theorem: *every scan-visible
   /// result … must derive **entirely** from the source, the offset being lexed at, and the lexer
-  /// `State`*. `Stalled` says the trip happened and the committed offset is unmoved, so re-running
-  /// the attempt varies none of the three — the same trip is reproduced. It is a claim about the
-  /// attempt that just ran, so it stays true even for a caller that goes on to install a fresh
-  /// regime: that caller has changed the third input, and the *next* attempt's capture is what
-  /// judges it.
+  /// `State`*. So a repeat reproduces a trip exactly when all three are unchanged, and `Stalled`
+  /// has to test all three:
   ///
-  /// The one lexer shape it does not hold for is the one the determinism clause already excludes —
-  /// a tally the state merely points at, whose behaviour under a restore is
-  /// unspecified-but-bounded.
+  /// - the **source** never changes;
+  /// - the **offset** is tested for *equality*, not for "did not advance". A rewind also fails to
+  ///   advance, and a capture describing a position the input has left supports no claim about the
+  ///   one it is at now — that is [`Rewound`](ScannerOutcome::Rewound), and folding it into a stall
+  ///   would be a repetition claim with nothing behind it;
+  /// - the **`State`** cannot be compared — it is bounded `Debug + Clone` and nothing more — so the
+  ///   generation stands in for it, and the standing-in is exact rather than approximate. There are
+  ///   exactly three writers of `*state`: a **commit**, which threads the lexer's post-token state
+  ///   forward and moves the committed span with it; a **restore**, which installs a checkpoint's
+  ///   saved pair *and* the generation that names it; and a **surgery**
+  ///   ([`set_state`](Self::set_state) / [`state_mut`](Self::state_mut)) through `install_rekey`,
+  ///   the sole bump site. Given that trichotomy, **equal generation ∧ equal committed offset ⇒
+  ///   equal `State`**: a commit would have moved the offset, a surgery would have moved the
+  ///   generation, and a restore carries both from the same saved pair. The write census in
+  ///   `input::lineage` is what keeps the trichotomy from silently gaining a fourth member.
+  ///
+  /// The predicate therefore matches the theorem rather than approximating it. An earlier version
+  /// tested only "not advanced", which was strictly weaker in both directions — it called a
+  /// documented `state_mut` recovery a stall (rejecting a recoverable parse) and swallowed a rewind
+  /// into the same arm.
   ///
   /// # What clears each arm
   ///
@@ -1308,11 +1345,14 @@ where
   ///   `None` boundary. Unchanged from
   ///   [`scanner_stopped_during_attempt`](Self::scanner_stopped_during_attempt), which is this
   ///   arm.
-  /// - [`Stalled`](ScannerOutcome::Stalled) clears the moment the parse **commits** anything past
-  ///   where the attempt began — which is exactly what a successful recovery produces, and the
-  ///   only thing that distinguishes one from a retry. It cannot be permanent: an attempt that
-  ///   consumes even one token is [`Progressed`](ScannerOutcome::Progressed), and an attempt with
-  ///   no trip in it is [`NoTrip`](ScannerOutcome::NoTrip) whatever the position did.
+  /// - [`Stalled`](ScannerOutcome::Stalled) clears on **either** of the two inputs it tests
+  ///   moving: the parse commits anything past where the attempt began
+  ///   ([`Progressed`](ScannerOutcome::Progressed)), or the regime is replaced
+  ///   ([`ReKeyed`](ScannerOutcome::ReKeyed)). Both are what a successful recovery produces, and
+  ///   between them they are the only things that distinguish a recovery from a retry. It cannot
+  ///   be permanent: an attempt that consumes even one token, or that takes the documented
+  ///   recovery door, is a different arm, and an attempt with no trip in it is
+  ///   [`NoTrip`](ScannerOutcome::NoTrip) whatever the position did.
   ///
   /// # It is not a substitute for placing the bound where the work is
   ///
@@ -1332,19 +1372,72 @@ where
   ///
   /// If `since` came from a different input than `self`.
   #[inline]
-  pub fn scanner_outcome(&self, since: &ScannerAttempt<'inp, 'closure, L>) -> ScannerOutcome {
+  pub fn scanner_outcome(&self, since: ScannerAttempt<'inp, 'closure, L>) -> ScannerOutcome {
+    // ── the partition, first match wins; see the doc's exhaustive/disjoint argument ──
     if !self.scanner_tripped_during_attempt(since.trips) {
       return ScannerOutcome::NoTrip;
     }
     if self.token_budget.refused_an_item() || self.stop_still_latched() {
       return ScannerOutcome::Stopped;
     }
-    // Strictly advanced, not merely different: a restore can put the committed end back BELOW the
-    // capture, and moving backwards is not progress.
-    if self.span().end_ref() > &since.at {
-      return ScannerOutcome::Progressed;
+    // The THIRD determinism input, before either position test: a replaced regime is the strongest
+    // statement about repeatability there is, and it holds whatever the offset did.
+    if *self.regime != since.regime {
+      return ScannerOutcome::ReKeyed;
     }
-    ScannerOutcome::Stalled
+    // Trichotomy on `Offset: Ord`, so the three arms below are exhaustive and disjoint by
+    // construction. `Stalled` is the EQUAL arm and nothing else — "not advanced" would fold a
+    // rewind into it and claim a repetition the capture cannot support.
+    match self.span().end_ref().cmp(&since.at) {
+      core::cmp::Ordering::Greater => ScannerOutcome::Progressed,
+      core::cmp::Ordering::Less => ScannerOutcome::Rewound,
+      core::cmp::Ordering::Equal => ScannerOutcome::Stalled,
+    }
+  }
+
+  /// Judges one turn: takes the capture, runs `f`, and hands back its value beside the
+  /// [`ScannerOutcome`] for exactly that span of the parse.
+  ///
+  /// **The shape a retrying root loop should reach for**, because it is the one that cannot be
+  /// misplaced. [`scanner_attempt`](Self::scanner_attempt) and
+  /// [`scanner_outcome`](Self::scanner_outcome) are the lower-level surface, and the capture being
+  /// affine already makes a *reused* one a compile error — but a capture can still be taken outside
+  /// a loop and spent late, which costs one stale verdict. Here capture, judged work and verdict
+  /// are bound into a single turn, so neither placement exists to get wrong.
+  ///
+  /// ```text
+  /// loop {
+  ///   let (outcome, parsed) = inp.judge_scanner(|inp| definition(inp));
+  ///   match parsed {
+  ///     Ok(true)  => {}
+  ///     Ok(false) => return Ok(()),
+  ///     Err(e) => match outcome {
+  ///       ScannerOutcome::Stopped | ScannerOutcome::Stalled => return Err(e),
+  ///       _ => report(),
+  ///     },
+  ///   }
+  /// }
+  /// ```
+  ///
+  /// The outcome comes **first** in the tuple so a caller destructuring it cannot quietly drop it
+  /// the way a trailing element invites; `f`'s value is returned untouched, including an `Err`,
+  /// because judging is not deciding.
+  ///
+  /// It adds no rollback and no guard of its own — `f` receives the same handle, and whatever it
+  /// does with [`try_attempt`](Self::try_attempt) or a [`Transaction`] is its own business. The
+  /// only thing this owns is the pair of readings around it.
+  ///
+  /// Costs exactly [`scanner_attempt`](Self::scanner_attempt) plus
+  /// [`scanner_outcome`](Self::scanner_outcome): one `L::Offset::clone` and, on an attempt that did
+  /// not trip, a nonce and a `u64` comparison.
+  #[inline]
+  pub fn judge_scanner<F, T>(&mut self, f: F) -> (ScannerOutcome, T)
+  where
+    F: FnOnce(&mut Self) -> T,
+  {
+    let attempt = self.scanner_attempt();
+    let value = f(self);
+    (self.scanner_outcome(attempt), value)
   }
 
   /// Whether a terminal scanner stop is latched **anywhere**, positionally unqualified — the

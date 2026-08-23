@@ -111,20 +111,47 @@ pub enum ScannerOutcome {
   /// A trip happened, and a stop is **still in force**: the input budget has refused an item, or a
   /// terminal frontier is latched. The document is truncated — this is the arm that ends it.
   Stopped,
-  /// A trip happened, no stop is in force any more, and the attempt **committed nothing**.
+  /// A trip happened, no stop is in force, and **all three determinism inputs are unchanged**:
+  /// the source (which never changes), the committed offset (equal to the capture's), and the
+  /// lexer regime (same `Input::regime` generation, which together with the
+  /// equal offset implies an equal [`State`](crate::state::State)).
   ///
   /// The trip was rolled back — by [`try_attempt`](InputRef::try_attempt),
-  /// [`attempt_parse`](InputRef::attempt_parse), a rollback-on-drop
-  /// [`Transaction`] or a raw [`restore`](InputRef::restore) — or re-keyed away by
-  /// [`state_mut`](InputRef::state_mut), and the committed cursor is where it was when the attempt
-  /// began. By the [`Lexer`](crate::Lexer) determinism contract — scanning is a pure function of
-  /// source, offset and [`State`](crate::state::State) — **repeating the attempt from here
-  /// reproduces the same trip**, so a loop that retries without changing the regime cannot
-  /// terminate. It is a statement about *this* attempt, not an instruction: a caller that goes on
-  /// to install a fresh regime has changed the third input and is no longer covered by it.
+  /// [`attempt_parse`](InputRef::attempt_parse), a rollback-on-drop [`Transaction`] or a raw
+  /// [`restore`](InputRef::restore) — and nothing else about the scan's inputs moved. By the
+  /// [`Lexer`](crate::Lexer) determinism contract, *every scan-visible result derives entirely from
+  /// the source, the offset being lexed at, and the lexer `State`*, so **repeating the attempt from
+  /// here reproduces the same trip** and a loop that retries cannot terminate.
+  ///
+  /// It is a statement about *this* attempt, not an instruction. A caller that goes on to install
+  /// a fresh regime has changed the third input, and the next attempt's capture judges that.
   Stalled,
-  /// A trip happened, no stop is in force, and the attempt **committed progress**: the regime was
-  /// recovered, or the trip was caught and parsed past. The stream moved on and a retry is not a
+  /// A trip happened, no stop is in force, and the **lexer regime was replaced** during the
+  /// attempt — [`set_state`](InputRef::set_state) or [`state_mut`](InputRef::state_mut), the
+  /// documented limit-recovery path — without that replacement being rolled back.
+  ///
+  /// Split out of [`Stalled`](Self::Stalled) rather than folded into it because the two license
+  /// opposite decisions: the third determinism input *did* change, so a retry under the new regime
+  /// may well succeed, and reporting this as a stall would reject a recoverable parse. The
+  /// committed offset is not consulted — a re-key that also progressed is still a re-key, and this
+  /// is the stronger statement about repeatability.
+  ///
+  /// Conservative in one direction only: a `state_mut()` whose `&mut` the caller never wrote
+  /// through still lands here, because the generation is stamped by the door and not by the
+  /// mutation. That errs toward *carry on*, never toward a false stop.
+  ReKeyed,
+  /// A trip happened, no stop is in force, the regime is unchanged, and the committed offset is
+  /// **below** the capture — the attempt, or something it called, rewound past where this capture
+  /// was taken.
+  ///
+  /// Reachable through a session point settled below the capture, or a raw
+  /// [`restore`](InputRef::restore) to an older checkpoint. The capture describes a position the
+  /// input has left, so it can say nothing about repeating from the one it is at now: this is
+  /// neither a stall nor progress, and folding it into either would be a claim the capture does
+  /// not support. Take a fresh [`scanner_attempt`](InputRef::scanner_attempt) and judge again.
+  Rewound,
+  /// A trip happened, no stop is in force, the regime is unchanged, and the attempt **committed
+  /// progress**: the trip was caught and parsed past. The stream moved on and a retry is not a
   /// repeat.
   Progressed,
 }
@@ -144,12 +171,86 @@ pub enum ScannerOutcome {
 /// lookahead that filled the cache has consumed nothing, and a no-progress guard that counted it
 /// would call a stalled attempt progress. That is the same rule the collection drivers' own
 /// no-progress guards are censused against (`no_progress_guards_measure_committed_consumption`).
-#[derive(Debug, Clone)]
+/// # Affine: one capture judges one attempt, and cannot judge a second
+///
+/// It is deliberately **not** [`Clone`], and [`InputRef::scanner_outcome`] takes it **by value**.
+/// A borrowing reader over a copyable capture is the same defect the guard exists to close, one
+/// level up: hoist a capture out of the loop — the natural thing to write — and once any turn
+/// retains progress past its `at`, every later rolled-back turn still compares *greater* than that
+/// stale offset and reads [`Progressed`](ScannerOutcome::Progressed). The unbounded retry comes
+/// straight back through the guard meant to stop it. Consuming the capture makes the second reading
+/// a compile error rather than a wrong answer.
+///
+/// That is also why the pair is two types rather than one.
+/// [`ScannerTripBaseline`] must stay [`Copy`]: the collection drivers read their baseline more than
+/// once per element loop, and forcing them to re-take it is the placement defect that type exists
+/// to make hard. The *attempt* has the opposite requirement, and because the split was already
+/// there for the `L::Offset`'s sake, making this half one-shot costs the driver half nothing.
+///
+/// **The control first**, because a `compile_fail` that fails for the wrong reason proves nothing.
+/// One capture judging one attempt compiles, so the scaffolding — the bounds, the borrow of `inp`
+/// — is sound:
+///
+/// ```rust
+/// use tokora::{InputRef, Lexer, ParseContext, input::ScannerOutcome};
+///
+/// fn judge_once<'inp, L, Ctx>(inp: &mut InputRef<'inp, '_, L, Ctx>) -> ScannerOutcome
+/// where
+///   L: Lexer<'inp>,
+///   Ctx: ParseContext<'inp, L>,
+/// {
+///   let attempt = inp.scanner_attempt();
+///   inp.scanner_outcome(attempt)
+/// }
+/// ```
+///
+/// Spend one capture twice — the hoisted-out-of-the-loop shape — and it stops compiling:
+///
+/// ```compile_fail
+/// use tokora::{InputRef, Lexer, ParseContext, input::ScannerOutcome};
+///
+/// fn judge_twice<'inp, L, Ctx>(inp: &mut InputRef<'inp, '_, L, Ctx>) -> ScannerOutcome
+/// where
+///   L: Lexer<'inp>,
+///   Ctx: ParseContext<'inp, L>,
+/// {
+///   let attempt = inp.scanner_attempt();
+///   let _first = inp.scanner_outcome(attempt);
+///   // error[E0382]: use of moved value: `attempt`
+///   inp.scanner_outcome(attempt)
+/// }
+/// ```
+///
+/// And cloning around that does not compile either, because the type has no [`Clone`]:
+///
+/// ```compile_fail
+/// use tokora::{InputRef, Lexer, ParseContext, input::ScannerOutcome};
+///
+/// fn judge_a_clone<'inp, L, Ctx>(inp: &mut InputRef<'inp, '_, L, Ctx>) -> ScannerOutcome
+/// where
+///   L: Lexer<'inp>,
+///   Ctx: ParseContext<'inp, L>,
+/// {
+///   let attempt = inp.scanner_attempt();
+///   // error[E0599]: no method named `clone` found
+///   let copy = attempt.clone();
+///   let _first = inp.scanner_outcome(attempt);
+///   inp.scanner_outcome(copy)
+/// }
+/// ```
+///
+/// A capture **held** across turns and spent late is still possible and still bounded — it is one
+/// stale verdict, not a loop, because spending it consumes it. [`InputRef::judge_scanner`] removes
+/// even that by binding capture, judged work and verdict into a single turn, and is the shape a
+/// root loop should reach for first.
+#[derive(Debug)]
 pub struct ScannerAttempt<'inp, 'closure, L: Lexer<'inp>> {
   /// The trip baseline, carrying the count, the nonce and the brand.
   pub(crate) trips: ScannerTripBaseline<'closure>,
   /// `span().end()` when the attempt began — the committed consumption a stall compares against.
   pub(crate) at: L::Offset,
+  /// The regime generation when the attempt began — the third determinism input, made comparable.
+  pub(crate) regime: u64,
 }
 
 #[cfg(test)]
@@ -232,6 +333,9 @@ where
   /// field for the invariant and the three writers that keep it inductive.
   pub(super) front_reported_end: &'closure mut Option<L::Offset>,
   pub(super) poison_boundary: &'closure mut Option<L::Offset>,
+  /// The regime generation — see [`Input::regime`](super::Input). Borrowed beside the boundary it
+  /// shares a restore group with.
+  pub(super) regime: &'closure mut u64,
   /// The **recursion budget**, borrowed from the owning [`Input`](super::Input) — see that field
   /// for why it is outside the rollback set. Read through [`recursion`](Self::recursion); its
   /// only writer is the [`Descent`] guard [`descend`](Self::descend) hands out.
@@ -818,6 +922,12 @@ where
     // Disarming after the clear instead leaves a window in which the front is gone and the
     // watermark still claims a live report for it. Measured, not hypothesized: with the disarm
     // below the clear, `a_rekey_interrupted_by_caller_code_still_witnesses_itself` fails.
+    // The regime's name changes with the regime. This is the ONE bump site, and it is what makes
+    // "equal generation and equal committed offset" imply an equal `State`: the other two writers
+    // of `*self.state` either advance the offset (a commit) or carry their own saved generation
+    // (a restore). Saturating for the trip counters' reason — an equality test needs consecutive
+    // values to differ, and the ceiling's tie is the conservative direction.
+    *self.regime = self.regime.saturating_add(1);
     let settled = (
       core::mem::replace(self.emitted_error_end, committed),
       // The front-report watermark dies with the regime that lexed its subject. Taken HERE,
@@ -1097,8 +1207,8 @@ where
   ///
   /// A loop that keeps redoing refundable work is detected by
   /// [`scanner_outcome`](Self::scanner_outcome)'s
-  /// [`Stalled`](crate::input::ScannerOutcome::Stalled) arm — a trip with no committed progress
-  /// after it — and bounded by putting the budget on the input. What *this* method does not answer,
+  /// [`Stalled`](crate::input::ScannerOutcome::Stalled) arm — a trip after which none of the
+  /// determinism clause's three inputs moved — and bounded by putting the budget on the input. What *this* method does not answer,
   /// and [`scanner_stopped_during_attempt`](Self::scanner_stopped_during_attempt) does, is the
   /// other residue in this list: a stop latched **ahead** of the committed cursor by a lookahead,
   /// which every positional reading — this one included — is blind to. **This method stays the
@@ -3271,6 +3381,8 @@ where
       emitted_error_end,
       front_reported_end,
       poison_boundary,
+      // A pure `u64` copy, in the same group as the boundary above it.
+      *self.regime,
       cache_pushes,
       #[cfg(all(
         debug_assertions,
@@ -3741,6 +3853,7 @@ where
       emitted_error_end,
       front_reported_end,
       poison_boundary,
+      regime,
       cache_pushes,
       ..
     } = checkpoint;
@@ -3806,6 +3919,9 @@ where
       core::mem::replace(self.front_reported_end, front_reported_end),
       core::mem::replace(self.poison_boundary, poison_boundary),
     );
+    // The regime's name, put back with the regime `install_position` is about to install. A `u64`
+    // store among the other no-caller-code facts; nothing can run between it and the state write.
+    *self.regime = regime;
     let replaced = self.install_position(clamped, spare, state);
 
     // ── PHASE 3 — the one drop site, with the rollback whole. ──
