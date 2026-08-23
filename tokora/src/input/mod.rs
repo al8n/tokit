@@ -285,7 +285,7 @@ pub(crate) const TRIP_COUNTER_EXHAUSTED: u64 = u64::MAX;
 pub(crate) use input_ref::Session;
 pub use input_ref::{
   Balance, Commit, DelimClass, Descent, DropPolicy, Hole, InputRef, ResourceTripBaseline, Rollback,
-  ScannerTripBaseline, Transaction,
+  ScannerAttempt, ScannerOutcome, ScannerTripBaseline, Transaction,
 };
 pub(crate) use lineage::Lineage;
 pub use session::{Budget, PartialSession, RedriveFromBase, ReplayMode, SessionRefusal};

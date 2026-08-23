@@ -1174,34 +1174,22 @@ where
   /// catches a trip, does not recover the regime, and then fails ordinarily is re-raised as a
   /// stop. It fails closed, never open.
   ///
-  /// # What it does NOT answer, and why
+  /// # It is the stop question, and it is NOT a sufficient root-loop guard
   ///
-  /// **A trip inside a speculative wrapper that rolled back.**
+  /// A trip inside a speculative wrapper is restored away *together with the tally that took it*.
   /// [`try_attempt`](Self::try_attempt), [`attempt_parse`](Self::attempt_parse) and a
-  /// rollback-on-drop [`Transaction`] restore a checkpoint that predates the trip, so the boundary
-  /// comes back as `None` and this reads clean. The *event* survives — the counter is outside the
-  /// rollback set — but the second conjunct does not, and that is not a defect of the conjunct:
-  /// the same restore reinstates the tally the checkpoint saved, which is the refund
-  /// [`TokenLimiter`](crate::state::token_tracker::TokenLimiter) documents as *the correct answer*
-  /// for a bound on the committed stream. After that rollback the scanner really can scan again,
-  /// and both readings say so correctly.
+  /// rollback-on-drop [`Transaction`] reinstate the checkpointed state and a pre-trip `None`
+  /// boundary, and for a scanner bound held in the lexer state — the supported placement
+  /// [`TokenLimiter`](crate::state::token_tracker::TokenLimiter) documents — the input-side refusal
+  /// bit is `false` too. This method then answers `false`, **correctly**: the restore reinstated
+  /// the tally the checkpoint saved, which is the refund that type documents as the right answer
+  /// for a bound on the committed stream, so a scan from there really does yield a token.
   ///
-  /// What is left over is a **loop** that keeps redoing refundable work: it trips, rolls back, and
-  /// retries from the state it just failed in, never advancing. That is a resource-**placement**
-  /// problem, and `TokenLimiter`'s own documentation names the fix — a bound on *work performed*
-  /// belongs on the input, as a [`TokenBudget`](crate::input::TokenBudget), where no rollback
-  /// reaches it and where this verdict is durable. Measured both ways in
-  /// `a_state_side_bound_under_speculation_is_refunded_and_neither_reading_closes_it`.
-  ///
-  /// Telling *"the tally was refunded to a spent state"* from *"the tally was refunded to a
-  /// usable one"* cannot be done from the stored regime, because a limit trip is decided **after**
-  /// a scan and the tripping scan commits nothing — so `*self.state` is always the pre-trip regime
-  /// and answers `Ok` over a scanner that is stopped. Only running the lexer separates them, which
-  /// is the same sentence `settle_met_ceiling`'s one-shot probe is built on; and a probe here would
-  /// be a **third** `Lexer::lex` site in this layer, which `RESUME_CENSUS`
-  /// (`resume_census_one_pairing_site`) refuses — *"a third invocation is a third way to produce an
-  /// item"* — and which would put unbudgeted lexer work behind a public `&self` reader. So the case
-  /// is left open and named rather than closed by widening that gate.
+  /// The caller nonetheless holds the trip-derived error with the cursor and state exactly where
+  /// the attempt began, and a loop guarded on this boolean alone retries the identical scan for
+  /// ever. **Match [`scanner_outcome`](Self::scanner_outcome) instead**, whose
+  /// [`Stalled`](crate::input::ScannerOutcome::Stalled) arm is precisely that state; this method is
+  /// its [`Stopped`](crate::input::ScannerOutcome::Stopped) arm and nothing more.
   ///
   /// # Measured
   ///
@@ -1232,6 +1220,131 @@ where
     // Two carriers can hold a scanner stop and the trip counter does not say which one did, so
     // both are asked. The budget's is the durable one and is asked first.
     self.token_budget.refused_an_item() || self.stop_still_latched()
+  }
+
+  /// Captures one attempt's scanner bookkeeping — the trip baseline and the committed position —
+  /// for [`scanner_outcome`](Self::scanner_outcome).
+  ///
+  /// Taken **per attempt**, immediately before the thing being judged runs.
+  /// [`scanner_trip_snapshot`](Self::scanner_trip_snapshot) beside it is the *driver*'s value and
+  /// is taken per collection; the two units are different because the two questions are. *"Is the
+  /// scanner spent"* does not stop being true of a later element, so hoisting that baseline is
+  /// right; *"did **this** attempt trip without committing anything"* is about one attempt and
+  /// nothing else, so hoisting **this** one would compare a later failure against a position many
+  /// elements ago and call every one of them progress.
+  ///
+  /// Costs one `L::Offset::clone` on top of the baseline's `u64` load and nonce derivation. That
+  /// clone is caller code and is the only step here that can unwind; nothing durable is in flight
+  /// on a `&self` read, so there is nothing for it to tear.
+  #[inline]
+  pub fn scanner_attempt(&self) -> ScannerAttempt<'inp, 'closure, L> {
+    ScannerAttempt {
+      trips: self.scanner_trip_snapshot(),
+      // PROGRESS_CENSUS — committed consumption, never the cache-front reading. A lookahead fill
+      // moves that reading across skipped trivia without consuming anything, and a no-progress
+      // guard counting it would call a stalled attempt progress. Same rule, and the same reason,
+      // as the collection drivers' own guards.
+      at: self.span().end_ref().clone(),
+    }
+  }
+
+  /// What the attempt that took `since` as its [`scanner_attempt`](Self::scanner_attempt) capture
+  /// did to the scanner — the **root-loop guard**, and the reading a retrying loop must match on.
+  ///
+  /// ```text
+  /// loop {
+  ///   let att = inp.scanner_attempt();          // per ATTEMPT, at the top of the turn
+  ///   match definition(inp) {                    // may speculate internally
+  ///     Ok(true)  => {}
+  ///     Ok(false) => return Ok(()),
+  ///     Err(e) => match inp.scanner_outcome(&att) {
+  ///       ScannerOutcome::Stopped => return Err(e),   // the document is truncated
+  ///       ScannerOutcome::Stalled => return Err(e),   // retrying would repeat this exactly
+  ///       _ => report(),                              // an ordinary syntax error: file and go on
+  ///     },
+  ///   }
+  /// }
+  /// ```
+  ///
+  /// # Why a boolean could not be this
+  ///
+  /// [`scanner_stopped_during_attempt`](Self::scanner_stopped_during_attempt) answers *"is a stop
+  /// in force"*, and it is **correct** and **not a sufficient loop guard**, because the failure
+  /// that costs most is one where no stop is in force. A failing
+  /// [`try_attempt`](Self::try_attempt) restores the checkpointed state and a pre-trip `None`
+  /// boundary; for a scanner bound held in the lexer state — the supported placement
+  /// [`TokenLimiter`](crate::state::token_tracker::TokenLimiter) documents, not a violating shared
+  /// counter — the input-side refusal bit is `false` as well. Every live reading of the input is
+  /// then correctly clean, the caller nonetheless holds the trip-derived error, and the cursor and
+  /// state are exactly where the attempt began. A loop guarded on the boolean retries the identical
+  /// scan and can burn unbounded CPU on attacker-controlled input.
+  ///
+  /// The fact that separates that from a real recovery is not the scanner's current regime — which
+  /// is why no probe of the regime, and no scan, is needed — but **committed progress**. The trip
+  /// event survives the rollback because the counter is outside the rollback set, and the committed
+  /// position is observable without lexing. A trip with no committed progress after it is
+  /// [`Stalled`](ScannerOutcome::Stalled); a trip with progress is
+  /// [`Progressed`](ScannerOutcome::Progressed).
+  ///
+  /// # Why `Stalled` is sound rather than a guess
+  ///
+  /// The [`Lexer`](crate::Lexer) contract's determinism clause is the proof: *every scan-visible
+  /// result … must derive **entirely** from the source, the offset being lexed at, and the lexer
+  /// `State`*. `Stalled` says the trip happened and the committed offset is unmoved, so re-running
+  /// the attempt varies none of the three — the same trip is reproduced. It is a claim about the
+  /// attempt that just ran, so it stays true even for a caller that goes on to install a fresh
+  /// regime: that caller has changed the third input, and the *next* attempt's capture is what
+  /// judges it.
+  ///
+  /// The one lexer shape it does not hold for is the one the determinism clause already excludes —
+  /// a tally the state merely points at, whose behaviour under a restore is
+  /// unspecified-but-bounded.
+  ///
+  /// # What clears each arm
+  ///
+  /// - [`Stopped`](ScannerOutcome::Stopped) clears where its carrier dies: a
+  ///   [`TokenBudget`](crate::input::TokenBudget) refusal never clears, and a lexer-side latch
+  ///   clears at [`set_state`](Self::set_state) / [`state_mut`](Self::state_mut) or a restore of a
+  ///   `None` boundary. Unchanged from
+  ///   [`scanner_stopped_during_attempt`](Self::scanner_stopped_during_attempt), which is this
+  ///   arm.
+  /// - [`Stalled`](ScannerOutcome::Stalled) clears the moment the parse **commits** anything past
+  ///   where the attempt began — which is exactly what a successful recovery produces, and the
+  ///   only thing that distinguishes one from a retry. It cannot be permanent: an attempt that
+  ///   consumes even one token is [`Progressed`](ScannerOutcome::Progressed), and an attempt with
+  ///   no trip in it is [`NoTrip`](ScannerOutcome::NoTrip) whatever the position did.
+  ///
+  /// # It is not a substitute for placing the bound where the work is
+  ///
+  /// This makes the futile retry **detectable**, which is what a loop needs to stop. It does not
+  /// make the work **bounded** — that is a placement question, and
+  /// [`TokenBudget`](crate::input::TokenBudget) on the input is the answer, because no rollback
+  /// reaches it. A root loop that must hold against hostile input wants both: this to end the loop,
+  /// and the budget to bound what any loop can spend.
+  ///
+  /// # Costs
+  ///
+  /// A nonce comparison, a `u64` comparison, and — only when those say a trip happened — a `bool`
+  /// load, an `Option::is_some`, and one `Offset::Ord` comparison. No scan, no lookahead fill, no
+  /// state clone.
+  ///
+  /// # Panics
+  ///
+  /// If `since` came from a different input than `self`.
+  #[inline]
+  pub fn scanner_outcome(&self, since: &ScannerAttempt<'inp, 'closure, L>) -> ScannerOutcome {
+    if !self.scanner_tripped_during_attempt(since.trips) {
+      return ScannerOutcome::NoTrip;
+    }
+    if self.token_budget.refused_an_item() || self.stop_still_latched() {
+      return ScannerOutcome::Stopped;
+    }
+    // Strictly advanced, not merely different: a restore can put the committed end back BELOW the
+    // capture, and moving backwards is not progress.
+    if self.span().end_ref() > &since.at {
+      return ScannerOutcome::Progressed;
+    }
+    ScannerOutcome::Stalled
   }
 
   /// Whether a terminal scanner stop is latched **anywhere**, positionally unqualified — the

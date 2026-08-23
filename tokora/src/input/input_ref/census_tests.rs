@@ -3414,3 +3414,38 @@ fn posture_census_expected_tokens_closure_is_named_only_where_report_skipped() {
     }
   }
 }
+
+/// PROGRESS_CENSUS — the root-loop guard's capture measures **committed consumption**, never a
+/// cache-front cursor.
+///
+/// The same rule, and the same reason, as the collection drivers'
+/// `every_progress_guard_reads_committed_progress`: a lookahead fill moves the cursor across
+/// skipped trivia without committing anything, so a cursor-keyed capture reads false progress and
+/// turns a stalled attempt into `ScannerOutcome::Progressed` — the one direction that re-opens the
+/// unbounded retry that arm exists to close.
+///
+/// It is a **source** census because the two accessors coincide at every position this crate's own
+/// suites can drive the pair to. Reaching *trip, no stop in force, cache still filled* needs a trip
+/// whose latch was cleared without clearing the cache, and every door that clears the latch
+/// (`set_state`, `state_mut`, a checkpoint restore) empties or truncates the cache in the same
+/// step. So the metric cannot be pinned by a behavioural cell, and is pinned here instead.
+#[test]
+fn the_scanner_attempt_capture_reads_committed_consumption() {
+  let descent = SOURCES
+    .iter()
+    .find(|(name, _)| *name == "descent.rs")
+    .expect("descent.rs is censused")
+    .1;
+  let body = method_body(descent, "scanner_attempt");
+  assert!(
+    body.contains("self.span().end_ref()"),
+    "PROGRESS_CENSUS drift: `scanner_attempt` must capture `self.span().end_ref()` — committed \
+     consumption — as the position a stall compares against (grep PROGRESS_CENSUS)."
+  );
+  assert!(
+    !body.contains("cursor("),
+    "PROGRESS_CENSUS drift: `scanner_attempt` reads a cache-front cursor. A lookahead fill moves \
+     it across skipped trivia without committing, so the capture would read false progress and \
+     report a stalled attempt as `Progressed` (grep PROGRESS_CENSUS)."
+  );
+}

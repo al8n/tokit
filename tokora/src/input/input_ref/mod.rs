@@ -94,6 +94,64 @@ impl core::fmt::Debug for ScannerTripBaseline<'_> {
   }
 }
 
+/// What one attempt did to the scanner — the shape a retrying root loop matches on.
+///
+/// Taken with [`InputRef::scanner_attempt`] and read with [`InputRef::scanner_outcome`]. It exists
+/// because a **boolean** cannot be a sufficient root-loop guard: *"the document is over"* and
+/// *"repeating this attempt repeats it"* are different facts, and the second one has no `true` to
+/// hang on — a speculative wrapper restores the checkpointed state and a pre-trip `None` boundary,
+/// so every live reading of the input is correctly clean while the retry is futile. An `enum`
+/// makes the loop's decision exhaustive by construction, which a `bool` cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ScannerOutcome {
+  /// No scanner resource trip happened while the attempt ran. The ordinary case, and the only one
+  /// a parse that never meets a limit ever sees.
+  NoTrip,
+  /// A trip happened, and a stop is **still in force**: the input budget has refused an item, or a
+  /// terminal frontier is latched. The document is truncated — this is the arm that ends it.
+  Stopped,
+  /// A trip happened, no stop is in force any more, and the attempt **committed nothing**.
+  ///
+  /// The trip was rolled back — by [`try_attempt`](InputRef::try_attempt),
+  /// [`attempt_parse`](InputRef::attempt_parse), a rollback-on-drop
+  /// [`Transaction`] or a raw [`restore`](InputRef::restore) — or re-keyed away by
+  /// [`state_mut`](InputRef::state_mut), and the committed cursor is where it was when the attempt
+  /// began. By the [`Lexer`](crate::Lexer) determinism contract — scanning is a pure function of
+  /// source, offset and [`State`](crate::state::State) — **repeating the attempt from here
+  /// reproduces the same trip**, so a loop that retries without changing the regime cannot
+  /// terminate. It is a statement about *this* attempt, not an instruction: a caller that goes on
+  /// to install a fresh regime has changed the third input and is no longer covered by it.
+  Stalled,
+  /// A trip happened, no stop is in force, and the attempt **committed progress**: the regime was
+  /// recovered, or the trip was caught and parsed past. The stream moved on and a retry is not a
+  /// repeat.
+  Progressed,
+}
+
+/// One attempt's scanner bookkeeping: the trip baseline, and the committed position it started at.
+///
+/// The root-loop counterpart of [`ScannerTripBaseline`], which is the *driver*'s value and stays
+/// count-only for a measured reason — a driver reads its baseline more than once per element loop,
+/// so that one is [`Copy`] and this one, carrying an `L::Offset`, could not be. The two units
+/// differ as well: this is taken **per attempt**, where the driver baseline is taken per
+/// collection.
+///
+/// It holds the driver baseline rather than restating it, so the nonce and the `'closure` brand —
+/// and the misuse each rules out — carry over unchanged.
+///
+/// The position is **committed consumption** (`span().end()`), never a cache-front reading: a
+/// lookahead that filled the cache has consumed nothing, and a no-progress guard that counted it
+/// would call a stalled attempt progress. That is the same rule the collection drivers' own
+/// no-progress guards are censused against (`no_progress_guards_measure_committed_consumption`).
+#[derive(Debug, Clone)]
+pub struct ScannerAttempt<'inp, 'closure, L: Lexer<'inp>> {
+  /// The trip baseline, carrying the count, the nonce and the brand.
+  pub(crate) trips: ScannerTripBaseline<'closure>,
+  /// `span().end()` when the attempt began — the committed consumption a stall compares against.
+  pub(crate) at: L::Offset,
+}
+
 #[cfg(test)]
 impl ScannerTripBaseline<'_> {
   /// The raw count, for the in-crate cells that assert exact trip tallies rather than the
@@ -1037,12 +1095,14 @@ where
   /// attempt**: the wrapper's next turn re-derives the identical trip, and a root loop reading only
   /// this one files a report every turn without ever advancing the cursor.
   ///
-  /// The loop that keeps redoing refundable work is a resource-**placement** problem, and it is
-  /// named with its fix below. What *this* method does not answer, and
-  /// [`scanner_stopped_during_attempt`](Self::scanner_stopped_during_attempt) does, is the other
-  /// residue in this list: a stop latched **ahead** of the committed cursor by a lookahead, which
-  /// every positional reading — this one included — is blind to. **This method stays the narrow
-  /// live query**: is a stop on record *here*, now.
+  /// A loop that keeps redoing refundable work is detected by
+  /// [`scanner_outcome`](Self::scanner_outcome)'s
+  /// [`Stalled`](crate::input::ScannerOutcome::Stalled) arm — a trip with no committed progress
+  /// after it — and bounded by putting the budget on the input. What *this* method does not answer,
+  /// and [`scanner_stopped_during_attempt`](Self::scanner_stopped_during_attempt) does, is the
+  /// other residue in this list: a stop latched **ahead** of the committed cursor by a lookahead,
+  /// which every positional reading — this one included — is blind to. **This method stays the
+  /// narrow live query**: is a stop on record *here*, now.
   ///
   /// One bound belongs on neither of them but on the caller's choice of where to put it. A
   /// [`TokenBudget`](crate::input::TokenBudget) on the **input** is outside every
@@ -1059,8 +1119,8 @@ where
   /// `an_input_side_bound_outlives_every_one_of_the_three_rollbacks` is the `TokenBudget` row,
   /// `the_attempt_relative_verdict_answers_where_the_positional_reading_is_blind` is the
   /// five-point table the two readings differ in, and
-  /// `a_state_side_bound_under_speculation_is_refunded_and_neither_reading_closes_it` measures the
-  /// loop that neither reading ends and the placement that does.
+  /// `the_stall_outcome_ends_a_speculating_loop_the_boolean_cannot` measures the loop no boolean
+  /// ends and the outcome does.
   ///
   /// # What a `false` does not promise
   ///

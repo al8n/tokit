@@ -120,6 +120,27 @@ scanner_trip_snapshot/discarded
 scanner_stopped_during_attempt/used
 scanner_stopped_during_attempt/discarded
 
+# ── `InputRef::scanner_attempt` / `scanner_outcome` — the same shape, seventh and eighth ──
+#
+# `pub fn scanner_attempt(&self) -> ScannerAttempt<'_, '_, L>` and
+# `pub fn scanner_outcome(&self, since: &ScannerAttempt<'_, '_, L>) -> ScannerOutcome`, both `&self`
+# on `InputRef`. The `recursion` analysis transfers unamended once more: the `inherent_method`
+# template's consumer is `fn NAME(&mut self) -> u8`, the probe's receiver expression already has
+# type `&mut InputRef<..>`, the consumer's item is found at the FIRST step of the receiver walk and
+# tokora's `&self` item one autoref step later, so the earlier pick wins on both sides and tokora's
+# item is never a candidate. Same controls as the four rows above.
+#
+# `scanner_outcome` returns an ENUM rather than a `bool` or a `u8`, so a consumer's `-> u8`
+# extension item would be a type mismatch at most call sites rather than a silent steal — but the
+# paired call passes the capture through inference exactly as the two pairs above do, which is the
+# shape that can still switch with no diagnostic. Disclosed with them in the CHANGELOG's
+# "Source-breaking additions that can change behaviour with no diagnostic at the call site" section,
+# with the UFCS spellings that restore the consumer's items.
+scanner_attempt/used
+scanner_attempt/discarded
+scanner_outcome/used
+scanner_outcome/discarded
+
 # ── `Emitter::commit_lexer_error` — the SAME rule, in the mirror ──────────────────────────
 #
 # tokora's is `fn commit_lexer_error(&mut self, ..)` on the `Emitter` trait. The

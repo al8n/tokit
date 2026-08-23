@@ -173,18 +173,12 @@ and will red until they do.
   produced, and `settle_met_ceiling` discards its staged stop when `lex()` yields nothing — so a
   `true` means a real item is refused right now.
 
-  **What it does not answer is named on the method rather than left to be discovered.** A trip
+  **It is the stop question, and it is deliberately not a sufficient root-loop guard.** A trip
   inside a speculative wrapper is restored away *together with the tally that took it* — the refund
-  `TokenLimiter` documents as the correct answer for a bound on the committed stream — so both
-  readings correctly report that the scanner can scan again. The loop that keeps redoing that
-  refundable work is a resource-**placement** problem, and `TokenLimiter`'s own documentation names
-  the fix: a bound on *work performed* belongs on the input as a `TokenBudget`, where no rollback
-  reaches it and where this verdict is durable. Telling a refund-to-spent from a refund-to-usable
-  cannot be done from the stored regime — a limit trip is decided *after* a scan and the tripping
-  scan commits nothing, so `*self.state` is always the pre-trip one — and only running the lexer
-  separates them, which would be a **third** `Lexer::lex` site in a layer whose `RESUME_CENSUS`
-  refuses one and would put unbudgeted lexer work behind a public `&self` reader. The case is left
-  open and measured rather than closed by widening that gate.
+  `TokenLimiter` documents as the correct answer for a bound on the committed stream — so this
+  answers `false`, correctly, while the caller still holds the trip-derived error at the position
+  the attempt began. `InputRef::scanner_outcome`, in the entry below, is the shape a retrying loop
+  matches on; this method is its `Stopped` arm and nothing more.
 
   **Measured in `tokora/tests/root_loop_trip_witness.rs` section 5**, whose lexer is deliberately
   not the earlier sections': it holds the crate's own `TokenLimiter` **by value**, which is the
@@ -202,6 +196,55 @@ and will red until they do.
   **unconditioned** — a driver judging one element must re-raise a trip it caught even where
   grammar code recovered the regime inside that element, which is precisely the conjunct the public
   verdict drops.
+
+- **`InputRef::scanner_attempt` / `InputRef::scanner_outcome` — the root-loop guard, because a
+  boolean cannot be one** (#311). Returns `input::ScannerOutcome`, a four-arm enum: `NoTrip`,
+  `Stopped`, `Stalled`, `Progressed`. Take `input::ScannerAttempt` per **attempt**, at the top of
+  the turn; match the outcome where the failure surfaces.
+
+  **The failure that costs most is one where no stop is in force.** A failing `try_attempt` /
+  `attempt_parse` / rollback-on-drop `Transaction` restores the checkpointed state and a pre-trip
+  `None` boundary, and for a scanner bound held in the lexer state — the **supported** placement
+  `TokenLimiter` documents, not a contract-violating shared counter — the input-side refusal bit is
+  `false` as well. Every live reading of the input is then correctly clean, the caller nonetheless
+  holds the trip-derived error, and the cursor and state are exactly where the attempt began. A loop
+  guarded on `at_scanner_stop` or `scanner_stopped_during_attempt` retries the identical scan and can
+  burn unbounded CPU on attacker-controlled input.
+
+  **The fact that separates that from a real recovery is committed progress, not the scanner's
+  current regime** — which is why the arm needs no scan, no regime probe, and no third `Lexer::lex`
+  site. The trip event survives the rollback because the counter is outside the rollback set, and
+  the committed position is observable without lexing. `Stalled` is *a trip, no stop in force, no
+  committed progress*, and it is **sound rather than heuristic**: the `Lexer` determinism clause
+  says every scan-visible result derives entirely from source, offset and `State`, so an unmoved
+  committed offset means a repeat reproduces the trip.
+
+  **`Stalled` cannot be permanent.** It clears the moment the parse commits anything past where the
+  attempt began — which is exactly what a successful recovery produces — and it is a claim about the
+  attempt that just ran, so a caller that answers it by installing a fresh regime has changed the
+  third input and the *next* capture judges that. Measured:
+  `a_recovery_answering_the_stall_makes_progress_and_the_next_attempt_says_so` sees `[Stalled]` —
+  one turn, not one per turn — and reads the whole document.
+
+  The capture holds `ScannerTripBaseline` rather than restating it, so the nonce and the `'closure`
+  brand carry over; it adds `span().end()`, **committed consumption**, never a cache-front reading —
+  a lookahead fill moves that reading across skipped trivia without committing, and a guard counting
+  it would report a stalled attempt as `Progressed`. That is the drivers' own rule, pinned here by
+  `PROGRESS_CENSUS` (`the_scanner_attempt_capture_reads_committed_consumption`), a **source** census
+  because every door that clears the latch also empties the cache, so the two accessors coincide at
+  every position a behavioural cell can reach. Its unit is per **attempt** where
+  `scanner_trip_snapshot` is per collection, and the two stay separate types because a driver reads
+  its baseline more than once per element loop and an `L::Offset` would cost it `Copy`.
+
+  **It makes the futile retry detectable; it does not make the work bounded.** That is a placement
+  question and `TokenBudget` on the input is the answer, because no rollback reaches it. The two
+  compose, and a root loop facing hostile input wants both. Requiring the budget *in the type* is not
+  representable today — `ParserContext::with_token_budget` returns `Self`, so a budgeted context is
+  not a distinct type — and making it so would change every context construction.
+
+  **Costs** a nonce comparison and a `u64` comparison; then, only when those say a trip happened, a
+  `bool` load, an `Option::is_some` and one `Offset::Ord`. The capture costs one `L::Offset::clone`.
+  No scan, no lookahead fill, no state clone.
 
 - **`ErrorContainer::clear`.** `Errors` is now the only door onto its container (#247), so it has
   to serve the removals that door used to reach through `DerefMut`. The method is defaulted
@@ -2032,6 +2075,13 @@ so a consumer whose extension items take `&self` keeps compiling on both revisio
 resolution silently switched. **The fix is the same UFCS**: `MyExt::scanner_trip_snapshot(inp)` and
 `MyExt::scanner_stopped_during_attempt(inp, scan)`. `input::ScannerTripBaseline` is a new
 glob-reachable name in `tokora::input` on the same terms as `input::ResourceTripBaseline` above.
+
+**`InputRef::scanner_attempt` and `InputRef::scanner_outcome` are the sixth and seventh**, on the
+same terms again: both are `&self`, the paired call passes the capture through inference, and the
+UFCS spellings are `MyExt::scanner_attempt(inp)` and `MyExt::scanner_outcome(inp, &att)`.
+`input::ScannerAttempt` and `input::ScannerOutcome` are new glob-reachable names in `tokora::input`.
+`ScannerOutcome` is `#[non_exhaustive]`, so a downstream `match` must carry a wildcard arm and a
+later arm cannot break it.
 
 #247 removes `Errors`' `DerefMut` and replaces the three legitimate uses it served with inherent
 methods. `Errors` has shipped since 0.7.3 **with no inherent item of its own**, so a consumer who
