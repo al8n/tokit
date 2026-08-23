@@ -87,6 +87,20 @@
 //! document — the row a monotone counter answers wrongly, and the reason the counter pair is not
 //! what was published.
 //!
+//! # Where the reading survives a rollback, and where it does not — section 5
+//!
+//! `at_scanner_stop` reads what is on record at the committed cursor, and a speculative wrapper —
+//! `try_attempt`, `attempt_parse`, a rollback-on-drop `Transaction` — restores a checkpoint that
+//! **predates** the trip: `None` boundary, original cursor, original lexer state. Section 5 drives
+//! all three, and its point is that the resulting `false` is not one answer to grade. It reads
+//! right or wrong according to where the scanner bound lives, and the three rows differ in nothing
+//! else: a tally the state only points at is still spent (wrong), the crate's own `TokenLimiter`
+//! held by value is refunded by the very same restore (right), and a `TokenBudget` on the input is
+//! untouched by it (right, on both sides). The first two need opposite answers after the same
+//! restore, which is why nothing carried across it can serve both — and the last cell measures
+//! what reading it on the wrong side costs: a loop that files a report per turn and never advances
+//! the cursor at all.
+//!
 //! [`InputRef::at_scanner_stop`]: tokora::InputRef::at_scanner_stop
 //! [`InputRef::try_expect_or_stop`]: tokora::InputRef::try_expect_or_stop
 
@@ -102,7 +116,12 @@ use tokora::{
   input::TokenBudget,
   lexer::LogosLexer,
   logos::{self, Logos},
-  state::{State, recursion_tracker::RecursionLimiter},
+  state::{
+    State,
+    recursion_tracker::RecursionLimiter,
+    token_tracker::{TokenLimitExceeded, TokenLimiter},
+  },
+  try_parse_input::ParseAttempt,
 };
 
 use common::{TestLexer, Token};
@@ -1260,5 +1279,440 @@ fn the_descent_witness_holds_under_a_rejecting_emitter() {
     reports(),
     0,
     "nothing is filed, so one refusal is one diagnostic"
+  );
+}
+
+// ── Section 5: a rollback erases the record, and where the bound lives decides ──
+
+/// The lexer whose scanner bound is the crate's **own shipped** [`TokenLimiter`], held by value
+/// in the state — the placement that type documents.
+///
+/// [`SLexer`]'s limiter is the other shape: an `Rc<Cell<_>>` the state only *points* at, so the
+/// tally is reachable from every clone and no restore returns it. The two lexers are identical in
+/// every other respect, which is what makes the pair below a measurement of the placement alone.
+///
+/// [`TokenLimiter`]: tokora::state::token_tracker::TokenLimiter
+#[derive(Debug, Clone, PartialEq, Logos)]
+#[logos(crate = logos, extras = TokenLimiter, skip r"[ \t\r\n]+")]
+enum CTok {
+  #[regex(r"[0-9]+", |lex| { lex.extras.increase(); lex.slice().parse::<i64>().unwrap_or(0) })]
+  Num(i64),
+}
+
+impl core::fmt::Display for CTok {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    core::fmt::Display::fmt(&self.kind(), f)
+  }
+}
+
+impl From<TokenLimitExceeded> for SErr {
+  fn from(_: TokenLimitExceeded) -> Self {
+    SErr::Limit
+  }
+}
+
+impl TokenTrait<'_> for CTok {
+  type Kind = SKind;
+  type Error = SErr;
+
+  const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
+
+  fn kind(&self) -> SKind {
+    SKind::Num
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+type CLexer<'a> = LogosLexer<'a, CTok>;
+
+thread_local! {
+  /// [`InputRef::at_scanner_stop`] read **where the failure was produced** — inside the
+  /// speculative wrapper, before it decides.
+  ///
+  /// A thread-local rather than a return value because the reading has to be taken from inside a
+  /// closure whose error type is the grammar's, and the whole point of section 4 is that the
+  /// grammar's error type carries nothing.
+  ///
+  /// [`InputRef::at_scanner_stop`]: tokora::InputRef::at_scanner_stop
+  static INSIDE: Cell<bool> = const { Cell::new(false) };
+}
+
+fn note_inside(reading: bool) {
+  INSIDE.with(|c| c.set(reading));
+}
+
+fn inside() -> bool {
+  INSIDE.with(Cell::get)
+}
+
+/// What the input answers **for itself** on the far side of the rollback — the control that says
+/// whether the reading beside it was right or wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NextAnswer {
+  /// A scan from the restored state yielded a token: the stop really is gone.
+  Token,
+  /// A genuine end of input.
+  EndOfInput,
+  /// The scan tripped again: the stop is still in force.
+  Stopped,
+}
+
+/// The three readings a speculative wrapper's rollback is judged by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AcrossRollback {
+  /// `at_scanner_stop()` inside the wrapper, at the failure.
+  inside: bool,
+  /// `at_scanner_stop()` after the wrapper restored its pre-trip checkpoint.
+  after: bool,
+  /// What the input's own next call answers from that restored state.
+  next: NextAnswer,
+}
+
+/// Consumes until the scanner stops, recording the verdict **where the failure is produced**.
+fn drain_recording<'inp, L, Ctx>(inp: &mut InputRef<'inp, '_, L, Ctx>) -> Result<(), SErr>
+where
+  L: tokora::Lexer<'inp>,
+  Ctx: ParseContext<'inp, L>,
+  Ctx::Emitter: Emitter<'inp, L, Error = SErr>,
+{
+  loop {
+    match inp.try_expect_or_stop(|_| true) {
+      Ok(Some(_)) => {}
+      Ok(None) => return Ok(()),
+      Err(e) => {
+        note_inside(inp.at_scanner_stop());
+        return Err(e);
+      }
+    }
+  }
+}
+
+/// The reading after the wrapper has restored, beside what the input itself does next.
+fn after_rollback<'inp, L, Ctx>(inp: &mut InputRef<'inp, '_, L, Ctx>) -> AcrossRollback
+where
+  L: tokora::Lexer<'inp>,
+  Ctx: ParseContext<'inp, L>,
+  Ctx::Emitter: Emitter<'inp, L, Error = SErr>,
+{
+  let after = inp.at_scanner_stop();
+  let next = match inp.try_expect_or_stop(|_| true) {
+    Ok(Some(_)) => NextAnswer::Token,
+    Ok(None) => NextAnswer::EndOfInput,
+    Err(_) => NextAnswer::Stopped,
+  };
+  AcrossRollback {
+    inside: inside(),
+    after,
+    next,
+  }
+}
+
+/// The three public wrappers the finding names, driven identically.
+macro_rules! probe_bodies {
+  ($lexer:ident, $try_attempt:ident, $attempt_parse:ident, $transaction:ident) => {
+    /// `try_attempt`: the closure's `Err` rolls back and then propagates.
+    fn $try_attempt<'inp, Ctx>(
+      inp: &mut InputRef<'inp, '_, $lexer<'inp>, Ctx>,
+    ) -> Result<AcrossRollback, SErr>
+    where
+      Ctx: ParseContext<'inp, $lexer<'inp>>,
+      Ctx::Emitter: Emitter<'inp, $lexer<'inp>, Error = SErr>,
+    {
+      note_inside(false);
+      let _ = inp.try_attempt(drain_recording);
+      Ok(after_rollback(inp))
+    }
+
+    /// `attempt_parse`: the same rollback, reached through the three-way vocabulary.
+    fn $attempt_parse<'inp, Ctx>(
+      inp: &mut InputRef<'inp, '_, $lexer<'inp>, Ctx>,
+    ) -> Result<AcrossRollback, SErr>
+    where
+      Ctx: ParseContext<'inp, $lexer<'inp>>,
+      Ctx::Emitter: Emitter<'inp, $lexer<'inp>, Error = SErr>,
+    {
+      note_inside(false);
+      let _ = inp.attempt_parse(|inp| drain_recording(inp).map(ParseAttempt::Accept));
+      Ok(after_rollback(inp))
+    }
+
+    /// A rollback-on-drop [`Transaction`]: no verb at all, just the guard going out of scope.
+    ///
+    /// [`Transaction`]: tokora::input::Transaction
+    fn $transaction<'inp, Ctx>(
+      inp: &mut InputRef<'inp, '_, $lexer<'inp>, Ctx>,
+    ) -> Result<AcrossRollback, SErr>
+    where
+      Ctx: ParseContext<'inp, $lexer<'inp>>,
+      Ctx::Emitter: Emitter<'inp, $lexer<'inp>, Error = SErr>,
+    {
+      note_inside(false);
+      {
+        let mut txn = inp.begin();
+        let _ = drain_recording(&mut txn);
+      }
+      Ok(after_rollback(inp))
+    }
+  };
+}
+
+probe_bodies!(SLexer, s_try_attempt, s_attempt_parse, s_transaction);
+probe_bodies!(CLexer, c_try_attempt, c_attempt_parse, c_transaction);
+
+/// Section 5's driver for the **state-side** bound whose tally is shared out of band.
+macro_rules! shared_state_bound {
+  ($probe:ident) => {{
+    let limiter = ScanLimiter::with_limit(S_TIGHT);
+    let scanned = limiter.counter();
+    let ctx: ParserContext<'_, SLexer<'_>, Fatal<SErr>> = ParserContext::new(Fatal::new());
+    let out = Parser::with_parser_and_context($probe, ctx).parse_str_with_state(S_SRC, limiter);
+    (out, scanned.get())
+  }};
+}
+
+/// The same bound, held **by value** in the state — the crate's own [`TokenLimiter`].
+///
+/// [`TokenLimiter`]: tokora::state::token_tracker::TokenLimiter
+macro_rules! by_value_state_bound {
+  ($probe:ident) => {{
+    let ctx: ParserContext<'_, CLexer<'_>, Fatal<SErr>> = ParserContext::new(Fatal::new());
+    Parser::with_parser_and_context($probe, ctx)
+      .parse_str_with_state(S_SRC, TokenLimiter::with_limitation(S_TIGHT))
+  }};
+}
+
+/// The bound on the **input** — [`TokenBudget`] — with the lexer's own limit out of reach.
+///
+/// [`TokenBudget`]: tokora::input::TokenBudget
+macro_rules! input_bound {
+  ($probe:ident) => {{
+    let ctx: ParserContext<'_, SLexer<'_>, Fatal<SErr>> = ParserContext::new(Fatal::new());
+    let ctx = ctx.with_token_budget(TokenBudget::with_limitation(S_TIGHT));
+    Parser::with_parser_and_context($probe, ctx)
+      .parse_str_with_state(S_SRC, ScanLimiter::with_limit(S_ROOMY))
+  }};
+}
+
+/// A rollback erases the **record** of a scanner stop, so
+/// [`InputRef::at_scanner_stop`] reads clean on its far side — through all three public
+/// speculative wrappers.
+///
+/// The wrapper restores the checkpoint it saved *before* the trip: `None` boundary, original
+/// cursor, original state. The reading is a reading of what is on record at the committed cursor,
+/// and after that restore there is no record and the cursor is not at the frontier. So it answers
+/// `false`, where the identical loop **without** the wrapper answers `true` — measured in
+/// [`a_rejecting_emitter_hands_the_root_loop_an_unmarked_scanner_stop`].
+///
+/// `inside` is the same reading taken where the failure is produced, before the wrapper decides.
+/// It is `true` in every row, which is the whole of the contract's answer: the record exists, and
+/// it exists until the rollback discards it along with everything else the attempt did.
+///
+/// [`InputRef::at_scanner_stop`]: tokora::InputRef::at_scanner_stop
+#[test]
+fn every_speculative_wrapper_restores_a_checkpoint_that_predates_the_trip() {
+  for (name, (out, scanned)) in [
+    ("try_attempt", shared_state_bound!(s_try_attempt)),
+    ("attempt_parse", shared_state_bound!(s_attempt_parse)),
+    ("transaction drop", shared_state_bound!(s_transaction)),
+  ] {
+    assert!(
+      scanned > S_TIGHT,
+      "{name}: the fixture must actually trip the scan budget: scanned {scanned}, limit {S_TIGHT}"
+    );
+    assert_eq!(
+      out,
+      Ok(AcrossRollback {
+        inside: true,
+        after: false,
+        next: NextAnswer::Stopped,
+      }),
+      "{name}: the stop is on record where the failure is produced, gone on the far side of the \
+       rollback, and STILL IN FORCE — the input's own next call trips again over a tally no \
+       restore returned"
+    );
+  }
+}
+
+/// The row above is a false negative **because of where that bound lives**, and this is the
+/// control that says so: the crate's own [`TokenLimiter`], held by value in the state, makes the
+/// identical `false` the **right** answer.
+///
+/// `TokenLimiter` documents it outright — *"a rollback reinstalls the state a checkpoint saved, so
+/// the baseline becomes that saved count and everything spent after it is given back"*, and *"an
+/// abandoned speculation's tokens are not in it, so a refund is the correct answer"*. The refund
+/// is what the third column reads: a scan from the restored state yields a token, so no stop is in
+/// force and `at_scanner_stop` saying so is correct.
+///
+/// The two rows differ in nothing but the tally's placement, and they need **opposite** answers
+/// after the same rollback. That is what no carrier riding the rollback can supply: the fact that
+/// separates them lives in `L::State`, which is precisely the thing a checkpoint restores.
+///
+/// [`TokenLimiter`]: tokora::state::token_tracker::TokenLimiter
+#[test]
+fn a_by_value_state_bound_makes_the_same_false_the_right_answer() {
+  for (name, out) in [
+    ("try_attempt", by_value_state_bound!(c_try_attempt)),
+    ("attempt_parse", by_value_state_bound!(c_attempt_parse)),
+    ("transaction drop", by_value_state_bound!(c_transaction)),
+  ] {
+    assert_eq!(
+      out,
+      Ok(AcrossRollback {
+        inside: true,
+        after: false,
+        next: NextAnswer::Token,
+      }),
+      "{name}: the rollback refunded the tally — which `TokenLimiter` documents as the correct \
+       answer — so the stop really is gone and reading `false` is right"
+    );
+  }
+}
+
+/// And the bound the crate ships for *work performed* — [`TokenBudget`], on the input — survives
+/// every one of the three rollbacks, so the reading survives with it.
+///
+/// No `Checkpoint` carries the input's tally, no re-key touches it and no mutator lowers it. That
+/// is not a property a witness had to be given: it is the placement, and
+/// [`InputRef::at_scanner_stop`] already reads it. A consumer that speculates over a scanner bound
+/// gets a rollback-proof verdict by putting the bound here — which is the same sentence
+/// `TokenLimiter`'s own documentation ends on.
+///
+/// [`TokenBudget`]: tokora::input::TokenBudget
+/// [`InputRef::at_scanner_stop`]: tokora::InputRef::at_scanner_stop
+#[test]
+fn an_input_side_bound_outlives_every_one_of_the_three_rollbacks() {
+  for (name, out) in [
+    ("try_attempt", input_bound!(s_try_attempt)),
+    ("attempt_parse", input_bound!(s_attempt_parse)),
+    ("transaction drop", input_bound!(s_transaction)),
+  ] {
+    assert_eq!(
+      out,
+      Ok(AcrossRollback {
+        inside: true,
+        after: true,
+        next: NextAnswer::Stopped,
+      }),
+      "{name}: the refusal is recorded on the input's own tally, which no rollback reaches, so \
+       the verdict is the same on both sides of the restore"
+    );
+  }
+}
+
+/// The root loop of section 4 with its element **speculating**, and the amplification that opens
+/// when the verdict is read on the wrong side of the rollback.
+///
+/// `read_inside` is the whole variable. Reading where the failure is produced ends the document at
+/// the stop; reading after the wrapper has restored reads clean, so the loop files the failure as
+/// an ordinary syntax error, re-keys, and retries — from a state identical to the one it just
+/// failed in. There is **no progress at all**: the element consumes nothing, so the loop neither
+/// advances nor terminates, and only [`S_REPORT_CAP`] stops the fixture.
+///
+/// That is strictly worse than section 4's unwrapped loop, which files one report per *remaining
+/// token* and does end. It is also the case section 4's named residue did not cover: the residue's
+/// bound was "the region behind the frontier is replayable, so the loop makes real progress and
+/// re-reaches the stop", and a wrapper that rolls back keeps none of what it replayed.
+fn s_root_speculating<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, SLexer<'inp>, Ctx>,
+  read_inside: bool,
+) -> Result<usize, SErr>
+where
+  Ctx: ParseContext<'inp, SLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, SLexer<'inp>, Error = SErr>,
+{
+  let mut parsed = 0usize;
+  loop {
+    let mut stopped = false;
+    let element = inp.try_attempt(|inp| match inp.try_expect_or_stop(|_| true) {
+      Ok(Some(_)) => Ok(true),
+      Ok(None) => Ok(false),
+      Err(e) => {
+        stopped = inp.at_scanner_stop();
+        Err(e)
+      }
+    });
+    match element {
+      Ok(true) => parsed += 1,
+      Ok(false) => return Ok(parsed),
+      Err(e) => {
+        let verdict = if read_inside {
+          stopped
+        } else {
+          inp.at_scanner_stop()
+        };
+        if e.is_terminal() || verdict {
+          return Err(e);
+        }
+        note_report();
+        if reports() >= S_REPORT_CAP {
+          return Ok(parsed);
+        }
+        inp.state_mut();
+      }
+    }
+  }
+}
+
+fn s_root_speculating_inside<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, SLexer<'inp>, Ctx>,
+) -> Result<usize, SErr>
+where
+  Ctx: ParseContext<'inp, SLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, SLexer<'inp>, Error = SErr>,
+{
+  s_root_speculating(inp, true)
+}
+
+fn s_root_speculating_after<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, SLexer<'inp>, Ctx>,
+) -> Result<usize, SErr>
+where
+  Ctx: ParseContext<'inp, SLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, SLexer<'inp>, Error = SErr>,
+{
+  s_root_speculating(inp, false)
+}
+
+/// Reading the verdict on the far side of a rollback costs the loop its termination; reading it
+/// where the failure is produced does not.
+///
+/// The pair is the measurement, and the placement is its only variable — same loop, same wrapper,
+/// same source, same budget.
+#[test]
+fn the_verdict_read_after_the_rollback_leaves_the_loop_without_progress() {
+  reset();
+  let (after, scanned) = shared_state_bound!(s_root_speculating_after);
+  assert!(
+    scanned > S_TIGHT,
+    "the fixture must actually trip: scanned {scanned}, limit {S_TIGHT}"
+  );
+  assert_eq!(
+    reports(),
+    S_REPORT_CAP,
+    "the loop never stops on its own: every turn rolls back to the state the last one failed in, \
+     so only the fixture's brake ends it. Verdict was {after:?}"
+  );
+  assert_eq!(
+    after,
+    Ok(S_TIGHT),
+    "and it has parsed exactly what the pre-trip prefix holds — no turn after the first stop \
+     advanced the cursor by a single token"
+  );
+
+  reset();
+  let (inside, scanned) = shared_state_bound!(s_root_speculating_inside);
+  assert!(scanned > S_TIGHT, "the inside-read run must trip too");
+  assert_eq!(
+    inside,
+    Err(SErr::Limit),
+    "read where the failure is produced, the same loop ends the document at the stop"
+  );
+  assert_eq!(
+    reports(),
+    0,
+    "one stop is one stop: nothing was filed as an ordinary syntax error"
   );
 }

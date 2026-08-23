@@ -956,8 +956,12 @@ where
   ///
   /// # It is a reading of NOW, which is what makes it right across the recovery path
   ///
-  /// It takes no baseline and witnesses no event. It answers *"will a scan from here yield the
-  /// stop rather than a token?"*, and the two facts it reads are the two the scanner itself
+  /// It takes no baseline and witnesses no event. It answers *"is a scan from here already
+  /// refused, on the record this input holds?"* — which is the crate's own terminal gate inside
+  /// [`try_expect_or_stop`](Self::try_expect_or_stop), read without consuming: that gate drains a
+  /// cached token first and asks the same two facts only once nothing is waiting, which is exactly
+  /// when the committed cursor and the lex frontier are the same offset. So this never disagrees
+  /// with what the primitive beside it would do. The two facts are the two the scanner itself
   /// refuses on:
   ///
   /// - [`TokenBudgetTally::refused_an_item`](crate::input::TokenBudgetTally::refused_an_item) — the
@@ -977,23 +981,70 @@ where
   /// recovered with `set_state`, all eight consumed and the witness still `true`. This reading goes
   /// `false` the moment the regime that owned the stop dies, because there is nothing left to read.
   ///
-  /// For the same reason it needs no rollback proof at any nesting depth. A witness that *compares*
-  /// a rollbackable cell across an attempt compares a restored value against what it was restored
-  /// to; this one is not a comparison. A [`Checkpoint`](crate::input::Checkpoint) that puts the
-  /// boundary back puts back a live stop, and this then reports a live stop — which is what the
-  /// next scan will do.
+  /// For the same reason it needs no baseline at any nesting depth. A witness that *compares* a
+  /// rollbackable cell across an attempt compares a restored value against what it was restored
+  /// to; this one is not a comparison, so there is no placement of a baseline for a caller to get
+  /// wrong.
+  ///
+  /// # A ROLLBACK restores the record, and it restores it in both directions
+  ///
+  /// [`try_attempt`](Self::try_attempt), [`attempt_parse`](Self::attempt_parse), a rollback-on-drop
+  /// [`Transaction`] and a raw [`restore`](Self::restore) all reinstate the
+  /// [`Checkpoint`](crate::input::Checkpoint)'s saved cursor, saved lexer state **and** saved
+  /// boundary. A checkpoint taken *after* a trip puts a live stop back and this reports it. A
+  /// checkpoint taken *before* one — which is every speculative wrapper's own begin point — puts a
+  /// `None` boundary back at a rewound cursor, so an attempt that tripped inside propagates the
+  /// rejecting emitter's ordinary-looking `Err` with nothing left on the input to read, and this
+  /// answers `false`.
+  ///
+  /// **That is not one wrong answer to repair, because the right answer there is not one answer.**
+  /// It depends on where the scanner bound lives, and the only thing that knows is `L::State`:
+  ///
+  /// - **by value in the state**, the placement
+  ///   [`TokenLimiter`](crate::state::token_tracker::TokenLimiter) documents — the restore
+  ///   reinstalls the saved tally, *everything spent after it is given back*, and an abandoned
+  ///   speculation's tokens are not in the committed stream. The stop really is gone, and `false`
+  ///   is the **right** answer;
+  /// - **reachable from the state rather than held in it** — a shared cell, an atomic, a global.
+  ///   The restore hands back a clone that still points at the spent tally, so the very next scan
+  ///   trips again: the stop is still in force and `false` is the **wrong** answer;
+  /// - **on the input**, as a [`TokenBudget`](crate::input::TokenBudget). No `Checkpoint` carries
+  ///   its tally, so the refusal — and this reading of it — survives every rollback at every depth.
+  ///
+  /// The first two rows need **opposite** answers after the *same* restore, so no fact carried
+  /// across that restore can serve both, at any placement: what separates them is `L::State`
+  /// itself, which is precisely the thing the restore puts back. What a consumer that speculates
+  /// does instead is itself a placement rather than a discipline, and there are two:
+  ///
+  /// - **read this where the failure is produced** — inside the closure, or through the guard,
+  ///   before the wrapper decides. The record is there; the rollback is what discards it, together
+  ///   with everything else the attempt did;
+  /// - or **put the scanner bound on the input**, which is what
+  ///   [`TokenBudget`](crate::input::TokenBudget) is for and what
+  ///   [`TokenLimiter`](crate::state::token_tracker::TokenLimiter)'s own documentation ends on: a
+  ///   bound on *work performed* belongs where no rollback reaches, because work an attempt
+  ///   performed and then rolled back was still performed.
+  ///
+  /// Measured in `tests/root_loop_trip_witness.rs` — the three rows are
+  /// `every_speculative_wrapper_restores_a_checkpoint_that_predates_the_trip`,
+  /// `a_by_value_state_bound_makes_the_same_false_the_right_answer` and
+  /// `an_input_side_bound_outlives_every_one_of_the_three_rollbacks`, each driven through all
+  /// three wrappers; what the wrong placement costs is
+  /// `the_verdict_read_after_the_rollback_leaves_the_loop_without_progress`.
   ///
   /// # What a `false` does not promise
   ///
-  /// Two residues, named rather than implied, and both are **bounded by real progress** rather than
-  /// by a caller's discipline:
+  /// Two more residues, named rather than implied:
   ///
   /// - **the cursor rewound behind a live boundary.** An element may latch a trip, open an
   ///   [`attempt`](Self::attempt), consume the cached pre-trip tokens and decline; the restore
   ///   rewinds the cursor behind the boundary while the latch survives. Every positional witness
-  ///   reads clean there. Lexing *strictly before* the frontier still proceeds, so the loop that
-  ///   carries on re-parses a prefix that really is there and re-reaches the stop — it does not
-  ///   loop over a spent scanner;
+  ///   reads clean there. Lexing *strictly before* the frontier still proceeds, so a loop that
+  ///   carries on re-parses a prefix that really is there and re-reaches the stop — but what bounds
+  ///   it is the loop **keeping** that prefix. One whose retry is itself inside a rolling-back
+  ///   wrapper keeps nothing and consumes nothing, and then does not terminate at all; a root loop
+  ///   needs its own no-progress guard for the same reason every collection driver in this crate
+  ///   has one;
   /// - **a met ceiling with the one-shot probe unspent.** A budget of `N` over a document of `N`
   ///   items has met its ceiling and refused nothing, and *"would an item be refused?"* is not
   ///   *"is there an item?"* — only running the lexer separates them, which is what the probe is

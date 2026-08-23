@@ -84,9 +84,27 @@ and will red until they do.
   clear.
 
   **It is a reading of *now*, not a baseline-and-compare, and that is the whole design.** It takes
-  no argument, so there is no placement for a caller to get wrong, and it witnesses no event, so it
-  needs no rollback proof at any nesting depth: a `Checkpoint` that puts the boundary back puts back
-  a live stop, and the reading then reports a live stop — which is what the next scan will do.
+  no argument, so there is no baseline for a caller to place wrongly, and it witnesses no event, so
+  there is no comparison of a rollbackable cell to prove at any nesting depth.
+
+  **Where it holds, and where it does not, is on the method.** A restore reinstates the
+  checkpoint's cursor, lexer state **and** boundary, so a speculative wrapper whose begin point
+  predates a trip — `try_attempt`, `attempt_parse`, a rollback-on-drop `Transaction`, a raw
+  `restore` — leaves this reading clean on its far side. That is not one wrong answer to repair,
+  because the right answer there is decided by where the scanner bound lives, and the only thing
+  that knows is `L::State`. A `TokenLimiter` held **by value** in the state is refunded by the very
+  same restore, so the stop really is gone and `false` is right; a tally the state only **points
+  at** — a shared cell, an atomic, a global — is not refunded, so the next scan trips again and
+  `false` is wrong; a `TokenBudget` on the **input** is outside every checkpoint, so the verdict is
+  the same on both sides of the restore. The first two rows need **opposite** answers after the
+  *same* rollback, which is why no fact carried across it can serve both and why this is a reading
+  rather than a carrier — planting the monotone trip counter in its place, the simplest carrier that
+  does survive a restore, reports `at_scanner_stop() == true` over a restored state that hands the
+  very next call a token. A consumer that speculates reads this **where the failure is produced**,
+  inside the closure or through the guard, or puts the bound on the input. Section 5 of
+  `tokora/tests/root_loop_trip_witness.rs` drives all three wrappers over all three placements, and
+  measures what the wrong one costs: a root loop that files a report every turn and never advances
+  the cursor at all.
 
   **Publishing `scanner_trip_snapshot` / `scanner_tripped_during_attempt` would not have closed
   this, and the entry above records why.** `set_state` / `state_mut` re-key the input's
@@ -107,8 +125,10 @@ and will red until they do.
   `a_token_budget_refusal_outlives_the_re_key_that_clears_a_lexer_trip`.
 
   **What a `false` does not promise** is stated on the method: a cursor rewound behind a live
-  boundary by a rollback reads clean (the region behind the frontier is replayable, so the loop that
-  carries on makes real progress and re-reaches the stop), and a *met* ceiling whose one-shot probe
+  boundary by a rollback reads clean — the region behind the frontier is replayable, so a loop that
+  carries on re-parses a prefix that really is there and re-reaches the stop, but what bounds that
+  is the loop **keeping** the prefix, and one whose retry is itself inside a rolling-back wrapper
+  keeps nothing, consumes nothing and does not terminate — and a *met* ceiling whose one-shot probe
   has not run yet reads clean (only running the lexer separates "would an item be refused" from "is
   there an item", and answering `true` there would report a fully-parsed document as truncated).
 
