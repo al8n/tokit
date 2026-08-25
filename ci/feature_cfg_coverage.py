@@ -403,6 +403,32 @@ EXTRA_LEGS = [
         # reasons the `std,logos,combinators` leg states at length.
         "why": "the only leg compiling the stacker-gated suites against the pratt family",
     },
+    {
+        "features": "rowan,stacker",
+        # No `--tests`, so it builds no integration target and can hold no suite — the
+        # `fold,alloc` shape. It is here for one predicate and nothing else.
+        "tests": False,
+        "unique_predicates": True,
+        "unique_suites": False,
+        # DECLARED FOR ONE PREDICATE, and it is the smallest set that satisfies it:
+        # `all(rowan, stacker)`, in `src/cst/mod.rs`, guarding the `const` assertion that
+        # `RecursionLimiter::SEGMENTED_PRATT_DEPTH <= cst::MAX_TREE_DEPTH`.
+        #
+        # The two constants bound different resources — 64 MiB of heap stack segments there, a
+        # 2 MiB thread's green-tree drop recursion here — and today they are equal at 1024, so
+        # this is the one place a published budget MEETS the tree ceiling. Crossing it would
+        # mean a caller who takes the figure this crate hands them cannot materialize the tree
+        # the parse builds, which is a value change nobody would notice from either constant's
+        # own derivation block. The predicate is the only thing that reads them together, so
+        # this is the only leg in which it is checked at all.
+        #
+        # `stacker = ["dep:stacker", "std", "pratt"]` and `rowan = ["dep:rowan", "std"]`, so
+        # `std` and `pratt` arrive with the pair and are not named. Neither the
+        # `std,logos,combinators,stacker` leg (no `rowan`) nor either `rowan,*` leg (no
+        # `stacker`) reaches it, and no `--each-feature` leg names two features at once — which
+        # is what makes the `unique_predicates` claim above true and checked.
+        "why": "all(rowan, stacker) — SEGMENTED_PRATT_DEPTH against cst::MAX_TREE_DEPTH",
+    },
 ]
 
 CRATE = "tokora"

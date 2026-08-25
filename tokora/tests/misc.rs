@@ -221,7 +221,7 @@ mod cst_coverage {
     builder.start_node(K::Root);
     builder.token(K::Inner, "hello");
     builder.finish_node();
-    let green = builder.finish();
+    let green = builder.finish().expect("under the depth ceiling");
     let root = SyntaxNode::<Lang>::new_root(green);
     assert_eq!(root.to_string(), "hello");
   }

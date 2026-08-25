@@ -17,6 +17,24 @@ heading it names, and named `<section-key>-<heading-slug>`:
 
     ### Changed (breaking)
 
+- **`SyntaxTreeBuilder::finish` returns `Result<rowan::GreenNode, cst::FinishError>`** (#316). The
+  builder drives `rowan` directly with no event log behind it, so nothing else can bound what it
+  constructs; it now carries `MAX_TREE_DEPTH` itself. An open that would cross the ceiling is not
+  forwarded, the builder latches, and `finish` reports `FinishError::TooDeep` instead of handing
+  back a value nobody can drop. Migration is `.finish()` → `.finish().expect(...)` or a real
+  match; the ceiling is 1024 nodes and nothing this crate ships comes within two orders of
+  magnitude of it.
+
+  **A live open-count would not have been enough, and the cell that says so was written before the
+  fix.** `start_node_at` nests on top of subtrees that are already *finished*, so a counter of what
+  `rowan` currently holds has decremented past them: checkpoint, build a chain to the ceiling,
+  close it, wrap — the live count is zero at the wrap and the tree is one level past the ceiling.
+  The ledger is therefore one entry per level holding that level's deepest completed child, and a
+  wrap is charged `level + swallowed`. Its one approximation is *which* children a wrap swallows,
+  since `rowan::Checkpoint` is opaque: the charge uses the level's deepest completed child rather
+  than the deepest after the checkpoint, which over-charges only a wrap of shallow siblings beside
+  a subtree already near the ceiling, and over-charges toward refusal.
+
 and referenced as `[16](#0.8.0-changed-breaking)`. The blank line is required. CommonMark
 reads `<a id="…"></a>` as a paragraph of inline HTML, and a renderer that instead reads a
 lone tag on its own line as an HTML *block* would swallow the line below it — the blank line
@@ -33,6 +51,42 @@ and will red until they do.
 ## Unreleased
 
 ### Added
+
+- **`cst::MAX_TREE_DEPTH` and `cst::FinishError::TooDeep` — the ceiling that keeps a green tree
+  droppable, and the refusal that enforces it** (#316). 1024 nested nodes, root wrapper counted.
+  `rowan` releases a green tree **recursively**, so a deep enough one ends the process in its own
+  destructor: an abort, with no unwind, no diagnostic and nothing to catch. Nothing downstream can
+  defend against it — by the time a consumer holds the tree, its existence is the hazard — so the
+  refusal is raised before the tree exists, at every door: `Cst::finish`, `Cst::finish_partial`
+  and `SyntaxTreeBuilder::finish`.
+
+  **The value is measured, not inherited.** One chain of nested nodes around a single token,
+  finished and released on an explicitly sized 2 MiB thread, one trial per process, bisected for
+  the greatest depth that returns before the next dies with `fatal runtime error: stack overflow`
+  — `rowan 0.17.0`, `aarch64-apple-darwin`, `rustc 1.100.0-nightly (8fa1c96cf 2026-08-17)`. The
+  binding cell over green release, red-root release, green `Display` and red `text()` is **4388**
+  in debug (~477 B/level) and 9410 in release (~222 B). 1024 is the deepest power of two that
+  clears the debug row by `MIN_HEADROOM`, and the `const` block beside the constant pins that
+  derivation from both sides rather than admitting a band. One number for both profiles, on
+  `PARSE_DEFAULT_DEPTH`'s own argument and more strongly: the frames are `rowan`'s, so their
+  optimisation is the *dependency's*, which `cfg!(debug_assertions)` here cannot observe at all.
+
+  **It is a constant and not a knob.** A caller who raised it would be configuring the abort back
+  in; a caller who lowered it would only refuse more, which needs no API.
+
+  **What actually reaches it is not deep nesting.** `Pratt::with_cst_kinds` mints one retro-wrap
+  anchor per expression and spends it once per fold, and same-target wraps nest inside-out — the
+  correct shape for a left-associative chain, and one whose tree depth is **linear in the operator
+  count**. `1 + 1 + 1 + …` is one recursion level, one open node in the event log, and `n` nested
+  nodes in the tree; no recursion budget bounds it because no recursion happens. So a flat
+  expression past 1024 operators is now refused with `TooDeep`. The alternative was never
+  "accepted" — it was the abort, at roughly four times that depth. Lifting the ceiling needs a
+  green tree whose release is not recursive, which is #252's decision and not a number.
+
+  Every recursion budget this crate ships or publishes fits under the ceiling
+  (`PARSE_DEFAULT_DEPTH` 32, `OPTIMIZED_PARSE_DEPTH` 256), asserted at compile time; the deepest
+  tree this crate's own CST fuzz corpus materializes is **4**, asserted live from both sides so
+  the margin cannot go stale in prose.
 
 - **`TokenBudgetTally::refused_an_item` — the one question a host that caught an unwind and
   concluded can still ask.** A budget refusal has **no diagnostic channel** (a diagnostic would have to be
@@ -1264,6 +1318,41 @@ and will red until they do.
   directly — to keep building.
 
 ### Fixed
+
+- **A green tree deep enough to abort in its own destructor can no longer be materialized**
+  (#316). The construction half of an uncatchable process abort reachable from safe third-party
+  code: `rowan`'s recursive release of a green tree. Both public construction doors are covered —
+  the recording `Sink` (through `CstEmitter::cst_start`, `EmitterView::cst_start`, and the `Sink`
+  re-export, all landing in `Cst::finish`/`finish_partial`) and `SyntaxTreeBuilder`, which has no
+  sink behind it. Both refuse with `FinishError::TooDeep`; see **Added** for the ceiling and its
+  derivation.
+
+  **The refusal is charged on the frame stack `replay` already maintains, and deliberately not on
+  the sink's own recorded depth.** Materialization *hoists* every retro-wrap to its target, so `n`
+  same-target wraps open `n` nested frames while `Sink::depth` never exceeds one — and that is not
+  an exotic shape, it is exactly what the Pratt CST hook emits for an `n`-operator expression. A
+  ceiling charged at the recorded depth would have left the abort reachable through this crate's
+  own blessed path; `same_target_wraps_nest_in_the_tree_while_the_recorded_depth_never_leaves_one`
+  and `the_ceiling_catches_the_retro_wrap_shape_the_recorded_depth_cannot_see` hold the
+  distinction. `finish_partial` refuses too: it tolerates incompleteness by closing open nodes,
+  which for this stream would build the very tree that cannot be dropped.
+
+  **What the suite cannot pin, stated rather than papered over:** that a tree past the ceiling
+  really would abort. The witness would have to exist to be asserted about, and its existence is
+  the hazard — the process dies in the drop glue of the value under test, with no unwind, so there
+  is no `#[should_panic]` and no `catch_unwind` for it. The abort depth is established outside the
+  suite by bisection and recorded beside the ceiling it derives; the cells hold the refusal, which
+  is the half a test can hold.
+
+- **The README feature table discloses `rowan 0.17.0`'s known upstream undefined behaviour**
+  (#252). The `rowan` row advertised the lossless CST with no safety warning, while the record
+  lived only in `tokora/Cargo.toml` comments and the Miri scripts. It now names both sites
+  (Stacked Borrows at `arc.rs:264` from building any green tree, Tree Borrows at `cursor.rs:136`
+  from dropping any red-tree `SyntaxNode`), states that tokora's own `src/cst` contains no
+  `unsafe`, that the upstream issues are open since 2021 so raising the requirement is not an
+  exit, and that both Miri matrices exclude the feature — which means zero coverage of the shipped
+  lossless path rather than a green result. Disclosure only; #252's actual exit (fork, replace or
+  withdraw) stays open.
 
 - **`UnexpectedEnd::reconstruct`, `reconstruct_with_name`, and `reconstruct_without_name` no
   longer clear the terminal-stop flag or drop the expected set** (#300). All three rebuilt the

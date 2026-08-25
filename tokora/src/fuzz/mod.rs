@@ -236,6 +236,19 @@ mod tests {
        Widen the corpus or teach a generator to emit these (grep OP_SURFACE_CENSUS).",
       missing.iter().map(|op| op.label()).collect::<Vec<_>>()
     );
+
+    // The corpus-margin cell's aggregate half: the recorded deepest tree must be ATTAINED,
+    // not merely not-exceeded. The per-case assertion in `cst::run` holds the upper side, so
+    // this is the one that catches a corpus that quietly got shallower and left the figure
+    // behind it — a stale number in the margin the green-tree depth ceiling is argued from.
+    #[cfg(feature = "rowan")]
+    assert_eq!(
+      cst::deepest_tree_seen(),
+      cst::CORPUS_DEEPEST_TREE,
+      "the deepest green tree the default corpus materializes is no longer the recorded \
+       figure. Re-record it in `fuzz/cst.rs`; it is read by the margin argument on \
+       `cst::MAX_TREE_DEPTH`."
+    );
   }
 
   /// A deeper manual sweep. Ignored by default (part of neither CI nor the normal suite); run with

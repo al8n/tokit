@@ -38,7 +38,8 @@
 //!    materialization (`finish` / `finish_partial`), and deliberately **not** an emitter, so
 //!    the artefact cannot be fed back in as a second parse's context
 //! 5. **`SyntaxTreeBuilder`** (`rowan`): The low-level append-only builder over rowan's
-//!    green tree builder (no rollback of its own — that is what the event buffer is for)
+//!    green tree builder (no rollback of its own — that is what the event buffer is for). It
+//!    has no event log behind it, so it carries the `MAX_TREE_DEPTH` ceiling itself
 //! 6. **`Element`** / **`Node`** / **`Token`** (`rowan`): Typed views over the finished
 //!    tree
 //! 7. **`cast`** (`rowan`): Utility functions for the typed layer
@@ -58,7 +59,10 @@
 //! - [rowan documentation](https://docs.rs/rowan) - The underlying CST library
 
 #[cfg(feature = "rowan")]
-use core::{cell::RefCell, marker::PhantomData};
+use core::{
+  cell::{Cell, RefCell},
+  marker::PhantomData,
+};
 
 #[cfg(feature = "rowan")]
 use derive_more::{From, Into};
@@ -111,6 +115,206 @@ pub use sink::{FinishError, Sink, TriviaPolicy};
 #[cfg(feature = "rowan")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]
 pub use text::CstText;
+
+/// The deepest a green tree this crate materializes may nest — **the root wrapper
+/// counted** — and the one thing standing between a `rowan` tree and an abort nothing
+/// downstream can catch.
+///
+/// # What it bounds is a crash, not a resource
+///
+/// `rowan` releases a green tree **recursively**: a `GreenNode`'s drop glue descends into its
+/// children, so a deep enough tree ends the process *in its own destructor*. That is not a
+/// panic — no unwind, no destructor, no diagnostic, nothing to catch — and it is not something
+/// a consumer can defend against, because by the time a consumer holds the tree its existence
+/// is already the hazard: a guard placed after materialization guards a value it cannot
+/// dispose of. Every recursive descent over such a tree is a second route to the same abort
+/// with a fatter frame — rowan's own `Display`, a red root's `text()`, a consumer's transform
+/// — and bounding those walks removes routes without removing the crash.
+///
+/// So the refusal happens **before the tree exists**, at every door this crate offers:
+/// [`Cst::finish`], [`Cst::finish_partial`] and [`SyntaxTreeBuilder::finish`] return
+/// [`FinishError::TooDeep`] rather than a value nobody can drop. What the refusing call is
+/// then holding is a *bounded* tree, which is why the wall can be enforced from inside the
+/// construction it is protecting.
+///
+/// # Which populations actually reach it
+///
+/// Not only a hand-rolled event stream. This crate's own Pratt CST hook
+/// (`Pratt::with_cst_kinds`) mints **one** retro-wrap anchor per expression and spends it once
+/// per fold, and same-target wraps nest inside-out at materialization — which is the correct
+/// shape for a left-associative chain and makes the tree's depth **linear in the operator
+/// count**. `1 + 1 + 1 + …` is one recursion level, one open node in the event log, and `n`
+/// nested nodes in the green tree. No recursion budget bounds it, because no recursion
+/// happens; nothing else did either, until this ceiling.
+///
+/// The consequence is worth stating plainly rather than discovering: a flat expression with
+/// more than `MAX_TREE_DEPTH` operators is refused with [`FinishError::TooDeep`]. The
+/// alternative is not "accepted" — it is the abort, at roughly four times this depth. Lifting
+/// the ceiling needs a green tree whose release is not recursive, which is a dependency
+/// decision (al8n/tokora#252) and not a number.
+///
+/// # Why a constant, and not a knob
+///
+/// The value is a property of the **runtime's stack**, not of any document. A caller who
+/// raised it would be configuring the abort back in — the one thing the value exists to
+/// remove — and a caller who lowered it would only refuse more trees, which no API is needed
+/// to do. Between those, a knob has no setting that buys anything a caller could want, so it
+/// is not offered. The two published *recursion* budgets are knobs for exactly the opposite
+/// reason: what a native frame costs is a fact about the caller's grammar and build, which
+/// only the caller knows. What a `GreenNode`'s drop frame costs is a fact about `rowan`.
+///
+/// # The value, and the measurement behind it
+///
+/// **1024.** One chain of nested nodes around a single token, built through
+/// `rowan::GreenNodeBuilder`, finished and released on an explicitly sized 2 MiB thread — one
+/// trial per process, bisected for the greatest depth that returns before the next one dies
+/// with `fatal runtime error: stack overflow`. `rowan 0.17.0`, `aarch64-apple-darwin`,
+/// `rustc 1.100.0-nightly (8fa1c96cf 2026-08-17)`:
+///
+/// | descent (2 MiB thread) | debug, last ok | release, last ok |
+/// |---|---|---|
+/// | green `GreenNode` release | 4389 | 26357 |
+/// | red `SyntaxNode` root release | 4389 | 26355 |
+/// | green `Display` | **4388** | **9410** |
+/// | red root `text()` | **4388** | 26355 |
+///
+/// The binding cell is 4388 in debug (~477 B per level) and 9410 in release (~222 B), and
+/// 1024 is the deepest power of two that clears the debug cell by this crate's own
+/// `MIN_HEADROOM` of three: `1024 × 3 = 3072 < 4388`, and `2048 × 3 = 6144` is not. Both
+/// halves are `const`-asserted beside the constant, so the derivation is pinned as an
+/// equality rather than admitted by a band.
+///
+/// **One number for both profiles**, on the argument
+/// [`PARSE_DEFAULT_DEPTH`](crate::state::recursion_tracker::RecursionLimiter::PARSE_DEFAULT_DEPTH)
+/// already makes for holding one value across both — which is stronger here than there,
+/// because the frames being bounded are `rowan`'s, so
+/// they are compiled under the *dependency's* profile — a fact `cfg!(debug_assertions)` in
+/// this crate cannot observe at all, not even imperfectly.
+///
+/// # What the ceiling clears, and the one cell it meets
+///
+/// Every recursion budget this crate ships or publishes fits under it —
+/// [`PARSE_DEFAULT_DEPTH`](crate::state::recursion_tracker::RecursionLimiter::PARSE_DEFAULT_DEPTH)
+/// is 32 and
+/// [`OPTIMIZED_PARSE_DEPTH`](crate::state::recursion_tracker::RecursionLimiter::OPTIMIZED_PARSE_DEPTH)
+/// is 256, against a deepest shipped consumer document of 11 and a deepest tree over this
+/// crate's own CST fuzz corpus of **4** — a figure `fuzz::cst`'s `CORPUS_DEEPEST_TREE` asserts
+/// live, from both sides, so this sentence cannot go stale quietly. The one cell the ceiling
+/// *meets* is `SEGMENTED_PRATT_DEPTH`, which is also 1024: a caller who
+/// opts into the full segmented-Pratt budget **and** a CST hook, and whose grammar opens a
+/// node at every one of those levels, lands one past this ceiling once the root wrapper is
+/// counted. That is not a collision to engineer away — the two numbers bound different
+/// resources (64 MiB of heap stack segments there, a 2 MiB thread's drop recursion here) and
+/// arrive at the same magnitude by coincidence. Where they meet, the answer is a typed
+/// refusal instead of an abort, which is the trade this constant exists to make.
+#[cfg(feature = "rowan")]
+#[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]
+pub const MAX_TREE_DEPTH: usize = 1024;
+
+// ── THE MEASURED ROWS BEHIND `MAX_TREE_DEPTH` ────────────────────────────────────────────
+//
+// NO INTRA-DOC LINKS ON THE TWO PRIVATE CONSTANTS BELOW, DELIBERATELY. rustdoc does not
+// document a private item, so it never resolves a `[link]` written on one and a dangling one
+// passes `-D warnings` on all three rustdoc legs — the rule `native_stack` states, for the
+// same reason. The consumer-facing half of the argument lives on `MAX_TREE_DEPTH` above,
+// which is public and whose links *are* checked.
+
+/// `rowan 0.17.0`'s recursive descent over a green tree ends a **debug** (`opt-level = 0`)
+/// process at this depth, on the 2 MiB thread every stack figure in this crate is stated on.
+///
+/// The binding cell of four descents measured on one chain of nested nodes around a single
+/// token: green release 4389, red root release 4389, green `Display` 4388, red root `text()`
+/// 4388. ~477 bytes per level. One trial per process, bisected for the greatest depth that
+/// returns before the next dies with `fatal runtime error: stack overflow`;
+/// `aarch64-apple-darwin`, `rustc 1.100.0-nightly (8fa1c96cf 2026-08-17)`.
+///
+/// It is a **debug** figure and the shipped ceiling is derived from it in both profiles,
+/// because the frames are `rowan`'s: their optimisation is the dependency's, which this
+/// crate's own `debug_assertions` does not observe. See `MAX_TREE_DEPTH`.
+#[cfg(feature = "rowan")]
+const ROWAN_RECURSION_ABORTS_AT_DEBUG: usize = 4388;
+
+/// The same instrument and the same host, **release** (`opt-level = 3`,
+/// `debug-assertions = false`, `overflow-checks = false`): green release 26357, red root
+/// release 26355, green `Display` 9410, red root `text()` 26355. ~222 bytes per level at the
+/// binding cell.
+///
+/// Recorded, and deliberately **not** derived from: optimisation reorders which descent binds
+/// (`Display` is the loosest debug cell and the tightest release one), which is the reordering
+/// this crate's recursion figures already record about shapes. Its only readers are the
+/// assertions below — that the release row is the looser of the two, and that the ceiling
+/// clears it by the same margin — so a future re-measurement that inverts the relation fails
+/// the build instead of quietly widening the wall.
+#[cfg(feature = "rowan")]
+const ROWAN_RECURSION_ABORTS_AT_RELEASE: usize = 9410;
+
+/// The derivation of `MAX_TREE_DEPTH`, enforced by the compiler rather than by prose.
+///
+/// A range-shaped guard would read as though it checked a derivation while admitting every
+/// value the argument rejects, so the deepest-power-of-two rule is pinned from **both** sides:
+/// this depth clears the binding cell by `MIN_HEADROOM`, and the next doubling does not.
+#[cfg(feature = "rowan")]
+const _: () = {
+  use crate::state::recursion_tracker::{RecursionLimiter, policy::MIN_HEADROOM};
+
+  assert!(
+    MAX_TREE_DEPTH.is_power_of_two(),
+    "MAX_TREE_DEPTH is not a power of two. Every depth constant this crate ships is one and a \
+     reader expects it; if the rule has changed, change it where it is written rather than here."
+  );
+  assert!(
+    MAX_TREE_DEPTH * MIN_HEADROOM < ROWAN_RECURSION_ABORTS_AT_DEBUG,
+    "MAX_TREE_DEPTH does not clear the measured rowan recursion ceiling by MIN_HEADROOM. The \
+     wall it enforces exists to replace an uncatchable abort, so it does not get the weaker of \
+     this crate's two margins."
+  );
+  assert!(
+    MAX_TREE_DEPTH * 2 * MIN_HEADROOM >= ROWAN_RECURSION_ABORTS_AT_DEBUG,
+    "MAX_TREE_DEPTH is not the DEEPEST power of two the measured row allows, so the shipped \
+     value is lower than its own derivation and refuses trees rowan can release. Re-derive it \
+     or re-measure the row; do not leave the two disagreeing."
+  );
+  assert!(
+    ROWAN_RECURSION_ABORTS_AT_RELEASE > ROWAN_RECURSION_ABORTS_AT_DEBUG,
+    "the release rowan row is no longer the looser of the two, so deriving the shipped ceiling \
+     from the debug row is no longer conservative. Re-derive from whichever row now binds."
+  );
+  assert!(
+    MAX_TREE_DEPTH * MIN_HEADROOM < ROWAN_RECURSION_ABORTS_AT_RELEASE,
+    "MAX_TREE_DEPTH does not clear the release rowan row by MIN_HEADROOM either"
+  );
+
+  // The populations that SPEND the cell: every recursion budget this crate ships or publishes
+  // must fit under the ceiling, or a parse this crate blesses cannot materialize its own tree.
+  assert!(
+    RecursionLimiter::PARSE_DEFAULT_DEPTH <= MAX_TREE_DEPTH,
+    "the shipped recursion default is deeper than the tree ceiling: an unconfigured parse at \
+     its own budget could not materialize the tree it just built"
+  );
+  assert!(
+    RecursionLimiter::OPTIMIZED_PARSE_DEPTH <= MAX_TREE_DEPTH,
+    "the published optimized-parse budget is deeper than the tree ceiling: a caller who takes \
+     the figure this crate hands them could not materialize the tree it produces"
+  );
+};
+
+/// The `stacker` cell of the same population check, kept separate because the constant it
+/// reads exists only under that feature.
+///
+/// It is an `<=` and it currently holds with **equality** — 1024 against 1024 — which is the
+/// one place a published budget meets this ceiling. See `MAX_TREE_DEPTH` for why that is
+/// recorded rather than engineered away.
+#[cfg(all(feature = "rowan", feature = "stacker"))]
+const _: () = {
+  use crate::state::recursion_tracker::RecursionLimiter;
+
+  assert!(
+    RecursionLimiter::SEGMENTED_PRATT_DEPTH <= MAX_TREE_DEPTH,
+    "the published segmented-Pratt budget is deeper than the tree ceiling. The two bound \
+     different resources and meeting is expected; crossing is not, because a caller who takes \
+     the published figure would then be unable to materialize the tree the parse built."
+  );
+};
 
 /// A builder for constructing concrete syntax trees.
 ///
@@ -170,11 +374,55 @@ pub use text::CstText;
 /// - It can be shared immutably across parser combinators
 /// - Mutations are checked at runtime (will panic if you violate borrow rules)
 /// - Typically safe in single-threaded parsing contexts
+///
+/// # The depth ceiling, and the one state this type latches
+///
+/// This builder has no event log behind it — it drives `rowan`'s own builder directly — so
+/// nothing else can bound what it constructs. It therefore carries the ceiling itself: an open
+/// that would take the tree past [`MAX_TREE_DEPTH`] is **not forwarded**, and the builder
+/// latches. A latched builder records nothing further and [`finish`](Self::finish) returns
+/// [`FinishError::TooDeep`], so the tree `rowan` actually holds never exceeds the ceiling and
+/// what is finally dropped — with the refusal, or with the builder — is a tree it can release.
+/// See [`MAX_TREE_DEPTH`] for what the ceiling is protecting and why it is not a knob.
+///
+/// The latch is deliberately total rather than selective. Suppressing only the over-deep opens
+/// would leave a caller's tokens landing in the wrong parent, which is a *plausible* wrong
+/// tree; refusing everything after the first refused open leaves a tree that is obviously
+/// partial and is never handed back regardless.
+///
+/// ## Why a live open-count is not the ledger
+///
+/// The obvious shadow — count the opens `rowan` is holding and refuse past the ceiling —
+/// bounds [`start_node`](Self::start_node) and is **blind to**
+/// [`start_node_at`](Self::start_node_at). A retro-wrap nests on top of subtrees that are
+/// already *finished*, so the live count has long since decremented past them: take a
+/// checkpoint, build a chain to the ceiling, close it, then wrap — the live count is zero at
+/// the wrap and the tree it produces is one level past the ceiling. That is the same shape
+/// that makes the recording sink's own recorded depth the wrong counter to charge, and it is
+/// held by `the_builder_refuses_a_retro_wrap_that_crosses_the_ceiling` rather than by this
+/// paragraph — the shape was written as a cell first, and it was red.
+///
+/// So the ledger is one entry per level — the deepest *completed* child subtree at that level
+/// — and a wrap is charged `level + swallowed`, which is the depth the wrap actually reaches.
+/// The one approximation is *which* children a wrap swallows: `rowan::Checkpoint` is opaque,
+/// so the charge uses the deepest completed child at that level rather than the deepest one
+/// after the checkpoint. That over-charges only a wrap of shallow siblings sitting beside a
+/// subtree already near the ceiling, and it over-charges toward refusal, which is the safe
+/// direction.
 #[cfg(feature = "rowan")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]
 #[derive(Debug)]
 pub struct SyntaxTreeBuilder<Lang> {
   builder: RefCell<GreenNodeBuilder<'static>>,
+  /// One entry per open node plus a bottom entry for the builder's own top level, holding the
+  /// deepest **completed** child subtree at that level, in nodes. Its length is therefore the
+  /// live open count plus one, and it is what shadows `rowan`'s parent stack — which that
+  /// crate's public API does not expose.
+  deepest_child: RefCell<std::vec::Vec<usize>>,
+  /// The latch: set by the one open this builder refused, never cleared. In [`Sink`]'s
+  /// `degraded` class — a refusal cannot be un-refused, so it is deliberately outside anything
+  /// that could restore it.
+  too_deep: Cell<bool>,
   _marker: PhantomData<Lang>,
 }
 
@@ -207,8 +455,43 @@ where
   pub fn new() -> Self {
     Self {
       builder: RefCell::new(GreenNodeBuilder::new()),
+      deepest_child: RefCell::new(std::vec![0usize]),
+      too_deep: Cell::new(false),
       _marker: PhantomData,
     }
+  }
+
+  /// The one door every forwarded open goes through: charges the level ledger, or latches and
+  /// refuses.
+  ///
+  /// `wrap` says whether the new node inherits the level's already-completed children — false
+  /// for a fresh [`start_node`](Self::start_node), true for a
+  /// [`start_node_at`](Self::start_node_at), which nests on top of what is already there. The
+  /// node sits at level `deepest_child.len()` and reaches `level + swallowed`, which is the
+  /// quantity checked.
+  ///
+  /// `false` means the caller's call was **not** forwarded to `rowan` — either because this
+  /// builder had already refused an open, or because this one would have taken the tree past
+  /// [`MAX_TREE_DEPTH`]. Both leave the tree `rowan` holds at or below the ceiling, which is
+  /// the invariant [`finish`](Self::finish) rests on.
+  #[inline]
+  fn open(&self, wrap: bool) -> bool {
+    if self.too_deep.get() {
+      return false;
+    }
+    let mut ledger = self.deepest_child.borrow_mut();
+    let swallowed = if wrap {
+      ledger.last().copied().unwrap_or(0)
+    } else {
+      0
+    };
+    if ledger.len() + swallowed > MAX_TREE_DEPTH {
+      drop(ledger);
+      self.too_deep.set(true);
+      return false;
+    }
+    ledger.push(swallowed);
+    true
   }
 
   /// Creates a checkpoint representing the current position in the tree.
@@ -245,6 +528,10 @@ where
   /// All tokens and child nodes added between `start_node()` and `finish_node()`
   /// will be children of this node.
   ///
+  /// An open that would take the tree past [`MAX_TREE_DEPTH`] is **refused**: it is not
+  /// forwarded to `rowan`, the builder latches, and [`finish`](Self::finish) returns
+  /// [`FinishError::TooDeep`]. Nothing recorded after that point reaches the tree either.
+  ///
   /// # Examples
   ///
   /// ```rust,ignore
@@ -262,6 +549,9 @@ where
   /// See also: [`rowan::GreenNodeBuilder::start_node`]
   #[inline]
   pub fn start_node(&self, kind: Lang::Kind) {
+    if !self.open(false) {
+      return;
+    }
     self
       .builder
       .borrow_mut()
@@ -273,6 +563,9 @@ where
   /// This allows you to retroactively wrap children that were added after the
   /// checkpoint was created. Useful for handling operator precedence and
   /// left-recursive grammars.
+  ///
+  /// It opens a node like [`start_node()`](Self::start_node) does and is refused on the same
+  /// terms, at the same ceiling — a retro-wrap nests exactly as deep as a direct open.
   ///
   /// # Examples
   ///
@@ -295,6 +588,9 @@ where
   /// See also: [`rowan::GreenNodeBuilder::start_node_at`]
   #[inline]
   pub fn start_node_at(&self, checkpoint: rowan::Checkpoint, kind: Lang::Kind) {
+    if !self.open(true) {
+      return;
+    }
     self
       .builder
       .borrow_mut()
@@ -318,6 +614,9 @@ where
   /// See also: [`rowan::GreenNodeBuilder::token`]
   #[inline]
   pub fn token(&self, kind: Lang::Kind, text: &str) {
+    if self.too_deep.get() {
+      return;
+    }
     self
       .builder
       .borrow_mut()
@@ -347,13 +646,35 @@ where
   /// See also: [`rowan::GreenNodeBuilder::finish_node`]
   #[inline]
   pub fn finish_node(&self) {
+    if self.too_deep.get() {
+      return;
+    }
     self.builder.borrow_mut().finish_node();
+    let mut ledger = self.deepest_child.borrow_mut();
+    // The bottom entry is the builder's own top level and is never popped; `rowan` has
+    // already panicked on the line above if there was no node to close.
+    if ledger.len() > 1 {
+      let closed = 1 + ledger.pop().unwrap_or(0);
+      if let Some(parent) = ledger.last_mut() {
+        *parent = (*parent).max(closed);
+      }
+    }
   }
 
   /// Completes the tree building and returns the final green node.
   ///
   /// This consumes the builder and returns the root [`rowan::GreenNode`],
   /// which can be converted to a [`rowan::SyntaxNode`] for traversal.
+  ///
+  /// # Errors
+  ///
+  /// [`FinishError::TooDeep`] if any open past [`MAX_TREE_DEPTH`] was refused. That open was
+  /// never forwarded to `rowan` and neither was anything after it, so what this call drops is
+  /// a tree at or under the ceiling — see [`MAX_TREE_DEPTH`] for why a tree past it cannot be
+  /// handed back.
+  ///
+  /// It is the only error this door has: an unbalanced bracketing is a panic from
+  /// [`finish_node`](Self::finish_node), at the call that made it, not a value from here.
   ///
   /// # Examples
   ///
@@ -367,14 +688,19 @@ where
   /// builder.token(SyntaxKind::Identifier, "foo");
   /// builder.finish_node();
   ///
-  /// let green = builder.finish();
+  /// let green = builder.finish().expect("under the depth ceiling");
   /// let root = SyntaxNode::new_root(green);
   /// ```
   ///
   /// See also: [`rowan::GreenNodeBuilder::finish`]
   #[inline]
-  pub fn finish(self) -> rowan::GreenNode {
-    self.builder.into_inner().finish()
+  pub fn finish(self) -> Result<rowan::GreenNode, FinishError> {
+    if self.too_deep.get() {
+      return Err(FinishError::TooDeep {
+        depth: MAX_TREE_DEPTH as u64,
+      });
+    }
+    Ok(self.builder.into_inner().finish())
   }
 }
 

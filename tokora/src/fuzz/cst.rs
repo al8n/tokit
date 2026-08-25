@@ -324,6 +324,60 @@ fn drive(
   (green, consumed)
 }
 
+/// The deepest green tree any CST fuzz case has materialized in this process — the live half
+/// of the corpus-margin claim on `crate::cst::MAX_TREE_DEPTH`.
+///
+/// Monotone and process-wide, and read by `corpus_passes_and_covers_every_op` so the recorded
+/// figure has to be *attained* and not merely not-exceeded. The not-exceeded half is asserted
+/// per case in [`run`], which is what keeps a corpus that gets deeper from raising this
+/// silently.
+///
+/// `cfg(test)` because its only reader is this crate's own corpus cell: a consumer who runs
+/// `fuzz::run_seeds` from their suite is exercising the oracles, not re-recording our margin.
+#[cfg(test)]
+static DEEPEST_TREE_SEEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// The deepest green tree this crate's own CST corpus materializes.
+///
+/// **This is the corpus-margin figure, and it is a live assertion rather than a sentence.**
+/// `gen_seq` bounds generated scope nesting at `MAX_DEPTH`, and a scope is one `node()`
+/// bracket, so the trees here are a handful of levels against a ceiling of 1024. The margin is
+/// the whole reason `crate::cst::MAX_TREE_DEPTH` is felt by nothing this crate ships — a claim
+/// that would rot the moment the generator changed, so both directions are checked: nothing
+/// exceeds it (per case, in [`run`]) and something reaches it (over the corpus, in
+/// `fuzz::tests::corpus_passes_and_covers_every_op`).
+pub(crate) const CORPUS_DEEPEST_TREE: usize = 4;
+
+/// The margin itself, pinned where a reader who skips docs will meet it.
+const _: () = assert!(
+  CORPUS_DEEPEST_TREE * 64 < crate::cst::MAX_TREE_DEPTH,
+  "this crate's own CST corpus has grown to within 64x of the green-tree depth ceiling. That \
+   is not a failure of the ceiling — it is the corpus arriving somewhere the ceiling's \
+   derivation assumed it never went, and the two now need re-reading together."
+);
+
+/// The deepest tree seen so far, for the aggregate half of the corpus-margin cell.
+#[cfg(test)]
+pub(crate) fn deepest_tree_seen() -> usize {
+  DEEPEST_TREE_SEEN.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// A green tree's own nesting depth, walked **iteratively**: an oracle for a depth ceiling
+/// must not itself recurse over the tree it measures.
+fn green_depth(root: &rowan::GreenNode) -> usize {
+  let mut deepest = 0usize;
+  let mut stack: Vec<(&rowan::GreenNodeData, usize)> = std::vec![(&**root, 1usize)];
+  while let Some((node, at)) = stack.pop() {
+    deepest = deepest.max(at);
+    for child in node.children() {
+      if let rowan::NodeOrToken::Node(inner) = child {
+        stack.push((inner, at + 1));
+      }
+    }
+  }
+  deepest
+}
+
 /// Counts the tree's non-gap tokens: exactly the committed settles (gap tiles cover only
 /// bytes no committed token claimed, so a lost auto-emission cannot hide behind them).
 fn non_gap_tokens(green: &rowan::GreenNode) -> usize {
@@ -364,6 +418,19 @@ pub(crate) fn run(src: &[u8], seed: u64, cov: &mut Coverage) {
         pruned_consumed,
         "every committed settle appears in the tree exactly once (the auto-emission \
          exactly-once law; gap tiles cover only unconsumed bytes)"
+      );
+
+      // The corpus-margin cell's per-case half: nothing this corpus generates may exceed the
+      // recorded figure, so a generator that deepens is visible here and not two releases
+      // later in the ceiling's derivation.
+      let depth = green_depth(&pruned_tree);
+      #[cfg(test)]
+      DEEPEST_TREE_SEEN.fetch_max(depth, core::sync::atomic::Ordering::Relaxed);
+      assert!(
+        depth <= CORPUS_DEEPEST_TREE,
+        "the CST corpus now materializes a {depth}-level tree, past the recorded \
+         {CORPUS_DEEPEST_TREE}. Re-record it — that figure is what makes the margin against \
+         cst::MAX_TREE_DEPTH a live claim rather than a sentence."
       );
     }
     (Err(full_err), Err(pruned_err)) => {
