@@ -17,23 +17,42 @@ heading it names, and named `<section-key>-<heading-slug>`:
 
     ### Changed (breaking)
 
-- **`SyntaxTreeBuilder::finish` returns `Result<rowan::GreenNode, cst::FinishError>`** (#316). The
+- **`SyntaxTreeBuilder::finish` returns `Result<rowan::GreenNode, cst::FinishError>`, and
+  `checkpoint`/`start_node_at` trade `rowan::Checkpoint` for `cst::TreeCheckpoint`** (#316). The
   builder drives `rowan` directly with no event log behind it, so nothing else can bound what it
   constructs; it now carries `MAX_TREE_DEPTH` itself. An open that would cross the ceiling is not
   forwarded, the builder latches, and `finish` reports `FinishError::TooDeep` instead of handing
   back a value nobody can drop. Migration is `.finish()` → `.finish().expect(...)` or a real
-  match; the ceiling is 1024 nodes and nothing this crate ships comes within two orders of
-  magnitude of it.
+  match, and `let cp = builder.checkpoint()` is unchanged at the call site — only its type is.
 
-  **A live open-count would not have been enough, and the cell that says so was written before the
-  fix.** `start_node_at` nests on top of subtrees that are already *finished*, so a counter of what
-  `rowan` currently holds has decremented past them: checkpoint, build a chain to the ceiling,
-  close it, wrap — the live count is zero at the wrap and the tree is one level past the ceiling.
-  The ledger is therefore one entry per level holding that level's deepest completed child, and a
-  wrap is charged `level + swallowed`. Its one approximation is *which* children a wrap swallows,
-  since `rowan::Checkpoint` is opaque: the charge uses the level's deepest completed child rather
-  than the deepest after the checkpoint, which over-charges only a wrap of shallow siblings beside
-  a subtree already near the ceiling, and over-charges toward refusal.
+  **Two simpler ledgers were tried and both are wrong, which is why the checkpoint type had to
+  change.** A live open-count — the nodes `rowan` is holding now — is blind to `start_node_at`,
+  which nests on top of subtrees that are already *finished*: checkpoint, build a chain to the
+  ceiling, close it, wrap, and the live count is zero at the wrap while the tree is one level past
+  the ceiling. A per-level maximum fixes that and converts **width into phantom depth**: a wrap
+  swallows only the children added after *its own* checkpoint, so charging it the deepest child the
+  level ever completed put each sibling's depth into the next sibling's charge, and the charge fed
+  back into the level when the wrap closed. A flat row of one-token wraps — real depth 2, forever —
+  climbed one phantom level per sibling and latched past the thousandth, discarding a perfectly
+  droppable tree. `a_row_of_sibling_wraps_is_two_levels_deep_however_many_there_are` is that row.
+
+  The population is *the children after this checkpoint*, and nothing weaker names it — hence a
+  tokora-owned checkpoint, which wraps `rowan`'s opaque one beside the child index the charge needs.
+  The ledger then mirrors `rowan`'s own **flat** child stream in depths, so a wrap's charge is `max`
+  over exactly the range `rowan` will drain into it: exact, not an approximation.
+
+  **That is also the whole answer to a checkpoint spent twice, out of order, or after its node
+  closed.** Such a use is either one `rowan` refuses — its two asserts fire before the ledger is
+  touched, because the forward happens first — or one it accepts, and then it wraps exactly
+  `children[cp..]`, which is the range the charge was computed over. There is no level bookkeeping
+  to disagree with the tree, because there is no level bookkeeping; five cells hold the cases.
+
+  **The ledger is bounded by the ceiling, not by the caller's width, and the bound is asserted.**
+  Storing that flat vector outright would be one `usize` per child `rowan` already holds. Every
+  query is a suffix maximum, so only the entries that can answer one are kept — index `i` while its
+  depth exceeds every later depth. Retained depths are strictly decreasing and each is at most
+  `MAX_TREE_DEPTH`, so the structure holds at most `MAX_TREE_DEPTH + 1` entries however wide the
+  input; over the row of `MAX_TREE_DEPTH + 64` siblings it measures **4**.
 
 and referenced as `[16](#0.8.0-changed-breaking)`. The blank line is required. CommonMark
 reads `<a id="…"></a>` as a paragraph of inline HTML, and a renderer that instead reads a
@@ -51,6 +70,11 @@ and will red until they do.
 ## Unreleased
 
 ### Added
+
+- **`cst::TreeCheckpoint` — the builder's own checkpoint, carrying the one number `rowan`'s does
+  not** (#316). Returned by `SyntaxTreeBuilder::checkpoint` and spent by `start_node_at`; it wraps
+  `rowan::Checkpoint` beside the flat child index the depth ledger charges a retro-wrap against.
+  See **Changed (breaking)** for why the opaque one could not stay.
 
 - **`cst::MAX_TREE_DEPTH`, `cst::MIN_SUPPORTED_STACK` and `cst::FinishError::TooDeep` — the
   ceiling that keeps a green tree droppable, the stack it is derived against, and the refusal

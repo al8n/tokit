@@ -488,40 +488,160 @@ const _: () = {
 /// tree; refusing everything after the first refused open leaves a tree that is obviously
 /// partial and is never handed back regardless.
 ///
-/// ## Why a live open-count is not the ledger
+/// ## What the ledger has to answer, and why two simpler shapes cannot
 ///
-/// The obvious shadow — count the opens `rowan` is holding and refuse past the ceiling —
-/// bounds [`start_node`](Self::start_node) and is **blind to**
-/// [`start_node_at`](Self::start_node_at). A retro-wrap nests on top of subtrees that are
-/// already *finished*, so the live count has long since decremented past them: take a
-/// checkpoint, build a chain to the ceiling, close it, then wrap — the live count is zero at
-/// the wrap and the tree it produces is one level past the ceiling. That is the same shape
-/// that makes the recording sink's own recorded depth the wrong counter to charge, and it is
-/// held by `the_builder_refuses_a_retro_wrap_that_crosses_the_ceiling` rather than by this
-/// paragraph — the shape was written as a cell first, and it was red.
+/// A live **open-count** — the nodes `rowan` is holding right now — bounds
+/// [`start_node`](Self::start_node) and is blind to [`start_node_at`](Self::start_node_at). A
+/// retro-wrap nests on top of subtrees that are already *finished*, so the live count has long
+/// since decremented past them: take a checkpoint, build a chain to the ceiling, close it, then
+/// wrap — the live count is zero at the wrap and the tree it produces is one level past the
+/// ceiling.
 ///
-/// So the ledger is one entry per level — the deepest *completed* child subtree at that level
-/// — and a wrap is charged `level + swallowed`, which is the depth the wrap actually reaches.
-/// The one approximation is *which* children a wrap swallows: `rowan::Checkpoint` is opaque,
-/// so the charge uses the deepest completed child at that level rather than the deepest one
-/// after the checkpoint. That over-charges only a wrap of shallow siblings sitting beside a
-/// subtree already near the ceiling, and it over-charges toward refusal, which is the safe
-/// direction.
+/// A per-level **maximum** — the deepest child that level ever completed — fixes that and
+/// converts **width into phantom depth**. A wrap swallows only the children added after *its own
+/// checkpoint*, so a sibling that closed before it is not in its subtree; charging level-wide put
+/// each sibling's depth into the next sibling's charge, and the charge fed back into the level
+/// when the wrap closed. A flat row of one-token wraps — real depth 2, forever — climbed one
+/// phantom level per sibling and latched somewhere past the thousandth.
+/// `a_row_of_sibling_wraps_is_two_levels_deep_however_many_there_are` is that row, and it was red.
+///
+/// The population is not "this level" and it is not "everything open"; it is **the children after
+/// this checkpoint**. Nothing weaker names it, which is why
+/// [`checkpoint`](Self::checkpoint) hands back a [`TreeCheckpoint`] instead of `rowan`'s opaque
+/// one.
+///
+/// ## The ledger is `rowan`'s own child indexing, in depths
+///
+/// `rowan`'s builder keeps one **flat** child vector across every open level and a parent stack of
+/// first-child indices; its checkpoint *is* that vector's length. The ledger mirrors exactly
+/// that, storing a depth where `rowan` stores a child, so every index the two use is the same
+/// index. A wrap's charge is then `max` over the flat range `[checkpoint, len)` — the range
+/// `rowan` will itself drain into that wrap — and is exact rather than an approximation.
+///
+/// **That is also the whole answer to a checkpoint used late, twice, or out of order.** Such a use
+/// is either one `rowan` refuses — its two asserts fire before the ledger is touched, because the
+/// forward happens first — or one it accepts, and then it wraps exactly `children[cp..]`, which is
+/// exactly the range the charge was computed over. There is no level bookkeeping to disagree with
+/// the tree, because there is no level bookkeeping.
+///
+/// ## What it costs, and the bound is on the structure rather than on the input
+///
+/// Storing that flat vector outright would be one `usize` per child `rowan` already holds — real
+/// growth in the caller's width. It is not stored. Every query is a **suffix maximum**, so the
+/// ledger keeps only the entries that can answer one: index `i` is retained exactly while its
+/// depth is strictly greater than every depth after it. The first retained entry at or after `cp`
+/// is then `max(children[cp..])` — the maximum's *last* occurrence is retained, and no retained
+/// entry can sit between `cp` and it.
+///
+/// Retained depths are therefore **strictly decreasing** and each is at most [`MAX_TREE_DEPTH`],
+/// so the structure holds at most `MAX_TREE_DEPTH + 1` entries **whatever the caller's width** —
+/// the row of siblings above collapses to one or two. The parent stack is bounded by the ceiling
+/// for the same reason. Both are `O(MAX_TREE_DEPTH)`, not `O(children)`.
 #[cfg(feature = "rowan")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]
 #[derive(Debug)]
 pub struct SyntaxTreeBuilder<Lang> {
   builder: RefCell<GreenNodeBuilder<'static>>,
-  /// One entry per open node plus a bottom entry for the builder's own top level, holding the
-  /// deepest **completed** child subtree at that level, in nodes. Its length is therefore the
-  /// live open count plus one, and it is what shadows `rowan`'s parent stack — which that
-  /// crate's public API does not expose.
-  deepest_child: RefCell<std::vec::Vec<usize>>,
+  ledger: RefCell<Ledger>,
   /// The latch: set by the one open this builder refused, never cleared. In [`Sink`]'s
   /// `degraded` class — a refusal cannot be un-refused, so it is deliberately outside anything
   /// that could restore it.
+  ///
+  /// It is what keeps the ledger and `rowan` in lockstep past a refusal: nothing is forwarded and
+  /// nothing is charged, so both stop at the same point rather than drifting.
   too_deep: Cell<bool>,
   _marker: PhantomData<Lang>,
+}
+
+/// A position in [`SyntaxTreeBuilder`]'s child stream, and the anchor a retro-wrap is charged
+/// against.
+///
+/// It wraps `rowan`'s own [`Checkpoint`](rowan::Checkpoint) — which carries nothing a caller or
+/// this crate can read — beside the one number the depth ledger needs: where the checkpoint sits
+/// in the flat child stream both this builder and `rowan` index by. Take it with
+/// [`checkpoint`](SyntaxTreeBuilder::checkpoint) and spend it on
+/// [`start_node_at`](SyntaxTreeBuilder::start_node_at).
+///
+/// [`Copy`], like `rowan`'s: spending one twice is legal and is charged correctly both times, for
+/// the reason [`SyntaxTreeBuilder`] gives. It is not branded to its builder — neither is `rowan`'s
+/// — and it does not need to be: a checkpoint carried to another builder is charged against *that*
+/// builder's stream, which is the same stream `rowan` will wrap.
+#[cfg(feature = "rowan")]
+#[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]
+#[derive(Debug, Clone, Copy)]
+pub struct TreeCheckpoint {
+  inner: rowan::Checkpoint,
+  /// The flat child index this checkpoint names — `rowan`'s own checkpoint value, kept where it
+  /// can be read.
+  at: usize,
+}
+
+/// The depth ledger: `rowan`'s flat child stream in depths, kept as a suffix-maximum stack.
+///
+/// See [`SyntaxTreeBuilder`]'s own docs for what it answers and why the two simpler shapes cannot.
+/// The invariants, which every method below preserves:
+///
+/// * `len` equals `rowan`'s `children.len()` at all times — every push and truncation here mirrors
+///   one there, and a refusal stops both;
+/// * `suffix_max` is strictly decreasing in depth and strictly increasing in index, and holds
+///   exactly the indices whose depth exceeds every later depth;
+/// * `parents` holds the first-child index of each open node, outermost first.
+#[cfg(feature = "rowan")]
+#[derive(Debug)]
+struct Ledger {
+  /// `(index, depth)`, strictly increasing in index and strictly decreasing in depth. At most
+  /// `MAX_TREE_DEPTH + 1` entries, because the depths are distinct and bounded by the ceiling.
+  suffix_max: std::vec::Vec<(usize, usize)>,
+  /// The first-child index of every open node, outermost first. Bounded by the ceiling.
+  parents: std::vec::Vec<usize>,
+  /// The flat child count, mirroring `rowan`'s `children.len()`.
+  len: usize,
+}
+
+#[cfg(feature = "rowan")]
+impl Ledger {
+  const fn new() -> Self {
+    Self {
+      suffix_max: std::vec::Vec::new(),
+      parents: std::vec::Vec::new(),
+      len: 0,
+    }
+  }
+
+  /// `max(children[from..])`, or `0` when that range is empty.
+  ///
+  /// The first retained entry at or after `from` is the answer: the maximum's last occurrence is
+  /// retained, and a retained entry between `from` and it would have to exceed every later depth
+  /// — the maximum included — which it does not. An empty range has no retained entry at or after
+  /// `from`, because the final child is always retained.
+  fn deepest_after(&self, from: usize) -> usize {
+    self
+      .suffix_max
+      .iter()
+      .find(|(index, _)| *index >= from)
+      .map_or(0, |(_, depth)| *depth)
+  }
+
+  /// Appends one child of subtree depth `depth` — `0` for a token, which is not a node.
+  fn push_child(&mut self, depth: usize) {
+    while self
+      .suffix_max
+      .last()
+      .is_some_and(|(_, held)| *held <= depth)
+    {
+      self.suffix_max.pop();
+    }
+    self.suffix_max.push((self.len, depth));
+    self.len += 1;
+  }
+
+  /// Drops every child from `first` on — the half of `rowan`'s drain this ledger mirrors.
+  fn truncate_to(&mut self, first: usize) {
+    while self.suffix_max.last().is_some_and(|(i, _)| *i >= first) {
+      self.suffix_max.pop();
+    }
+    self.len = first;
+  }
 }
 
 #[cfg(feature = "rowan")]
@@ -553,43 +673,45 @@ where
   pub fn new() -> Self {
     Self {
       builder: RefCell::new(GreenNodeBuilder::new()),
-      deepest_child: RefCell::new(std::vec![0usize]),
+      ledger: RefCell::new(Ledger::new()),
       too_deep: Cell::new(false),
       _marker: PhantomData,
     }
   }
 
-  /// The one door every forwarded open goes through: charges the level ledger, or latches and
-  /// refuses.
+  /// The one door every forwarded open goes through: decides the charge, or latches and refuses.
   ///
-  /// `wrap` says whether the new node inherits the level's already-completed children — false
-  /// for a fresh [`start_node`](Self::start_node), true for a
-  /// [`start_node_at`](Self::start_node_at), which nests on top of what is already there. The
-  /// node sits at level `deepest_child.len()` and reaches `level + swallowed`, which is the
-  /// quantity checked.
+  /// `swallowed` is the depth of the subtree the new node inherits at the moment it opens — `0`
+  /// for a fresh [`start_node`](Self::start_node), and `max(children[cp..])` for a
+  /// [`start_node_at`](Self::start_node_at), which is exactly the range `rowan` will drain into
+  /// it. The node sits at level `parents.len() + 1` and its deepest descendant therefore at
+  /// `parents.len() + 1 + swallowed`, which is the quantity checked.
   ///
-  /// `false` means the caller's call was **not** forwarded to `rowan` — either because this
-  /// builder had already refused an open, or because this one would have taken the tree past
-  /// [`MAX_TREE_DEPTH`]. Both leave the tree `rowan` holds at or below the ceiling, which is
-  /// the invariant [`finish`](Self::finish) rests on.
+  /// It decides and does **not** commit: the caller forwards to `rowan` first — where a stale
+  /// checkpoint or an unbalanced close panics — and calls [`commit_open`](Self::commit_open) only
+  /// once that returned. So a `rowan` panic leaves the ledger untouched rather than one entry
+  /// ahead of the tree.
+  ///
+  /// `false` means the call must not be forwarded: either this builder had already refused an
+  /// open, or this one would take the tree past [`MAX_TREE_DEPTH`]. Both leave the tree `rowan`
+  /// holds at or below the ceiling, which is the invariant [`finish`](Self::finish) rests on.
   #[inline]
-  fn open(&self, wrap: bool) -> bool {
+  fn open(&self, swallowed: usize) -> bool {
     if self.too_deep.get() {
       return false;
     }
-    let mut ledger = self.deepest_child.borrow_mut();
-    let swallowed = if wrap {
-      ledger.last().copied().unwrap_or(0)
-    } else {
-      0
-    };
-    if ledger.len() + swallowed > MAX_TREE_DEPTH {
-      drop(ledger);
+    if self.ledger.borrow().parents.len() + 1 + swallowed > MAX_TREE_DEPTH {
       self.too_deep.set(true);
       return false;
     }
-    ledger.push(swallowed);
     true
+  }
+
+  /// Records the open that [`open`](Self::open) admitted and `rowan` accepted: the new node's
+  /// children begin at `first`.
+  #[inline]
+  fn commit_open(&self, first: usize) {
+    self.ledger.borrow_mut().parents.push(first);
   }
 
   /// Creates a checkpoint representing the current position in the tree.
@@ -613,11 +735,15 @@ where
   /// builder.finish_node();
   /// ```
   ///
-  /// See also: [`rowan::GreenNodeBuilder::checkpoint`]
+  /// See also: [`rowan::GreenNodeBuilder::checkpoint`], which this wraps — the returned
+  /// [`TreeCheckpoint`] carries its value plus the child index the depth ledger charges against.
   #[inline]
   #[must_use]
-  pub fn checkpoint(&self) -> rowan::Checkpoint {
-    self.builder.borrow().checkpoint()
+  pub fn checkpoint(&self) -> TreeCheckpoint {
+    TreeCheckpoint {
+      inner: self.builder.borrow().checkpoint(),
+      at: self.ledger.borrow().len,
+    }
   }
 
   /// Starts a new node with the given syntax kind.
@@ -647,13 +773,17 @@ where
   /// See also: [`rowan::GreenNodeBuilder::start_node`]
   #[inline]
   pub fn start_node(&self, kind: Lang::Kind) {
-    if !self.open(false) {
+    // A fresh open inherits nothing, so it is charged `0` and its content is charged as it
+    // arrives, through this same door.
+    if !self.open(0) {
       return;
     }
     self
       .builder
       .borrow_mut()
       .start_node(Lang::kind_to_raw(kind));
+    let first = self.ledger.borrow().len;
+    self.commit_open(first);
   }
 
   /// Starts a new node at a previously created checkpoint.
@@ -685,14 +815,20 @@ where
   ///
   /// See also: [`rowan::GreenNodeBuilder::start_node_at`]
   #[inline]
-  pub fn start_node_at(&self, checkpoint: rowan::Checkpoint, kind: Lang::Kind) {
-    if !self.open(true) {
+  pub fn start_node_at(&self, checkpoint: TreeCheckpoint, kind: Lang::Kind) {
+    // Exactly the range `rowan` will drain into this wrap, and nothing else at this level: a
+    // sibling that closed before the checkpoint is not in its subtree and is not in its charge.
+    let swallowed = self.ledger.borrow().deepest_after(checkpoint.at);
+    if !self.open(swallowed) {
       return;
     }
+    // Forwarded BEFORE the ledger moves, so `rowan`'s own checkpoint asserts decide a stale one
+    // and the ledger is not left describing a wrap that never opened.
     self
       .builder
       .borrow_mut()
-      .start_node_at(checkpoint, Lang::kind_to_raw(kind));
+      .start_node_at(checkpoint.inner, Lang::kind_to_raw(kind));
+    self.commit_open(checkpoint.at);
   }
 
   /// Adds a token with the given kind and text to the current node.
@@ -719,6 +855,8 @@ where
       .builder
       .borrow_mut()
       .token(Lang::kind_to_raw(kind), text);
+    // A token is a leaf, not a node: it occupies a child slot and adds no level.
+    self.ledger.borrow_mut().push_child(0);
   }
 
   /// Finishes the current node started with [`start_node()`](Self::start_node)
@@ -747,15 +885,17 @@ where
     if self.too_deep.get() {
       return;
     }
+    // Forwarded first: `rowan` panics here if there is no node to close, and it is the
+    // authority on that. Past this line the pop below cannot be empty, because the two stacks
+    // move together.
     self.builder.borrow_mut().finish_node();
-    let mut ledger = self.deepest_child.borrow_mut();
-    // The bottom entry is the builder's own top level and is never popped; `rowan` has
-    // already panicked on the line above if there was no node to close.
-    if ledger.len() > 1 {
-      let closed = 1 + ledger.pop().unwrap_or(0);
-      if let Some(parent) = ledger.last_mut() {
-        *parent = (*parent).max(closed);
-      }
+    let mut ledger = self.ledger.borrow_mut();
+    if let Some(first) = ledger.parents.pop() {
+      // The closed node's own subtree depth, and then it takes the place of everything it
+      // swallowed — the mirror of `rowan` draining that range into one green node.
+      let depth = 1 + ledger.deepest_after(first);
+      ledger.truncate_to(first);
+      ledger.push_child(depth);
     }
   }
 
@@ -798,6 +938,14 @@ where
         depth: MAX_TREE_DEPTH as u64,
       });
     }
+    // The ledger's own reading of the tree it just tracked, checked against the ceiling it was
+    // maintained to enforce. It is `O(1)` — the suffix-max stack's head — and it is the one place
+    // the charge and the artefact can be compared without walking the tree.
+    debug_assert!(
+      self.ledger.borrow().deepest_after(0) <= MAX_TREE_DEPTH,
+      "the depth ledger admitted a tree past MAX_TREE_DEPTH: a charge was computed over a range \
+       that is not the one rowan drained"
+    );
     Ok(self.builder.into_inner().finish())
   }
 }

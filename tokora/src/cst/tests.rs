@@ -171,8 +171,12 @@ fn the_builder_accepts_a_tree_at_the_ceiling_and_refuses_one_past_it() {
   );
 }
 
-/// A retro-wrap opens a node like a direct open does, and is refused at the same ceiling —
-/// the door `start_node` alone would have left open.
+/// A retro-wrap opens a node like a direct open does, and is refused at the same ceiling when it
+/// genuinely swallows that depth — the door `start_node` alone would have left open.
+///
+/// The companion to `a_row_of_sibling_wraps_is_two_levels_deep_however_many_there_are`: that cell
+/// holds that width is not depth, and this one holds that the fix is not simply *charging less*.
+/// Here the wrap really does inherit a chain at the ceiling, and the charge has to see it.
 #[test]
 fn the_builder_refuses_a_retro_wrap_that_crosses_the_ceiling() {
   let builder = SyntaxTreeBuilder::<TestLang>::new();
@@ -269,4 +273,259 @@ fn both_builder_outcomes_survive_the_ceiling_on_the_minimum_supported_stack() {
   handle
     .join()
     .expect("neither outcome may abort or panic on the stack this crate says it needs");
+}
+
+/// **Width is not depth.** `N` sibling retro-wraps under one root, each wrapping exactly one
+/// token, is a tree of depth 2 however large `N` is — and `N` here is past the ceiling.
+///
+/// This is the counterexample to charging a wrap against the deepest child the *level* ever
+/// completed: a wrap swallows only the children added after its own checkpoint, so a sibling
+/// that closed before it is not in its subtree and must not be in its charge. Charging
+/// level-wide made each sibling's depth feed the next one's charge, so a flat row of wraps
+/// climbed one phantom level per sibling and the builder latched somewhere past the thousandth
+/// — discarding a perfectly droppable two-level tree with `TooDeep`.
+#[test]
+fn a_row_of_sibling_wraps_is_two_levels_deep_however_many_there_are() {
+  const SIBLINGS: usize = MAX_TREE_DEPTH + 64;
+
+  let builder = SyntaxTreeBuilder::<TestLang>::new();
+  builder.start_node(TestKind::Root);
+  for _ in 0..SIBLINGS {
+    let checkpoint = builder.checkpoint();
+    builder.token(TestKind::Ident, "x");
+    builder.start_node_at(checkpoint, TestKind::Root);
+    builder.finish_node();
+  }
+  builder.finish_node();
+
+  let green = builder
+    .finish()
+    .expect("a row of one-token wraps is two levels deep, whatever its width");
+  assert_eq!(
+    green_depth(&green),
+    2,
+    "root, then one wrap per token — the width never becomes depth"
+  );
+}
+
+/// The bound is **on the structure, not on the input**, and it is asserted rather than argued.
+///
+/// The row above is the width case: `MAX_TREE_DEPTH + 64` children at one level, and the ledger
+/// holds a handful of entries throughout because it keeps only the suffix maxima — strictly
+/// decreasing depths, each at most the ceiling.
+#[test]
+fn the_ledger_is_bounded_by_the_ceiling_and_not_by_the_width() {
+  const SIBLINGS: usize = MAX_TREE_DEPTH + 64;
+
+  let builder = SyntaxTreeBuilder::<TestLang>::new();
+  builder.start_node(TestKind::Root);
+  let mut widest = 0usize;
+  for _ in 0..SIBLINGS {
+    let checkpoint = builder.checkpoint();
+    builder.token(TestKind::Ident, "x");
+    builder.start_node_at(checkpoint, TestKind::Root);
+    builder.finish_node();
+    widest = widest.max(builder.ledger.borrow().suffix_max.len());
+  }
+  builder.finish_node();
+
+  assert!(
+    widest <= MAX_TREE_DEPTH + 1,
+    "the suffix-max stack holds strictly decreasing depths bounded by the ceiling, so it cannot \
+     exceed MAX_TREE_DEPTH + 1 entries — it reached {widest}"
+  );
+  assert!(
+    widest <= 4,
+    "and over a flat row it is a handful, not a function of the width: {widest} entries for \
+     {SIBLINGS} children"
+  );
+  let _ = builder.finish().expect("still two levels deep");
+}
+
+/// **The fix is not "charge less".** A wrap that genuinely inherits depth is charged for it, and
+/// the tree it produces is the depth the charge predicted.
+#[test]
+fn a_wrap_that_really_swallows_a_chain_is_charged_for_it() {
+  const CHAIN: usize = 500;
+
+  let builder = SyntaxTreeBuilder::<TestLang>::new();
+  let checkpoint = builder.checkpoint();
+  for _ in 0..CHAIN {
+    builder.start_node(TestKind::Root);
+  }
+  builder.token(TestKind::Ident, "x");
+  for _ in 0..CHAIN {
+    builder.finish_node();
+  }
+  // The chain is complete and `CHAIN` levels deep; this wrap inherits all of it.
+  assert_eq!(
+    builder.ledger.borrow().deepest_after(checkpoint.at),
+    CHAIN,
+    "the charge is the depth of the range rowan will drain into the wrap"
+  );
+  builder.start_node_at(checkpoint, TestKind::Root);
+  builder.finish_node();
+
+  let green = builder.finish().expect("501 levels is under the ceiling");
+  assert_eq!(
+    green_depth(&green),
+    CHAIN + 1,
+    "the wrap is one level above everything it swallowed"
+  );
+}
+
+/// A deep sibling does not poison its neighbour, and the margin is exactly one level — the cell
+/// that separates "charged over the checkpoint's range" from "charged over the level".
+///
+/// The chain is at the ceiling under the root, so the tree is exactly at it. The wrap beside it
+/// inherits nothing and is charged `0`; charged level-wide it would have been charged the chain's
+/// own depth and refused a tree that fits.
+#[test]
+fn a_wrap_beside_a_ceiling_deep_sibling_is_charged_for_its_own_range_only() {
+  let chain = MAX_TREE_DEPTH - 1;
+
+  let builder = SyntaxTreeBuilder::<TestLang>::new();
+  builder.start_node(TestKind::Root);
+  for _ in 0..chain {
+    builder.start_node(TestKind::Root);
+  }
+  builder.token(TestKind::Ident, "x");
+  for _ in 0..chain {
+    builder.finish_node();
+  }
+  let checkpoint = builder.checkpoint();
+  builder.token(TestKind::Ident, "y");
+  assert_eq!(
+    builder.ledger.borrow().deepest_after(checkpoint.at),
+    0,
+    "the sibling chain closed BEFORE this checkpoint, so it is not in this wrap's range"
+  );
+  builder.start_node_at(checkpoint, TestKind::Root);
+  builder.finish_node();
+  builder.finish_node();
+
+  let green = builder
+    .finish()
+    .expect("root over a ceiling-deep chain and a one-token wrap is exactly at the ceiling");
+  assert_eq!(green_depth(&green), MAX_TREE_DEPTH);
+}
+
+// ── Checkpoint reuse, order and staleness: what each one does, established ──────
+//
+// A checkpoint is a value the caller holds, so it can be spent twice, spent out of order, or
+// spent after its level has closed. The answer for all of them is one sentence, and it is a
+// property of the ledger's shape rather than a set of cases it handles: **the ledger indexes
+// rowan's own flat child stream**, so a use rowan ACCEPTS wraps exactly `children[cp..]` — the
+// range the charge was computed over — and a use rowan REFUSES panics in rowan, before the
+// ledger is touched, because the forward happens first.
+
+/// Spending one checkpoint twice is legal, and the second wrap is charged over what it actually
+/// wraps — the first wrap.
+#[test]
+fn a_checkpoint_spent_twice_charges_the_second_wrap_over_the_first() {
+  let builder = SyntaxTreeBuilder::<TestLang>::new();
+  builder.start_node(TestKind::Root);
+  let checkpoint = builder.checkpoint();
+  builder.token(TestKind::Ident, "x");
+
+  builder.start_node_at(checkpoint, TestKind::Root);
+  builder.finish_node();
+  assert_eq!(
+    builder.ledger.borrow().deepest_after(checkpoint.at),
+    1,
+    "the first wrap is now the only child in that range, and it is one level deep"
+  );
+
+  builder.start_node_at(checkpoint, TestKind::Root);
+  builder.finish_node();
+  builder.finish_node();
+
+  let green = builder.finish().expect("three levels");
+  assert_eq!(
+    green_depth(&green),
+    3,
+    "root, the second wrap, the first wrap — the second is charged for the first, not beside it"
+  );
+}
+
+/// Checkpoints spent out of order are each charged over their own range.
+#[test]
+fn checkpoints_spent_out_of_order_are_charged_over_their_own_ranges() {
+  let builder = SyntaxTreeBuilder::<TestLang>::new();
+  builder.start_node(TestKind::Root);
+  let outer = builder.checkpoint();
+  builder.token(TestKind::Ident, "a");
+  let inner = builder.checkpoint();
+  builder.token(TestKind::Ident, "b");
+
+  // The later checkpoint first: it wraps only `b`.
+  builder.start_node_at(inner, TestKind::Root);
+  builder.finish_node();
+  // Then the earlier one, which now wraps `a` and that wrap.
+  builder.start_node_at(outer, TestKind::Root);
+  builder.finish_node();
+  builder.finish_node();
+
+  let green = builder.finish().expect("three levels");
+  assert_eq!(
+    green_depth(&green),
+    3,
+    "root, the outer wrap, the inner wrap"
+  );
+}
+
+/// A checkpoint taken at a node's first child, spent after that node closed, is a use `rowan`
+/// **accepts** — and the ledger charges it exactly, because it is charged over the same flat
+/// range `rowan` wraps.
+#[test]
+fn a_checkpoint_rowan_still_accepts_after_its_node_closed_is_charged_exactly() {
+  let builder = SyntaxTreeBuilder::<TestLang>::new();
+  builder.start_node(TestKind::Root);
+  let checkpoint = builder.checkpoint();
+  builder.start_node(TestKind::Root);
+  builder.token(TestKind::Ident, "x");
+  builder.finish_node();
+
+  // The node is closed; `rowan` accepts the checkpoint here because it names that node's slot.
+  assert_eq!(
+    builder.ledger.borrow().deepest_after(checkpoint.at),
+    1,
+    "the range now holds the closed node, one level deep, and the wrap inherits it"
+  );
+  builder.start_node_at(checkpoint, TestKind::Root);
+  builder.finish_node();
+  builder.finish_node();
+
+  let green = builder.finish().expect("three levels");
+  assert_eq!(
+    green_depth(&green),
+    3,
+    "root, the wrap, the node it wrapped"
+  );
+}
+
+/// A checkpoint whose children a `finish_node` already drained is `rowan`'s panic, in `rowan`,
+/// and the ledger never sees it — the forward happens before the ledger moves.
+#[test]
+#[should_panic(expected = "checkpoint no longer valid")]
+fn a_checkpoint_left_behind_by_a_finish_node_panics_in_rowan() {
+  let builder = SyntaxTreeBuilder::<TestLang>::new();
+  builder.start_node(TestKind::Root);
+  builder.token(TestKind::Ident, "a");
+  builder.token(TestKind::Ident, "b");
+  let checkpoint = builder.checkpoint();
+  builder.finish_node();
+  builder.start_node_at(checkpoint, TestKind::Root);
+}
+
+/// And a checkpoint from before the current node started is `rowan`'s other assert, on the same
+/// terms.
+#[test]
+#[should_panic(expected = "checkpoint no longer valid")]
+fn a_checkpoint_from_below_the_open_node_panics_in_rowan() {
+  let builder = SyntaxTreeBuilder::<TestLang>::new();
+  let checkpoint = builder.checkpoint();
+  builder.token(TestKind::Ident, "a");
+  builder.start_node(TestKind::Root);
+  builder.start_node_at(checkpoint, TestKind::Root);
 }
