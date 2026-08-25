@@ -536,7 +536,9 @@ const _: () = {
 /// Retained depths are therefore **strictly decreasing** and each is at most [`MAX_TREE_DEPTH`],
 /// so the structure holds at most `MAX_TREE_DEPTH + 1` entries **whatever the caller's width** —
 /// the row of siblings above collapses to one or two. The parent stack is bounded by the ceiling
-/// for the same reason. Both are `O(MAX_TREE_DEPTH)`, not `O(children)`.
+/// for the same reason. Both are `O(MAX_TREE_DEPTH)`, not `O(children)`, and the query into the
+/// first is a binary search over an index-ascending slice, so it is `O(log MAX_TREE_DEPTH)`
+/// rather than a walk past every enclosing level.
 #[cfg(feature = "rowan")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]
 #[derive(Debug)]
@@ -615,11 +617,13 @@ impl Ledger {
   /// — the maximum included — which it does not. An empty range has no retained entry at or after
   /// `from`, because the final child is always retained.
   fn deepest_after(&self, from: usize) -> usize {
-    self
-      .suffix_max
-      .iter()
-      .find(|(index, _)| *index >= from)
-      .map_or(0, |(_, depth)| *depth)
+    // Binary search, not a scan, and the direction is why: the entries are ascending in index,
+    // the enclosing levels' entries are the ones with smaller indices, and `from` is usually
+    // near the end — so a front-to-back scan walks past every enclosing level on every query.
+    // That is `O(MAX_TREE_DEPTH)` per call in the staircase shape (a child of depth 1000, then
+    // 999, then 998, …, which retains one entry each) against `O(log MAX_TREE_DEPTH)` here.
+    let at = self.suffix_max.partition_point(|(index, _)| *index < from);
+    self.suffix_max.get(at).map_or(0, |(_, depth)| *depth)
   }
 
   /// Appends one child of subtree depth `depth` — `0` for a token, which is not a node.
