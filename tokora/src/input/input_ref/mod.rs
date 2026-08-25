@@ -253,7 +253,22 @@ pub struct ScannerAttempt<'inp, 'closure, L: Lexer<'inp>> {
   pub(crate) regime: u64,
 }
 
-#[cfg(test)]
+// GATED TO EXACTLY THE CFG THAT COMPILES ITS READERS, which is `tests`' and not `cfg(test)`.
+//
+// Every call site of `count` — twenty of them, on 2026-08-25 — is in `input_ref/tests.rs`, which
+// needs a logos lexer fixture and an allocator: `all(test, logos_0_16, std)`. The method's own
+// gate was `cfg(test)` alone, which is strictly wider, so a `--tests` selection with `std` but
+// without `logos_0_16` compiled the method and nothing that reads it. `deny(warnings)` turns that
+// into a build failure rather than a lint, and `--no-default-features --features rowan,combinators
+// --tests` is exactly such a selection — one of the eight legs `ci/feature_cfg_coverage.py
+// --print-legs` enumerates and CI runs (al8n/tokora#318).
+//
+// The answer is that the method is genuinely unused there, not that a reader is missing: the
+// crate-internal exact-tally cells are the only readers there have ever been, and they live where
+// the fixture does. So the gate becomes the union of its readers' gate — the discipline the
+// `ClosePayload` re-export below already follows and says so in as many words. A later reader in
+// some other selection does not compile, which is the loud direction: widen this gate to match.
+#[cfg(all(test, feature = "logos_0_16", feature = "std"))]
 impl ScannerTripBaseline<'_> {
   /// The raw count, for the in-crate cells that assert exact trip tallies rather than the
   /// attempt-relative verdict. There is no such door on the public surface.
