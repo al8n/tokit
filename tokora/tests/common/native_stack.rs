@@ -453,7 +453,16 @@ pub fn announce_arm(what: &str, arm: FrameReuseArm) {
 fn on_real_stderr(line: &str) {
   use std::io::Write as _;
 
+  // One `write_all` over the content and its newline together, not `writeln!`: that macro's
+  // format string has the newline as a separate trailing piece, so `write_fmt` issues it as a
+  // second `write_str` call — a second syscall on an unbuffered stderr. `ci/stack_probe.sh` and
+  // `ci/sanitizer.sh` merge this process's stdout and stderr onto one descriptor, and libtest's
+  // own result lines land on the same descriptor from other threads, so a call boundary between
+  // our content and our newline is a window another thread's write can land in — observed
+  // locally as `CONTROL ARM nativetest`, with the announcement's own newline arriving late as an
+  // orphaned blank line right after. Building the full line first and writing it in one call
+  // does not depend on this descriptor being unbuffered to stay whole.
   let mut err = std::io::stderr().lock();
-  let _ = writeln!(err, "{line}");
+  let _ = err.write_all(format!("{line}\n").as_bytes());
   let _ = err.flush();
 }

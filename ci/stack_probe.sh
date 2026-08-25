@@ -86,14 +86,23 @@ fi
 # the real stderr, while libtest's `test <name> ... ` for some *other* test can already have
 # reached the same descriptor without its terminating newline — this run has 17 tests and they run
 # in parallel. The two then share one physical line, `^` stops matching, and a perfectly good
-# `native` run reds as "no arm at all". Watched happening, on the run that planted a skipped
-# witness and got this diagnosis instead of its own. The name is written by one `write_str`, so a
-# prefix can be displaced onto the line but the word itself is never split.
+# `native` run reds as "no arm at all".
+#
+# The alternation is `FrameReuseArm::as_str`'s own vocabulary, not a character class. A greedy
+# `[a-z][a-z]*` reads past the word: `on_real_stderr` used to write the content and its trailing
+# newline as two separate syscalls, and a run that lost that race put another thread's line
+# directly after ours with no newline between — `stack_per_level: CONTROL ARM nativetest`, planted
+# and reproduced locally at ~2% of runs (6/300), with the announcement's own newline surfacing late
+# as an orphaned blank line right after. `native_stack.rs` now writes the line in one `write_all`
+# call, which closes the window at the source; this alternation is the second door, so a token that
+# still lands adjacent — a partial write under a signal is always possible on a descriptor two
+# writers share — cannot be absorbed into the arm name, because none of the three arms is a prefix
+# of another and nothing outside the enum can extend a match past one of them.
 #
 # `|| true` because no match is a *result* here, not an error: `grep` exits 1 on it, and under
 # `set -e -o pipefail` that ends the script at this assignment — reporting the failure as a bare
 # exit code with the diagnosis below never printed. Watched happening.
-arm="$(grep -o 'stack_per_level: CONTROL ARM [a-z][a-z]*' "$log" | tail -1 | sed 's/.* //' || true)"
+arm="$(grep -oE 'stack_per_level: CONTROL ARM (relocating|declared|native)' "$log" | tail -1 | sed 's/.* //' || true)"
 if [ "$arm" != native ]; then
   fail "the frame-reuse control reported '${arm:-no arm at all}' where it must report 'native'; the figure above was read on the assumption that frames are reused, and that is the arm which asserts it"
 fi
