@@ -237,17 +237,21 @@ mod tests {
       missing.iter().map(|op| op.label()).collect::<Vec<_>>()
     );
 
-    // The corpus-margin cell's aggregate half: the recorded deepest tree must be ATTAINED,
-    // not merely not-exceeded. The per-case assertion in `cst::run` holds the upper side, so
-    // this is the one that catches a corpus that quietly got shallower and left the figure
-    // behind it — a stale number in the margin the green-tree depth ceiling is argued from.
+    // The corpus-margin cell's aggregate half for THIS population: the recorded figure must be
+    // ATTAINED, not merely not-exceeded, so a corpus that quietly got shallower cannot leave a
+    // stale number behind it in the margin the green-tree depth ceiling is argued from.
+    //
+    // A floor rather than an equality, and the counter's process-wide monotonicity is why: in CI
+    // this test and `fuzz_deep_run` never share a process, but `--include-ignored` puts them in
+    // one and the maximum could then be the sweep's. The upper side is the per-case assertion in
+    // `cst::run`, which is exact in every run and pinned at the deep sweep's figure.
     #[cfg(feature = "rowan")]
-    assert_eq!(
-      cst::deepest_tree_seen(),
-      cst::CORPUS_DEEPEST_TREE,
-      "the deepest green tree the default corpus materializes is no longer the recorded \
-       figure. Re-record it in `fuzz/cst.rs`; it is read by the margin argument on \
-       `cst::MAX_TREE_DEPTH`."
+    assert!(
+      cst::deepest_tree_seen() >= cst::CORPUS_DEEPEST_TREE,
+      "the default corpus no longer materializes a tree as deep as the recorded {}. Re-record \
+       it in `fuzz/cst.rs`; it is the floor witness that the depth cell measures a non-empty \
+       population at all.",
+      cst::CORPUS_DEEPEST_TREE
     );
   }
 
@@ -261,6 +265,19 @@ mod tests {
       cov.is_complete(),
       "deep run failed to cover the alphabet: {:?}",
       cov.missing()
+    );
+
+    // The deep sweep owns the figure the per-case depth bound is pinned at, so it is the sweep
+    // that has to reach it. This is the only cell that runs this population, and `test (release)`
+    // is the only CI job that runs this cell — which is why a bound pinned at the SMALLER
+    // corpus's maximum was green everywhere else and red only there.
+    #[cfg(feature = "rowan")]
+    assert_eq!(
+      cst::deepest_tree_seen(),
+      cst::DEEP_SWEEP_DEEPEST_TREE,
+      "the deepest green tree the 50 000-seed sweep materializes is no longer the recorded \
+       figure. Re-record it in `fuzz/cst.rs`; it is the bound `cst::run` enforces per case and \
+       the figure the margin against `cst::MAX_TREE_DEPTH` is argued from."
     );
   }
 }

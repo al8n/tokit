@@ -153,15 +153,58 @@ pub use text::CstText;
 /// the ceiling needs a green tree whose release is not recursive, which is a dependency
 /// decision (al8n/tokora#252) and not a number.
 ///
+/// # THE STACK THIS NUMBER REQUIRES, AND IT IS A REQUIREMENT
+///
+/// **These doors are safe on a thread with at least [`MIN_SUPPORTED_STACK`] of stack, and that
+/// is a contract on the caller rather than a condition of the measurement.** It was the second
+/// for one revision — the bisection below was taken on a 2 MiB thread and nothing said so
+/// where a caller would read it — and the omission is a real one, because neither door
+/// requires that stack nor can either check what is left of it. Nothing in `std` reports
+/// remaining stack portably, so there is no wall to put here; there is a number, and it has to
+/// be stated.
+///
+/// The arithmetic a caller needs, so the requirement is checkable rather than trusted: the
+/// measured cost is ~477 bytes per level in a debug build and ~222 in a release one, so a tree
+/// at this ceiling costs about **477 KiB** of destructor stack in debug and 222 KiB in release.
+/// Run either door on a 256 KiB worker — `std::thread::Builder::stack_size`, or `RUST_MIN_STACK`
+/// — and an *accepted* tree still aborts when it is dropped. So does the tree a **refusal**
+/// drops, which is the sharper half: a refused build is still holding everything it built up to
+/// the ceiling, so on a stack that cannot afford the ceiling the typed-error path aborts exactly
+/// where the accepted path does. Bounding the accepted tree bounds the refused one and does not
+/// exempt it.
+///
+/// **What makes 2 MiB the right minimum is that this crate already required it, one layer in.**
+/// It is the stack `std::thread::spawn` hands out, it is the thread every stack figure in this
+/// crate is stated on (the thread `RecursionLimiter`'s own measured rows are bisected on), and
+/// the *parse* budget derived from it is the wider claim on that thread by
+/// a factor of nearly three: the shipped
+/// [`PARSE_DEFAULT_DEPTH`](crate::state::recursion_tracker::RecursionLimiter::PARSE_DEFAULT_DEPTH)
+/// of 32 models 1.25 MiB of native frames against this ceiling's 477 KiB. A thread too small to
+/// drop a tree at this ceiling is a thread too small to have run the parse that built it, and by
+/// more. This constant is therefore not the binding term in the crate's stack contract; it is a
+/// second reader of one that already existed, and the `const` block below ties the two together
+/// so they cannot drift apart silently.
+///
+/// The residue, stated because it is not covered: a drop that happens **inside a consumer's own
+/// recursion** pays for both at once, and this crate cannot see that stack. A consumer holding
+/// trees across a deep recursive transform owes itself the same arithmetic.
+///
 /// # Why a constant, and not a knob
 ///
-/// The value is a property of the **runtime's stack**, not of any document. A caller who
-/// raised it would be configuring the abort back in — the one thing the value exists to
-/// remove — and a caller who lowered it would only refuse more trees, which no API is needed
-/// to do. Between those, a knob has no setting that buys anything a caller could want, so it
-/// is not offered. The two published *recursion* budgets are knobs for exactly the opposite
-/// reason: what a native frame costs is a fact about the caller's grammar and build, which
-/// only the caller knows. What a `GreenNode`'s drop frame costs is a fact about `rowan`.
+/// The value is a property of the **runtime's stack**, not of any document. A caller who raised
+/// it would be configuring the abort back in — the one thing the value exists to remove.
+///
+/// The lowering direction is where the first version of this argument was wrong, and the
+/// correction is worth having in writing: it said a caller who lowered it "would break nothing
+/// real", which reads as *nobody would want to*. Somebody would — the caller on the 256 KiB
+/// worker above, for whom lowering is the only thing that makes these doors safe. What answers
+/// them is not a knob, it is that the same thread cannot run this crate's parser either, at the
+/// budget it ships with and by a wider margin. The fix there is the thread, and a per-call
+/// ceiling would let a caller believe otherwise.
+///
+/// The two published *recursion* budgets are knobs for the opposite reason: what a native frame
+/// costs is a fact about the caller's grammar and build, which only the caller knows. What a
+/// `GreenNode`'s drop frame costs is a fact about `rowan`.
 ///
 /// # The value, and the measurement behind it
 ///
@@ -184,12 +227,14 @@ pub use text::CstText;
 /// halves are `const`-asserted beside the constant, so the derivation is pinned as an
 /// equality rather than admitted by a band.
 ///
-/// **One number for both profiles**, on the argument
+/// **One number for both profiles, derived from the tighter of the two**, on the argument
 /// [`PARSE_DEFAULT_DEPTH`](crate::state::recursion_tracker::RecursionLimiter::PARSE_DEFAULT_DEPTH)
-/// already makes for holding one value across both — which is stronger here than there,
-/// because the frames being bounded are `rowan`'s, so
-/// they are compiled under the *dependency's* profile — a fact `cfg!(debug_assertions)` in
-/// this crate cannot observe at all, not even imperfectly.
+/// already makes for holding one value across both — which is stronger here than there, because
+/// the frames being bounded are `rowan`'s, so they are compiled under the *dependency's* profile
+/// — a fact `cfg!(debug_assertions)` in this crate cannot observe at all, not even imperfectly.
+/// The debug row is 2.1x tighter than the release one and the ceiling is derived from it, so the
+/// profile half of "the smallest supported configuration" is already taken; the half that was
+/// missing was the stack, and it is the section above.
 ///
 /// # What the ceiling clears, and the one cell it meets
 ///
@@ -210,6 +255,31 @@ pub use text::CstText;
 #[cfg(feature = "rowan")]
 #[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]
 pub const MAX_TREE_DEPTH: usize = 1024;
+
+/// The stack a thread must have for the `rowan` doors to be safe on it — **2 MiB**, the amount
+/// `std::thread::spawn` hands out, and a requirement rather than an observation.
+///
+/// [`MAX_TREE_DEPTH`] is derived against this figure: a tree at the ceiling costs about 477 KiB
+/// of destructor stack in a debug build, which is under a fifth of it, and the `const` block
+/// beside the derivation asserts that relation so the two cannot drift. Below this figure a
+/// tree this crate **accepted** can still abort when it is dropped, and so can the one a
+/// **refusal** drops — a refused build is still holding everything it built up to the ceiling.
+/// Neither door can check what stack is left; `std` reports it nowhere portably, which is why
+/// this is a number to satisfy rather than a wall to hit.
+///
+/// It is the same 2 MiB every other stack figure in this crate is stated on, and it is not this
+/// constant that binds it: the shipped
+/// [`PARSE_DEFAULT_DEPTH`](crate::state::recursion_tracker::RecursionLimiter::PARSE_DEFAULT_DEPTH)
+/// models 1.25 MiB of native parse frames on the same thread, nearly three times the tree
+/// ceiling's drop. A thread that cannot afford this constant cannot afford the parse either, and
+/// the answer there is the thread rather than a smaller tree.
+///
+/// The main thread usually has more (8 MiB on Linux and macOS), and `RUST_MIN_STACK` or
+/// `std::thread::Builder::stack_size` can set a spawned thread either way. What this crate can
+/// state is the figure it derives against; sizing the thread is the caller's.
+#[cfg(feature = "rowan")]
+#[cfg_attr(docsrs, doc(cfg(feature = "rowan")))]
+pub const MIN_SUPPORTED_STACK: usize = crate::state::recursion_tracker::measured::STACK;
 
 // ── THE MEASURED ROWS BEHIND `MAX_TREE_DEPTH` ────────────────────────────────────────────
 //
@@ -248,14 +318,42 @@ const ROWAN_RECURSION_ABORTS_AT_DEBUG: usize = 4388;
 #[cfg(feature = "rowan")]
 const ROWAN_RECURSION_ABORTS_AT_RELEASE: usize = 9410;
 
+/// Bytes of stack one level of `rowan`'s recursive descent spends in a **debug** build —
+/// **derived** from the bisection row rather than written down separately, so the two cannot
+/// disagree. ~477 B.
+///
+/// This is the constant that makes `MIN_SUPPORTED_STACK` a checked relation instead of a
+/// sentence: the assertions below price the whole ceiling in bytes against it.
+#[cfg(feature = "rowan")]
+const ROWAN_BYTES_PER_LEVEL_DEBUG: usize =
+  crate::state::recursion_tracker::measured::STACK / ROWAN_RECURSION_ABORTS_AT_DEBUG;
+
 /// The derivation of `MAX_TREE_DEPTH`, enforced by the compiler rather than by prose.
 ///
 /// A range-shaped guard would read as though it checked a derivation while admitting every
 /// value the argument rejects, so the deepest-power-of-two rule is pinned from **both** sides:
 /// this depth clears the binding cell by `MIN_HEADROOM`, and the next doubling does not.
+///
+/// The stack half is pinned in BYTES as well as in levels, and that is not the same assertion
+/// said twice. The level form is a relation between two figures measured on one thread; the
+/// byte form is a relation between the ceiling and `MIN_SUPPORTED_STACK`, which is the thread
+/// itself. Change the stated minimum and the byte form is what notices.
 #[cfg(feature = "rowan")]
 const _: () = {
   use crate::state::recursion_tracker::{RecursionLimiter, policy::MIN_HEADROOM};
+
+  assert!(
+    MIN_SUPPORTED_STACK == crate::state::recursion_tracker::measured::STACK,
+    "the CST doors' stated minimum stack has come apart from the thread every other stack \
+     figure in this crate is measured on. They are one contract with two readers; if the \
+     minimum is to move, move the measurement with it."
+  );
+  assert!(
+    MAX_TREE_DEPTH * ROWAN_BYTES_PER_LEVEL_DEBUG * MIN_HEADROOM < MIN_SUPPORTED_STACK,
+    "a tree at MAX_TREE_DEPTH does not fit inside MIN_SUPPORTED_STACK by MIN_HEADROOM once its \
+     drop is priced in bytes. The ceiling and the stated minimum are one derivation: lower the \
+     ceiling, or raise the minimum and say so where a caller reads it."
+  );
 
   assert!(
     MAX_TREE_DEPTH.is_power_of_two(),

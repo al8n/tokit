@@ -52,8 +52,10 @@ and will red until they do.
 
 ### Added
 
-- **`cst::MAX_TREE_DEPTH` and `cst::FinishError::TooDeep` — the ceiling that keeps a green tree
-  droppable, and the refusal that enforces it** (#316). 1024 nested nodes, root wrapper counted.
+- **`cst::MAX_TREE_DEPTH`, `cst::MIN_SUPPORTED_STACK` and `cst::FinishError::TooDeep` — the
+  ceiling that keeps a green tree droppable, the stack it is derived against, and the refusal
+  that enforces it** (#316). 1024 nested nodes, root wrapper counted, on a thread of at least
+  2 MiB.
   `rowan` releases a green tree **recursively**, so a deep enough one ends the process in its own
   destructor: an abort, with no unwind, no diagnostic and nothing to catch. Nothing downstream can
   defend against it — by the time a consumer holds the tree, its existence is the hazard — so the
@@ -71,8 +73,25 @@ and will red until they do.
   `PARSE_DEFAULT_DEPTH`'s own argument and more strongly: the frames are `rowan`'s, so their
   optimisation is the *dependency's*, which `cfg!(debug_assertions)` here cannot observe at all.
 
-  **It is a constant and not a knob.** A caller who raised it would be configuring the abort back
-  in; a caller who lowered it would only refuse more, which needs no API.
+  **The 2 MiB is a requirement, not a measurement condition, and saying so is half the change.**
+  Neither door requires that stack nor can check what is left of it — `std` reports remaining
+  stack nowhere portably — so `MIN_SUPPORTED_STACK` publishes the figure the ceiling is derived
+  against and the `const` block ties the two together in *bytes*, against the same
+  `measured::STACK` every other stack figure in this crate is stated on. Below it, a tree this
+  crate **accepted** aborts when dropped; so does the one a **refusal** drops, because a refused
+  build is still holding everything it built up to the ceiling. Both halves are now run rather
+  than argued: two cells build at the ceiling on a thread of exactly `MIN_SUPPORTED_STACK` and
+  take both outcomes through both doors. Planted at 256 KiB, each half — accept, and refusal
+  alone — dies with `fatal runtime error: stack overflow, aborting`, which is what makes the
+  cells sharp and the contract real.
+
+  It is still a constant and not a knob, and the argument had to be corrected rather than
+  repeated: the first version said a caller who lowered it "would break nothing real", which
+  reads as *nobody would want to*. The caller on a 256 KiB worker would. What answers them is
+  not a per-call ceiling but that the same thread cannot run this crate's parser either — the
+  shipped `PARSE_DEFAULT_DEPTH` models 1.25 MiB of native parse frames against this ceiling's
+  477 KiB of drop, so the tree ceiling is never the binding term in the crate's stack contract.
+  A caller who raised the ceiling would be configuring the abort back in.
 
   **What actually reaches it is not deep nesting.** `Pratt::with_cst_kinds` mints one retro-wrap
   anchor per expression and spends it once per fold, and same-target wraps nest inside-out — the
@@ -85,8 +104,14 @@ and will red until they do.
 
   Every recursion budget this crate ships or publishes fits under the ceiling
   (`PARSE_DEFAULT_DEPTH` 32, `OPTIMIZED_PARSE_DEPTH` 256), asserted at compile time; the deepest
-  tree this crate's own CST fuzz corpus materializes is **4**, asserted live from both sides so
-  the margin cannot go stale in prose.
+  tree this crate's own CST corpus materializes is **4** over the default 256 seeds and **6** over
+  the 50 000-seed sweep, both asserted live so the margin cannot go stale in prose. The bound is
+  pinned at the deep sweep's figure, and the reason is a defect worth recording: it was pinned at
+  the *default* corpus's maximum for one revision and enforced over every case, including the
+  larger sweep. The sweep is `#[ignore]`d and only `test (release)` runs it, so the failure read
+  as profile-dependent and was not — the deep sweep panics identically in debug and the default
+  corpus passes identically in release. Two populations run one assertion; the bound belongs to
+  the larger.
 
 - **`TokenBudgetTally::refused_an_item` — the one question a host that caught an unwind and
   concluded can still ask.** A budget refusal has **no diagnostic channel** (a diagnostic would have to be

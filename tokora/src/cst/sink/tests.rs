@@ -8895,3 +8895,55 @@ fn the_ceiling_catches_the_retro_wrap_shape_the_recorded_depth_cannot_see() {
     }
   );
 }
+
+/// **The stated minimum stack is a contract, so it is RUN rather than asserted.** Both
+/// materialization outcomes, at the ceiling, on a thread of exactly
+/// [`MIN_SUPPORTED_STACK`](crate::cst::MIN_SUPPORTED_STACK).
+///
+/// The second half is the one that needs saying. A refused materialization is still **holding
+/// everything it built** — the walk refuses at the open that would cross the ceiling, so the
+/// builder is carrying a completed subtree at the ceiling when the `Err` unwinds past it. A
+/// ceiling that bounds only the accepted tree would have converted an abort into an abort, and
+/// this cell is the difference between believing it does not and having run it.
+///
+/// **How this cell fails is not an assertion.** A drop that overruns the stack ABORTS — no
+/// unwind, no panic, no `catch_unwind` — so a regression here kills the test binary rather than
+/// printing a message. That is the only shape available for the property, and it is exactly why
+/// the property cannot live in prose.
+#[test]
+fn both_materialization_outcomes_survive_the_ceiling_on_the_minimum_supported_stack() {
+  let handle = std::thread::Builder::new()
+    .stack_size(crate::cst::MIN_SUPPORTED_STACK)
+    .spawn(|| {
+      // The accepted tree, at the ceiling: built here, and dropped here.
+      let at_ceiling = crate::cst::MAX_TREE_DEPTH - 1;
+      let (green, _emitter) = nested_chain("a", at_ceiling).finish(K_ROOT);
+      let green = green.expect("a tree at the ceiling materializes");
+      assert_eq!(green_depth(&green), crate::cst::MAX_TREE_DEPTH);
+      drop(green);
+
+      // The REFUSED one, and the shape that matters: a completed chain at the ceiling is
+      // already in the builder when a second chain crosses it, so the `Err` drops a tree the
+      // full depth of the ceiling rather than a flat run of open frames.
+      let mut sink = verbose_sink("a");
+      for _ in 0..at_ceiling {
+        sink.cst_start(K_NODE);
+      }
+      sink.record_token(&MiniTok(b'a'), &span(0, 1));
+      close_open_nodes(&mut sink, at_ceiling);
+      for _ in 0..crate::cst::MAX_TREE_DEPTH {
+        sink.cst_start(K_NODE);
+      }
+      let (green, _emitter) = sink.finish(K_ROOT);
+      assert_eq!(
+        green.expect_err("the second chain crosses the ceiling"),
+        FinishError::TooDeep {
+          depth: crate::cst::MAX_TREE_DEPTH as u64,
+        }
+      );
+    })
+    .expect("the probe thread starts");
+  handle
+    .join()
+    .expect("neither outcome may abort or panic on the stack this crate says it needs");
+}

@@ -227,3 +227,46 @@ fn a_refused_open_latches_the_builder_for_good() {
     }
   );
 }
+
+/// The builder door's half of the minimum-stack contract, run rather than asserted — the sink
+/// suite's twin, and the shape the review named: **a refusal that drops an already-completed
+/// tree at the ceiling.**
+///
+/// `the_builder_refuses_a_retro_wrap_that_crosses_the_ceiling` establishes that the refusal
+/// happens; this establishes that surviving it does not depend on the stack the ceiling was
+/// measured on being bigger than the one this crate promises. It fails by the process dying,
+/// for the reason its sink twin records.
+#[test]
+fn both_builder_outcomes_survive_the_ceiling_on_the_minimum_supported_stack() {
+  let handle = std::thread::Builder::new()
+    .stack_size(MIN_SUPPORTED_STACK)
+    .spawn(|| {
+      // Accepted, at the ceiling: built and dropped here.
+      let green = builder_chain(MAX_TREE_DEPTH).expect("a tree at the ceiling is buildable");
+      assert_eq!(green_depth(&green), MAX_TREE_DEPTH);
+      drop(green);
+
+      // Refused, with a completed ceiling-deep tree in hand: the retro-wrap is charged
+      // `level + swallowed`, so it crosses while the builder is holding the whole thing.
+      let builder = SyntaxTreeBuilder::<TestLang>::new();
+      let checkpoint = builder.checkpoint();
+      for _ in 0..MAX_TREE_DEPTH {
+        builder.start_node(TestKind::Root);
+      }
+      builder.token(TestKind::Ident, "x");
+      for _ in 0..MAX_TREE_DEPTH {
+        builder.finish_node();
+      }
+      builder.start_node_at(checkpoint, TestKind::Root);
+      assert_eq!(
+        builder.finish().expect_err("the wrap crosses the ceiling"),
+        FinishError::TooDeep {
+          depth: MAX_TREE_DEPTH as u64,
+        }
+      );
+    })
+    .expect("the probe thread starts");
+  handle
+    .join()
+    .expect("neither outcome may abort or panic on the stack this crate says it needs");
+}

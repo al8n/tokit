@@ -327,30 +327,59 @@ fn drive(
 /// The deepest green tree any CST fuzz case has materialized in this process — the live half
 /// of the corpus-margin claim on `crate::cst::MAX_TREE_DEPTH`.
 ///
-/// Monotone and process-wide, and read by `corpus_passes_and_covers_every_op` so the recorded
-/// figure has to be *attained* and not merely not-exceeded. The not-exceeded half is asserted
-/// per case in [`run`], which is what keeps a corpus that gets deeper from raising this
-/// silently.
+/// Monotone and process-wide, and read by both sweeps' own cells so each recorded figure has to
+/// be *attained* and not merely not-exceeded. The not-exceeded half is asserted per case in
+/// [`run`], which is what keeps a corpus that gets deeper from raising a figure silently.
+///
+/// Process-wide is why the default corpus's cell reads it as a **floor** and only the deep
+/// sweep's reads it as an equality: the two never share a process in CI, but a developer running
+/// `--include-ignored` puts them in one, and a monotone maximum cannot then be attributed to the
+/// sweep that produced it. The direction that matters — a tree deeper than the recorded bound —
+/// is the per-case assertion's, and that one is exact in every run.
 ///
 /// `cfg(test)` because its only reader is this crate's own corpus cell: a consumer who runs
 /// `fuzz::run_seeds` from their suite is exercising the oracles, not re-recording our margin.
 #[cfg(test)]
 static DEEPEST_TREE_SEEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// The deepest green tree this crate's own CST corpus materializes.
+/// The deepest green tree the **default** corpus — seeds `0..DEFAULT_CORPUS`, run by the
+/// ordinary suite — materializes.
 ///
-/// **This is the corpus-margin figure, and it is a live assertion rather than a sentence.**
-/// `gen_seq` bounds generated scope nesting at `MAX_DEPTH`, and a scope is one `node()`
-/// bracket, so the trees here are a handful of levels against a ceiling of 1024. The margin is
-/// the whole reason `crate::cst::MAX_TREE_DEPTH` is felt by nothing this crate ships — a claim
-/// that would rot the moment the generator changed, so both directions are checked: nothing
-/// exceeds it (per case, in [`run`]) and something reaches it (over the corpus, in
-/// `fuzz::tests::corpus_passes_and_covers_every_op`).
+/// A floor, and only a floor: it witnesses that the depth cell measures a non-empty population
+/// rather than sitting over a corpus that stopped building trees. The *bound* is
+/// [`DEEP_SWEEP_DEEPEST_TREE`], for the reason stated there.
 pub(crate) const CORPUS_DEEPEST_TREE: usize = 4;
 
-/// The margin itself, pinned where a reader who skips docs will meet it.
+/// The deepest green tree the **deep** sweep — seeds `0..50_000`, `fuzz_deep_run` — materializes,
+/// and therefore the figure the per-case bound in [`run`] is pinned at.
+///
+/// **TWO POPULATIONS RUN THE PER-CASE ASSERTION, AND THE BOUND BELONGS TO THE LARGER ONE.** It
+/// was pinned at [`CORPUS_DEEPEST_TREE`] for one revision: a maximum measured over 256 seeds,
+/// enforced over every case including the 50 000-seed sweep, which reaches deeper. The sweep is
+/// `#[ignore]`d, so the ordinary suite never ran it and the branch's whole gate list was green;
+/// the only CI job that runs it is `test (release)` (`ci.yml`, `-- --ignored --exact
+/// fuzz::tests::fuzz_deep_run`), so the failure read as profile-dependent and was not — the deep
+/// sweep panics identically in debug, and the default corpus passes identically in release.
+/// Measured both ways: 4 over 256 seeds, 6 over 50 000, in either profile.
+///
+/// **This is the corpus-margin figure, and it is a live assertion rather than a sentence.**
+/// `gen_seq` bounds generated scope nesting at `MAX_DEPTH` and a scope is one `node()` bracket,
+/// so the trees here are a handful of levels against a ceiling three orders of magnitude away.
+/// That margin is the whole reason `crate::cst::MAX_TREE_DEPTH` is felt by nothing this crate
+/// ships — a claim that would rot the moment the generator changed — so both directions are
+/// checked, each over the population that runs it: nothing exceeds this (per case, in [`run`],
+/// in both sweeps) and the deep sweep reaches exactly it (`fuzz::tests::fuzz_deep_run`).
+pub(crate) const DEEP_SWEEP_DEEPEST_TREE: usize = 6;
+
+/// The margin itself, pinned where a reader who skips docs will meet it — off the DEEP figure,
+/// which is the larger of the two populations and the one the bound is enforced at.
 const _: () = assert!(
-  CORPUS_DEEPEST_TREE * 64 < crate::cst::MAX_TREE_DEPTH,
+  CORPUS_DEEPEST_TREE <= DEEP_SWEEP_DEEPEST_TREE,
+  "the default corpus reaches deeper than the sweep that contains it, which cannot happen \
+   unless one of the two figures was recorded against the wrong seed range"
+);
+const _: () = assert!(
+  DEEP_SWEEP_DEEPEST_TREE * 64 < crate::cst::MAX_TREE_DEPTH,
   "this crate's own CST corpus has grown to within 64x of the green-tree depth ceiling. That \
    is not a failure of the ceiling — it is the corpus arriving somewhere the ceiling's \
    derivation assumed it never went, and the two now need re-reading together."
@@ -427,10 +456,12 @@ pub(crate) fn run(src: &[u8], seed: u64, cov: &mut Coverage) {
       #[cfg(test)]
       DEEPEST_TREE_SEEN.fetch_max(depth, core::sync::atomic::Ordering::Relaxed);
       assert!(
-        depth <= CORPUS_DEEPEST_TREE,
-        "the CST corpus now materializes a {depth}-level tree, past the recorded \
-         {CORPUS_DEEPEST_TREE}. Re-record it — that figure is what makes the margin against \
-         cst::MAX_TREE_DEPTH a live claim rather than a sentence."
+        depth <= DEEP_SWEEP_DEEPEST_TREE,
+        "a CST fuzz case now materializes a {depth}-level tree, past the recorded \
+         {DEEP_SWEEP_DEEPEST_TREE}. Re-record it — that figure is what makes the margin against \
+         cst::MAX_TREE_DEPTH a live claim rather than a sentence. Note WHICH sweep found it: \
+         this bound is pinned at the deep sweep's maximum precisely because the per-case \
+         assertion runs in both."
       );
     }
     (Err(full_err), Err(pruned_err)) => {
