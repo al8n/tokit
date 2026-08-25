@@ -133,10 +133,12 @@ asan_arm() {
   # announcement reaches the descriptor while libtest's unterminated progress line can still be
   # sitting on it, and an anchored match then reads a run that announced its arm as one that did
   # not. `--exact` makes it one test here rather than seventeen, which narrows the window without
-  # closing it, and the two copies are kept the same on purpose.
+  # closing it, and the two copies are kept the same on purpose — including the alternation against
+  # `FrameReuseArm::as_str`'s three names in place of a greedy character class, which is what stops
+  # an adjacent thread's write from being absorbed into the arm name when it lands in that window.
   # `|| true` for the reason the sibling gives: no match is a result, and `grep`'s exit 1 must not
   # be able to end the script before the arm is compared and named.
-  ARM="$(grep -o 'stack_per_level: CONTROL ARM [a-z][a-z]*' "$log" | tail -1 | sed 's/.* //' || true)"
+  ARM="$(grep -oE 'stack_per_level: CONTROL ARM (relocating|declared|native)' "$log" | tail -1 | sed 's/.* //' || true)"
 }
 
 both_fake_stack_settings() {

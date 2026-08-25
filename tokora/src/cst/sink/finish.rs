@@ -45,6 +45,7 @@ use crate::{Lexer, span::Span};
 
 use super::{
   super::{
+    MAX_TREE_DEPTH,
     event::{Event, TOMBSTONE},
     profile::KindValidator,
     text::CstText,
@@ -355,6 +356,72 @@ pub enum FinishError {
     /// The kind the finish named.
     found: u16,
   },
+
+  /// The tree would nest deeper than [`MAX_TREE_DEPTH`](super::super::MAX_TREE_DEPTH), which
+  /// `rowan` could not **release**: a green tree's destructor descends into its children, so a
+  /// deep enough one ends the process in its own drop glue — an abort, with no unwind, no
+  /// diagnostic and nothing to catch.
+  ///
+  /// It is the one variant that does not describe a law the recorded stream broke. Every other
+  /// refusal here is about a *malformed* stream; this one refuses a perfectly well-formed tree
+  /// that no consumer could dispose of, and it names the ceiling rather than an event index
+  /// because the property is the whole tree's rather than any one event's.
+  ///
+  /// **Both materialization doors refuse, and so does
+  /// [`SyntaxTreeBuilder::finish`](super::super::SyntaxTreeBuilder::finish).**
+  /// [`Cst::finish_partial`](super::super::Cst::finish_partial) tolerates incompleteness, not a
+  /// value that cannot be dropped — and the tolerance it offers, closing the open nodes, would
+  /// build exactly the tree being refused. The refusal is raised at the open that would cross
+  /// the ceiling, so what the failing call drops is a tree at or under it.
+  ///
+  /// # What reaches this
+  ///
+  /// A tree's depth is not a document's nesting depth. This crate's Pratt CST hook wraps once
+  /// per fold from a single anchor, and same-target wraps nest inside-out — the correct shape
+  /// for a left-associative chain, and one whose depth is **linear in the operator count**. So
+  /// a flat `1 + 1 + 1 + …` past the ceiling arrives here, having spent one recursion level and
+  /// having never had more than one node open in the event log. See
+  /// [`MAX_TREE_DEPTH`](super::super::MAX_TREE_DEPTH) for the measurement the ceiling is
+  /// derived from and for what would be needed to lift it.
+  #[error(
+    "the tree would nest deeper than {depth} levels, which rowan could not release: a green \
+     tree's destructor recurses into its children, so a deeper one aborts the process when it \
+     is dropped"
+  )]
+  TooDeep {
+    /// The ceiling — [`MAX_TREE_DEPTH`](super::super::MAX_TREE_DEPTH).
+    depth: u64,
+  },
+}
+
+/// The **one** door that opens a frame during the replay walk, and therefore the only place a
+/// node is pushed onto the builder.
+///
+/// The ceiling is a comparison against a counter the walk already maintains: `stack` is the
+/// live frame depth *by construction* — one entry per `builder.start_node`, popped by the
+/// matching `finish_node` — so bounding the tree costs no traversal and no new state.
+///
+/// It is deliberately **not** the sink's own `Sink::depth`, which is the
+/// emission-order open-node depth and is not an upper bound on this one: materialization
+/// *hoists* every retro-wrap to its target, so `n` wraps of one tombstone open `n` nested
+/// frames here while the recorded depth never exceeds one. That is not an exotic shape — it is
+/// exactly what the Pratt CST hook emits for an `n`-operator expression. A ceiling on the
+/// recorded depth would leave the abort reachable through this crate's own blessed path.
+#[inline]
+fn open_frame(
+  builder: &mut GreenNodeBuilder<'_>,
+  stack: &mut Vec<Frame>,
+  kind: u16,
+  frame: Frame,
+) -> Result<(), FinishError> {
+  if stack.len() >= MAX_TREE_DEPTH {
+    return Err(FinishError::TooDeep {
+      depth: MAX_TREE_DEPTH as u64,
+    });
+  }
+  builder.start_node(SyntaxKind(kind));
+  stack.push(frame);
+  Ok(())
 }
 
 /// One tick of [`W`](w) — a real increment under `cfg(test)`, an empty inlined body
@@ -844,8 +911,7 @@ where
   // ── The walk ────────────────────────────────────────────────────────────────
   let mut builder = GreenNodeBuilder::new();
   let mut stack: Vec<Frame> = Vec::new();
-  builder.start_node(SyntaxKind(root_kind));
-  stack.push(Frame::Root);
+  open_frame(&mut builder, &mut stack, root_kind, Frame::Root)?;
 
   // The tiling cursor: the end of the last covered source byte, in u32 space.
   let mut covered: u32 = 0;
@@ -925,8 +991,7 @@ where
             *word |= 1u64 << (at % 64);
           }
 
-          builder.start_node(SyntaxKind(*kind));
-          stack.push(Frame::Wrap(at, *kind));
+          open_frame(&mut builder, &mut stack, *kind, Frame::Wrap(at, *kind))?;
           link = *prev;
         }
       }
@@ -949,8 +1014,7 @@ where
           );
         }
         saw_structure = true;
-        builder.start_node(SyntaxKind(*kind));
-        stack.push(Frame::Start(*kind));
+        open_frame(&mut builder, &mut stack, *kind, Frame::Start(*kind))?;
       }
       Event::Token { kind, span } => {
         if *kind == TOMBSTONE {
@@ -1259,7 +1323,7 @@ where
 /// | 7 | `first_uncovered`'s sweep of the merged cover | **ticked** (W row 7) — and bounded by `cover.len() + gaps` in total, because the cursor is shared and monotone. This is the construct the defect made quadratic |
 /// | 8 | the end-of-walk close `for _ in 0..open` | **ticked** (W row 8) — the loop the first instrument missed |
 /// | 9 | reachability bitset `std::vec![0u64; events.len().div_ceil(64)]` | justified: one lazy `alloc_zeroed` of `ceil(events/64)` words, no per-event iteration, no keyed structure — allocated only when a chain is actually walked |
-/// | 10 | `builder.start_node` / `token` / `finish_node`, `source.get`, `stack` push/pop | justified O(1) amortized per event |
+/// | 10 | `builder.start_node` / `token` / `finish_node`, `source.get`, `stack` push/pop, and `open_frame`'s depth-ceiling comparison against `stack.len()` | justified O(1) amortized per event |
 /// | 11 | the tiled-run list `tiled` | justified: one `Vec::push` per *gap*, nothing per event, and the `Vec` is never allocated for a source every token covers |
 ///
 /// Deleted by the single-pass rewrite: the gather loop over every event (its former W row 1),

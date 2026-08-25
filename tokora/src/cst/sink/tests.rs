@@ -8740,3 +8740,210 @@ fn a_saturated_cst_renders_its_trip_count_as_a_floor() {
     "and gains no suffix. Rendered: {rendered}"
   );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// The green-tree depth ceiling (al8n/tokora#316)
+//
+// `rowan` releases a green tree RECURSIVELY, so a deep enough one ends the process in its own
+// destructor. `MAX_TREE_DEPTH` and the refusal at both materialization doors are what stop
+// such a tree from ever being built.
+//
+// ── WHAT THESE CELLS CANNOT PIN ────────────────────────────────────────────────
+//
+// **That a tree past the ceiling really would abort.** The witness would have to exist in
+// order to be asserted about, and its existence IS the hazard: the process dies in the drop
+// glue of the value under test, before any assertion runs. There is no `#[should_panic]` for
+// it and no `catch_unwind` either — a stack overflow is an abort, not a panic, so nothing in
+// this suite can observe it and survive. The depth at which it happens is therefore
+// established OUTSIDE the suite, by one-trial-per-process bisection, and recorded as
+// `ROWAN_RECURSION_ABORTS_AT_DEBUG` / `_RELEASE` in `cst/mod.rs` with the method beside them;
+// the const block there pins the ceiling's derivation against those rows so the two cannot
+// drift. What the cells below hold is the other half — the refusal — which is the half a test
+// can hold.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// The materialized tree's own nesting depth, walked **iteratively**.
+///
+/// Deliberately not recursive: an oracle for a depth ceiling that itself recurses over the
+/// tree is a second stack consumer inside the cell, and one that could abort on the very
+/// input the cell exists to characterize is not an oracle.
+fn green_depth(root: &rowan::GreenNode) -> usize {
+  let mut deepest = 0usize;
+  let mut stack: std::vec::Vec<(&rowan::GreenNodeData, usize)> = std::vec![(&**root, 1usize)];
+  while let Some((node, at)) = stack.pop() {
+    deepest = deepest.max(at);
+    for child in node.children() {
+      if let rowan::NodeOrToken::Node(inner) = child {
+        stack.push((inner, at + 1));
+      }
+    }
+  }
+  deepest
+}
+
+/// A sink holding one straight chain of `opens` directly nested nodes around a single token.
+fn nested_chain(src: &str, opens: usize) -> VerboseSink<'_> {
+  let mut sink = verbose_sink(src);
+  for _ in 0..opens {
+    sink.cst_start(K_NODE);
+  }
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  close_open_nodes(&mut sink, opens);
+  sink
+}
+
+/// The wall, from both sides: a tree exactly at the ceiling materializes, and one level past
+/// it is refused — through the strict door **and** through the tolerant one.
+///
+/// `finish_partial` refuses too, and that is the deliberate part. It tolerates *incompleteness*
+/// — open nodes an aborted parse left behind — and the way it tolerates them is by closing
+/// them, which for this stream would build exactly the tree being refused. A value that cannot
+/// be dropped is not an incompleteness a tooling door can absorb.
+#[test]
+fn a_tree_at_the_ceiling_materializes_and_one_level_past_it_is_refused_at_both_doors() {
+  // The synthetic root wrapper is one of the levels, so the events may open one fewer.
+  let at_ceiling = crate::cst::MAX_TREE_DEPTH - 1;
+
+  let (green, _emitter) = nested_chain("a", at_ceiling).finish(K_ROOT);
+  let green = green.expect("a tree exactly at the ceiling is one rowan can still release");
+  assert_eq!(
+    green_depth(&green),
+    crate::cst::MAX_TREE_DEPTH,
+    "the accepted tree must sit exactly ON the ceiling, or the cell below is testing a \
+     boundary one level away from the one that ships"
+  );
+
+  let too_deep = FinishError::TooDeep {
+    depth: crate::cst::MAX_TREE_DEPTH as u64,
+  };
+
+  let (green, _emitter) = nested_chain("a", at_ceiling + 1).finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("one level past the ceiling is refused, not returned"),
+    too_deep
+  );
+
+  let (green, _emitter) = nested_chain("a", at_ceiling + 1).finish_partial(K_ROOT);
+  assert_eq!(
+    green.expect_err("and the tooling door refuses it too — this is not incompleteness"),
+    too_deep,
+    "finish_partial absorbs open nodes by closing them, which here would build the very tree \
+     that cannot be dropped"
+  );
+}
+
+/// **Why the ceiling is not a ceiling on the sink's own recorded depth.**
+///
+/// Materialization *hoists* every retro-wrap to its target, and same-target wraps open
+/// newest-first, so `n` wraps of one anchor nest `n` deep in the tree while the recorded
+/// open-node depth never leaves `1`. That is not an exotic shape: it is exactly what
+/// `Pratt::with_cst_kinds` emits for an `n`-operator expression, which mints one anchor per
+/// expression and spends it once per fold.
+///
+/// So a ceiling charged at `Sink::depth` would have bounded nothing on this crate's own
+/// blessed Pratt path. The ceiling is charged where the frames actually are — `replay`'s
+/// builder stack — and this cell is the reason.
+#[test]
+fn same_target_wraps_nest_in_the_tree_while_the_recorded_depth_never_leaves_one() {
+  const WRAPS: usize = 8;
+
+  let mut sink = verbose_sink("a");
+  let mark = sink.cst_mark();
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  for _ in 0..WRAPS {
+    sink.cst_start_at(mark, K_WRAP);
+    CstEmitter::<MiniLexer<'_>, ()>::cst_finish(&mut sink, K_WRAP);
+    assert!(
+      sink.depth() <= 1,
+      "the recorded depth is emission-order: every wrap opens and closes at the same level"
+    );
+  }
+  assert_eq!(sink.depth(), 0, "the stream is balanced");
+
+  let (green, _emitter) = sink.finish(K_ROOT);
+  let green = green.expect("eight wraps is nowhere near the ceiling");
+  assert_eq!(
+    green_depth(&green),
+    WRAPS + 1,
+    "the tree is one frame per wrap plus the root — depth the recorded counter never saw"
+  );
+}
+
+/// And the ceiling catches that shape: `MAX_TREE_DEPTH` wraps of ONE anchor is one level past
+/// the ceiling once the root is counted, refused, while the recorded depth stayed at `1`
+/// throughout.
+#[test]
+fn the_ceiling_catches_the_retro_wrap_shape_the_recorded_depth_cannot_see() {
+  let mut sink = verbose_sink("a");
+  let mark = sink.cst_mark();
+  sink.record_token(&MiniTok(b'a'), &span(0, 1));
+  for _ in 0..crate::cst::MAX_TREE_DEPTH {
+    sink.cst_start_at(mark, K_WRAP);
+    CstEmitter::<MiniLexer<'_>, ()>::cst_finish(&mut sink, K_WRAP);
+  }
+  assert_eq!(
+    sink.recount_depth(),
+    0,
+    "the whole stream nets to zero and never exceeded one open node"
+  );
+
+  let (green, _emitter) = sink.finish(K_ROOT);
+  assert_eq!(
+    green.expect_err("root + one frame per wrap is one past the ceiling"),
+    FinishError::TooDeep {
+      depth: crate::cst::MAX_TREE_DEPTH as u64,
+    }
+  );
+}
+
+/// **The stated minimum stack is a contract, so it is RUN rather than asserted.** Both
+/// materialization outcomes, at the ceiling, on a thread of exactly
+/// [`MIN_SUPPORTED_STACK`](crate::cst::MIN_SUPPORTED_STACK).
+///
+/// The second half is the one that needs saying. A refused materialization is still **holding
+/// everything it built** — the walk refuses at the open that would cross the ceiling, so the
+/// builder is carrying a completed subtree at the ceiling when the `Err` unwinds past it. A
+/// ceiling that bounds only the accepted tree would have converted an abort into an abort, and
+/// this cell is the difference between believing it does not and having run it.
+///
+/// **How this cell fails is not an assertion.** A drop that overruns the stack ABORTS — no
+/// unwind, no panic, no `catch_unwind` — so a regression here kills the test binary rather than
+/// printing a message. That is the only shape available for the property, and it is exactly why
+/// the property cannot live in prose.
+#[test]
+fn both_materialization_outcomes_survive_the_ceiling_on_the_minimum_supported_stack() {
+  let handle = std::thread::Builder::new()
+    .stack_size(crate::cst::MIN_SUPPORTED_STACK)
+    .spawn(|| {
+      // The accepted tree, at the ceiling: built here, and dropped here.
+      let at_ceiling = crate::cst::MAX_TREE_DEPTH - 1;
+      let (green, _emitter) = nested_chain("a", at_ceiling).finish(K_ROOT);
+      let green = green.expect("a tree at the ceiling materializes");
+      assert_eq!(green_depth(&green), crate::cst::MAX_TREE_DEPTH);
+      drop(green);
+
+      // The REFUSED one, and the shape that matters: a completed chain at the ceiling is
+      // already in the builder when a second chain crosses it, so the `Err` drops a tree the
+      // full depth of the ceiling rather than a flat run of open frames.
+      let mut sink = verbose_sink("a");
+      for _ in 0..at_ceiling {
+        sink.cst_start(K_NODE);
+      }
+      sink.record_token(&MiniTok(b'a'), &span(0, 1));
+      close_open_nodes(&mut sink, at_ceiling);
+      for _ in 0..crate::cst::MAX_TREE_DEPTH {
+        sink.cst_start(K_NODE);
+      }
+      let (green, _emitter) = sink.finish(K_ROOT);
+      assert_eq!(
+        green.expect_err("the second chain crosses the ceiling"),
+        FinishError::TooDeep {
+          depth: crate::cst::MAX_TREE_DEPTH as u64,
+        }
+      );
+    })
+    .expect("the probe thread starts");
+  handle
+    .join()
+    .expect("neither outcome may abort or panic on the stack this crate says it needs");
+}
