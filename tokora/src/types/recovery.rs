@@ -1,48 +1,56 @@
 //! The recovery state of a syntax carrier, the trait that reads it, and the parts it decomposes
-//! into. Every item here is re-exported from [`types`](super); this module is **private**.
+//! into. This module is public and must be named: nothing here is re-exported into
+//! [`types`](super).
 //!
-//! # Why the module is private, and why that is not a full repair
+//! # Why a module, and what it does not fix
 //!
-//! Three axes, measured against `rustc 1.100.0-nightly` with a consumer whose source never
-//! changes and a library that gains one item:
+//! Every placement puts *some* new name into a namespace a consumer can already glob, and the
+//! kinds do not resolve alike. Measured against `rustc 1.100.0-nightly` with the consumer's source
+//! held fixed and the library gaining one item — and, this time, with **both sides exposing the
+//! item the consumer reaches for**, which is what the first attempt got wrong:
 //!
-//! |            | vs an extern crate of that name  | vs a second glob            | vs a local def |
+//! | kind       | vs an extern crate of that name  | vs a second glob            | vs a local def |
 //! |------------|----------------------------------|-----------------------------|----------------|
 //! | **module** | **silent redirect**              | `E0659`                     | local wins     |
+//! | **type**   | **silent redirect**              | `E0659`                     | local wins     |
 //! | **trait**  | `E0790`                          | **silent, first glob wins** | local wins     |
-//! | type       | `E0599`                          | `E0659`                     | local wins     |
 //! | fn / const | no interaction (value namespace) | `E0659`                     | local wins     |
 //!
-//! A `pub mod recovery` inside `types` put a MODULE name into `use tokora::types::*`, and a
-//! consumer with a dependency named `recovery` then had **every** `recovery::...` path silently
-//! rebound to tokora — a whole crate path prefix, in code with nothing to do with this API, with
-//! no error and no warning. Making the module private removes that.
+//! The `type` row was first measured as `E0599`, loud. That was wrong, and wrong in a way worth
+//! recording: the probe asked for an associated item the shadowing type did not have, so it could
+//! only be loud. With a dependency aliased `Status` exporting `Error`, and tokora's `Status`
+//! carrying an `Error` variant with an inherent `is_error()`, `Status::Error.is_error()` compiles
+//! on both revisions and **the boolean inverts**. A collision provoked by asking for something one
+//! side lacks is a verdict about the probe, not about the kind.
 //!
-//! **It does not remove the other one, and the two cannot both be removed.** A public trait has
-//! to live in some module. If that module is already globbed, the trait name is silent on the
-//! second-glob axis; if it is a new module, the module name is silent on the extern-crate axis.
-//! There is no third place to put it, so this is a choice between two residuals rather than a
-//! repair. It was made on blast radius: the module hazard redirects an entire path prefix and is
-//! triggered by a dependency name a consumer may not control, while the trait hazard reaches four
-//! method names on tokora's own carriers and needs a same-named trait glob-imported from the
-//! consumer's own prelude.
+//! So **no kind that can carry this API is loud on both axes.** The question is not which kind is
+//! safe but how few silent names a placement adds, and the floor is one — a public trait must live
+//! in a module, and every module is either already globbed or a new name in one.
 //!
-//! The residual, stated: a consumer who glob-imports both `tokora::types::*` and a prelude of
-//! their own holding a trait named `RecoveryState` or `FromComponents` gets
-//! `ambiguous_glob_imported_traits` — a warning, not an error — and the first glob wins.
+//! A module reaches that floor: `recovery` is the only name this API puts into `types::*`. The
+//! alternative that was briefly shipped — re-exporting all four items into `types` — put **four**
+//! there instead: `Status` and `Components` silent against an extern crate, `RecoveryState` and
+//! `FromComponents` silent against a second glob. That is four times the exposure on both axes, so
+//! it was withdrawn.
+//!
+//! **The residual, stated as what it is.** A consumer with a dependency named or aliased
+//! `recovery` who writes `use tokora::types::*;` has every `recovery::...` path rebound here, with
+//! no error and no warning. The only remaining lever is the module's *name*, and that is
+//! probability rather than safety: no identifier is barred from being a crate alias, so a more
+//! distinctive name would lower the chance without removing the mode. It is not taken, because the
+//! gain cannot be quantified and the churn is real.
 
-/// `tokora::types::recovery` is not a path a consumer can name — the module is private and its
-/// items are re-exported from `types`. This is the in-tree pin for that, because the hazard it
-/// closes needs a second crate to demonstrate and so cannot be a unit test:
+/// Nothing here is re-exported into [`types`](super), and `Status` is the one that had to be
+/// withdrawn: a glob-added TYPE shadows a same-named extern crate exactly as a module does, which
+/// the first measurement missed. These two doctests are the in-tree pin for that, because the
+/// hazard itself needs a second crate to demonstrate and cannot be a unit test.
 ///
-/// ```compile_fail,E0603
-/// use tokora::types::recovery::RecoveryState;
+/// ```compile_fail,E0432
+/// use tokora::types::Status;
 /// ```
 ///
-/// The items are reached from `types` directly:
-///
 /// ```rust
-/// use tokora::types::{Components, FromComponents, RecoveryState, Status};
+/// use tokora::types::recovery::{Components, FromComponents, RecoveryState, Status};
 /// ```
 /// The recovery state of a syntax carrier: whether the parser found the construct, found
 /// something malformed where it should have been, or found nothing at all.
@@ -278,7 +286,7 @@ pub trait RecoveryState {
 /// What replaces them binds by name, so no elision can slide a binding onto the status:
 ///
 /// ```rust
-/// # use tokora::{SimpleSpan, types::{LitDecimal, Components}, utils::IntoComponents};
+/// # use tokora::{SimpleSpan, types::{LitDecimal, recovery::Components}, utils::IntoComponents};
 /// # let lit = LitDecimal::<&str>::new(SimpleSpan::new(0, 2), "42");
 /// let Components { span, payload, status } = lit.into_components();
 /// assert_eq!(payload, "42");
@@ -300,7 +308,7 @@ pub struct Components<Span, Payload> {
 /// took it apart into — the exact inverse, over the same associated type.
 ///
 /// ```rust
-/// use tokora::{SimpleSpan, error::ErrorNode, types::{LitDecimal, FromComponents}};
+/// use tokora::{SimpleSpan, error::ErrorNode, types::{LitDecimal, recovery::FromComponents}};
 /// use tokora::utils::IntoComponents;
 ///
 /// let placeholder = LitDecimal::<&str>::error(SimpleSpan::new(0, 3));

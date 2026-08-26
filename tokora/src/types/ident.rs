@@ -54,7 +54,7 @@
 //! allowing creation of placeholder identifiers during error recovery:
 //!
 //! ```rust,ignore
-//! use tokora::{error::ErrorNode, types::RecoveryState};
+//! use tokora::{error::ErrorNode, types::recovery::RecoveryState};
 //!
 //! // Create placeholder for malformed identifier
 //! let bad_ident = Ident::<String, SimpleSpan, YulLang>::error(span);
@@ -65,7 +65,7 @@
 
 use core::marker::PhantomData;
 
-use super::Status;
+use super::recovery::Status;
 use crate::{
   error::ErrorNode,
   span::{AsSpan, SimpleSpan},
@@ -122,13 +122,13 @@ use crate::{
 /// ## Extracting Components
 ///
 /// ```rust
-/// # use tokora::{SimpleSpan, types::{Ident, Components}, utils::IntoComponents};
+/// # use tokora::{SimpleSpan, types::{Ident, recovery::Components}, utils::IntoComponents};
 /// # struct MyLang;
 /// # let span = SimpleSpan::new(0, 3);
 /// let ident = Ident::<&str, SimpleSpan, MyLang>::new(span, "foo");
 ///
 /// // Destructure into span, payload and recovery status. A named struct, not a tuple: see
-/// // `types::Components` for the `..` pattern that made a three-tuple unsafe.
+/// // `types::recovery::Components` for the `..` pattern that made a three-tuple unsafe.
 /// let Components { span, payload, status } = ident.into_components();
 /// assert_eq!(payload, "foo");
 /// assert!(status.is_valid());
@@ -254,11 +254,11 @@ impl<S, Span, Lang: ?Sized> IntoComponents for Ident<S, Span, Lang> {
   /// zero-sized language marker, which the rebuild names in its own type.
   ///
   /// The status is here because this trait promises a complete decomposition and because
-  /// [`FromComponents`](super::FromComponents) is the inverse: without it in both, a consumer who took
+  /// [`FromComponents`](super::recovery::FromComponents) is the inverse: without it in both, a consumer who took
   /// a carrier apart and put it back together would have to rebuild through
   /// [`new`](Ident::new), which always declares the result valid — the same laundering tokora#303
   /// removed from [`map`](Ident::map), reached one door over.
-  type Components = super::Components<Span, S>;
+  type Components = super::recovery::Components<Span, S>;
 
   #[inline(always)]
   fn into_components(self) -> Self::Components {
@@ -269,7 +269,7 @@ impl<S, Span, Lang: ?Sized> IntoComponents for Ident<S, Span, Lang> {
       ident,
     } = self;
 
-    super::Components {
+    super::recovery::Components {
       span,
       payload: ident,
       status,
@@ -409,7 +409,7 @@ impl<S: ?Sized, Span, Lang: ?Sized> Ident<S, Span, Lang> {
   //
   // `Keyword` and the seventeen `Lit*` types never had the names, so giving them inherent ones
   // would be the opposite defect — the new hazard — and they answer through
-  // [`RecoveryState`](super::RecoveryState) alone. `Ident` implements that trait too,
+  // [`RecoveryState`](super::recovery::RecoveryState) alone. `Ident` implements that trait too,
   // so generic code over carriers sees one uniform channel; these three are exactly its answers.
   //
   // The drift argument that removed them is about how the surface reads. This one is about
@@ -417,7 +417,7 @@ impl<S: ?Sized, Span, Lang: ?Sized> Ident<S, Span, Lang> {
 
   /// Returns `true` is this identifier represents an error identifier.
   ///
-  /// Also available as [`RecoveryState::is_error`](super::RecoveryState::is_error),
+  /// Also available as [`RecoveryState::is_error`](super::recovery::RecoveryState::is_error),
   /// which is the spelling every other carrier uses; this inherent form is `Ident`'s alone and
   /// predates the trait.
   #[inline(always)]
@@ -427,7 +427,7 @@ impl<S: ?Sized, Span, Lang: ?Sized> Ident<S, Span, Lang> {
 
   /// Returns `true` is this identifier represents a missing identifier.
   ///
-  /// Also available as [`RecoveryState::is_missing`](super::RecoveryState::is_missing),
+  /// Also available as [`RecoveryState::is_missing`](super::recovery::RecoveryState::is_missing),
   /// which is the spelling every other carrier uses; this inherent form is `Ident`'s alone and
   /// predates the trait.
   #[inline(always)]
@@ -437,7 +437,7 @@ impl<S: ?Sized, Span, Lang: ?Sized> Ident<S, Span, Lang> {
 
   /// Returns `true` is this identifier is valid (not error or missing).
   ///
-  /// Also available as [`RecoveryState::is_valid`](super::RecoveryState::is_valid),
+  /// Also available as [`RecoveryState::is_valid`](super::recovery::RecoveryState::is_valid),
   /// which is the spelling every other carrier uses; this inherent form is `Ident`'s alone and
   /// predates the trait.
   #[inline(always)]
@@ -475,7 +475,7 @@ impl<S, Span, Lang: ?Sized> Ident<S, Span, Lang> {
   /// The status-setting constructor, crate-internal.
   ///
   /// Public construction with a chosen status goes through
-  /// [`FromComponents`](super::FromComponents), whose argument is an associated
+  /// [`FromComponents`](super::recovery::FromComponents), whose argument is an associated
   /// type rather than a bare `Status` — see that trait for the type-directed inference
   /// route that made an inherent `with_status` unsafe to ship.
   #[inline(always)]
@@ -549,10 +549,10 @@ impl<S, Span, Lang: ?Sized> Ident<S, Span, Lang> {
   }
 }
 
-impl<S, Span, Lang: ?Sized> super::FromComponents for Ident<S, Span, Lang> {
+impl<S, Span, Lang: ?Sized> super::recovery::FromComponents for Ident<S, Span, Lang> {
   #[inline(always)]
   fn from_components(components: Self::Components) -> Self {
-    let super::Components {
+    let super::recovery::Components {
       span,
       payload,
       status,
@@ -562,7 +562,7 @@ impl<S, Span, Lang: ?Sized> super::FromComponents for Ident<S, Span, Lang> {
   }
 }
 
-impl<S: ?Sized, Span, Lang: ?Sized> super::RecoveryState for Ident<S, Span, Lang> {
+impl<S: ?Sized, Span, Lang: ?Sized> super::recovery::RecoveryState for Ident<S, Span, Lang> {
   #[inline(always)]
   fn status(&self) -> Status {
     self.status

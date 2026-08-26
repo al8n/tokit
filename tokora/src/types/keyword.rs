@@ -55,7 +55,7 @@
 //! allowing creation of placeholder keywords during error recovery:
 //!
 //! ```rust,ignore
-//! use tokora::{error::ErrorNode, types::RecoveryState};
+//! use tokora::{error::ErrorNode, types::recovery::RecoveryState};
 //!
 //! // Create placeholder for malformed identifier
 //! let bad_ident = Keyword::<String, SimpleSpan, YulLang>::error(span);
@@ -67,7 +67,7 @@
 //! ```
 //!
 //! Which of the three states a keyword is in is read through
-//! [`RecoveryState`](super::RecoveryState), which must be in scope, and never from the payload.
+//! [`RecoveryState`](super::recovery::RecoveryState), which must be in scope, and never from the payload.
 //! There is no inherent accessor: see the trait for why an inherent one cannot fail loudly. The payload of a placeholder
 //! is whatever `S::error` / `S::missing` produced — for `&str` the literal `"<error>"`, a
 //! value a caller can also spell by hand — and it is mutable through
@@ -76,7 +76,7 @@
 
 use core::marker::PhantomData;
 
-use super::Status;
+use super::recovery::Status;
 use crate::{
   error::ErrorNode,
   span::{AsSpan, SimpleSpan},
@@ -135,7 +135,7 @@ use crate::{
 /// ## Extracting Components
 ///
 /// ```rust
-/// # use tokora::types::{Keyword, Components};
+/// # use tokora::types::{Keyword, recovery::Components};
 /// # use tokora::SimpleSpan;
 /// # use tokora::utils::IntoComponents;
 /// # struct MyLang;
@@ -143,7 +143,7 @@ use crate::{
 /// let ident = Keyword::<&str, SimpleSpan, MyLang>::new(span, "foo");
 ///
 /// // Destructure into span, payload and recovery status. A named struct, not a tuple: see
-/// // `types::Components` for the `..` pattern that made a three-tuple unsafe.
+/// // `types::recovery::Components` for the `..` pattern that made a three-tuple unsafe.
 /// let Components { span, payload, status } = ident.into_components();
 /// assert_eq!(payload, "foo");
 /// assert!(status.is_valid());
@@ -294,11 +294,11 @@ impl<S, Span, Lang: ?Sized> IntoComponents for Keyword<S, Span, Lang> {
   /// zero-sized language marker, which the rebuild names in its own type.
   ///
   /// The status is here because this trait promises a complete decomposition and because
-  /// [`FromComponents`](super::FromComponents) is the inverse: without it in both, a consumer who
+  /// [`FromComponents`](super::recovery::FromComponents) is the inverse: without it in both, a consumer who
   /// took a carrier apart and put it back together would have to rebuild through
   /// [`new`](Keyword::new), which always declares the result valid — the same laundering
   /// tokora#303 removed from [`map`](Keyword::map), reached one door over.
-  type Components = super::Components<Span, S>;
+  type Components = super::recovery::Components<Span, S>;
 
   #[inline(always)]
   fn into_components(self) -> Self::Components {
@@ -335,7 +335,7 @@ impl<S, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
   /// The status-setting constructor, crate-internal.
   ///
   /// Public construction with a chosen status goes through
-  /// [`FromComponents`](super::FromComponents), whose argument is an associated
+  /// [`FromComponents`](super::recovery::FromComponents), whose argument is an associated
   /// type rather than a bare `Status` — see that trait for the type-directed inference
   /// route that made an inherent `with_status` unsafe to ship.
   #[inline(always)]
@@ -495,11 +495,11 @@ impl<S, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
   /// second door.
   ///
   /// The status is part of the result because
-  /// [`FromComponents`](super::FromComponents) is the inverse
+  /// [`FromComponents`](super::recovery::FromComponents) is the inverse
   /// and a decomposition that dropped it could only be rebuilt through [`new`](Self::new), which
   /// always declares the result valid.
   #[inline(always)]
-  pub fn into_components(self) -> super::Components<Span, S> {
+  pub fn into_components(self) -> super::recovery::Components<Span, S> {
     let Self {
       _lang,
       status,
@@ -507,7 +507,7 @@ impl<S, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
       ident,
     } = self;
 
-    super::Components {
+    super::recovery::Components {
       span,
       payload: ident,
       status,
@@ -544,10 +544,10 @@ impl<S, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
   }
 }
 
-impl<S, Span, Lang: ?Sized> super::FromComponents for Keyword<S, Span, Lang> {
+impl<S, Span, Lang: ?Sized> super::recovery::FromComponents for Keyword<S, Span, Lang> {
   #[inline(always)]
   fn from_components(components: Self::Components) -> Self {
-    let super::Components {
+    let super::recovery::Components {
       span,
       payload,
       status,
@@ -557,7 +557,7 @@ impl<S, Span, Lang: ?Sized> super::FromComponents for Keyword<S, Span, Lang> {
   }
 }
 
-impl<S: ?Sized, Span, Lang: ?Sized> super::RecoveryState for Keyword<S, Span, Lang> {
+impl<S: ?Sized, Span, Lang: ?Sized> super::recovery::RecoveryState for Keyword<S, Span, Lang> {
   #[inline(always)]
   fn status(&self) -> Status {
     self.status

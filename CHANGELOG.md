@@ -71,7 +71,7 @@ and will red until they do.
 
 ### Added
 
-- **`types::Status`, and `with_status` on all nineteen recovery carriers** (#320). The recovery
+- **`types::recovery::Status`, and `with_status` on all nineteen recovery carriers** (#320). The recovery
   state stops being a private field and becomes a value a consumer can hold: it is returned by
   `IntoComponents` (see **Changed (breaking)**) and accepted back by
   `Ident::with_status`, `Keyword::with_status` and each `Lit*::with_status`, which are the inverses
@@ -86,7 +86,7 @@ and will red until they do.
   `Status` is `#[non_exhaustive]`: a fourth recovery state is admissible later, so a `match` needs
   a wildcard arm and `is_valid()` is deliberately not `!is_error() && !is_missing()`.
 
-- **`types::FromComponents` — the inverse of `IntoComponents`** (#320).
+- **`types::recovery::FromComponents` — the inverse of `IntoComponents`** (#320).
   `T::from_components(x.into_components())` rebuilds a carrier with its recovery state intact, and
   is the door that closes the laundering: rebuilding through `new` would declare a recovered node
   valid.
@@ -109,7 +109,7 @@ and will red until they do.
   No consumer code depends on the withdrawn spelling: `with_status` is new in this release and
   never shipped, which is why it goes where `Ident`'s predicates came back.
 
-- **`types::RecoveryState` and `types::Status`, over all nineteen recovery carriers**
+- **`types::recovery::{RecoveryState, Status}`, over all nineteen recovery carriers**
   (#301). `Keyword` and the seventeen literal carriers implemented `ErrorNode` — so
   `error(span)` and `missing(span)` were public and documented as recovery placeholders — while
   holding no field that could record which of the three states a value was in. The only way to
@@ -917,53 +917,41 @@ and will red until they do.
   the converting one fails `Silent` verbatim, and the bound-free one stops covering the delimited
   driver the bundle exists for.
 
-- **`RecoveryState`, `FromComponents`, `Status` and `Components` are items of `tokora::types`;
-  there is no `types::recovery` module** (#320). Reaching them is
-  `use tokora::types::{RecoveryState, FromComponents, Status, Components};`.
+- **The whole recovery API lives in `tokora::types::recovery` and nothing from it is re-exported
+  into `tokora::types`** (#320). Reaching it is
+  `use tokora::types::recovery::{Components, FromComponents, RecoveryState, Status};`.
 
-  A draft put them in a `pub mod recovery` so the trait would not be in `types::*`. That put a
-  **module** name there instead, and the kinds do not resolve alike. Measured against
-  `rustc 1.100.0-nightly` over three axes, with the consumer's source fixed and the library
-  gaining one item:
+  Every placement puts *some* new name into a namespace a consumer can already glob, and the kinds
+  do not resolve alike. Measured against `rustc 1.100.0-nightly`, consumer source held fixed, the
+  library gaining one item, **and both sides exposing the item the consumer reaches for**:
 
-  |            | vs an extern crate of that name  | vs a second glob            | vs a local def |
+  | kind       | vs an extern crate of that name  | vs a second glob            | vs a local def |
   |------------|----------------------------------|-----------------------------|----------------|
   | **module** | **silent redirect**              | `E0659`                     | local wins     |
+  | **type**   | **silent redirect**              | `E0659`                     | local wins     |
   | **trait**  | `E0790`                          | **silent, first glob wins** | local wins     |
-  | type       | `E0599`                          | `E0659`                     | local wins     |
   | fn / const | no interaction (value namespace) | `E0659`                     | local wins     |
 
-  So a consumer with a dependency named `recovery` and a `use tokora::types::*;` had **every**
-  `recovery::...` path rebound to tokora — an entire crate path prefix, in code with nothing to do
-  with this API, with no error and no warning. That is gone.
+  Two earlier drafts of this release were built on a wrong row. The first measured `type` against
+  an extern crate as `E0599`, loud, and re-exported `Status` into `types` on that basis. The probe
+  asked the shadowing type for an associated item it did not have, so it could only be loud: with
+  a dependency aliased `Status` exporting `Error`, and tokora's `Status` carrying an `Error`
+  variant with an inherent `is_error()`, `Status::Error.is_error()` compiles on both revisions and
+  **the boolean inverts**. The second draft then moved all four items into `types` to get the
+  module name out of the glob, on that same false premise.
 
-  **The two silent axes cannot both be closed, and this is a choice between residuals.** A public
-  trait has to live in a module; if that module is already globbed the trait name is silent on the
-  second-glob axis, and if it is a new module the module name is silent on the extern-crate axis.
-  There is no third place. The trade was made on blast radius: the module hazard redirects a whole
-  path prefix and is triggered by a dependency name a consumer may not control, while the trait
-  hazard reaches four method names on tokora's own carriers and needs a same-named trait
-  glob-imported from the consumer's own prelude.
+  **No kind that can carry this API is loud on both axes**, so the question is not which kind is
+  safe but how few silent names a placement adds. The floor is one — a public trait must live in a
+  module, and every module is either already globbed or a new name in one — and a module reaches
+  it. Re-exporting the four items instead puts four names into `types::*`: `Status` and
+  `Components` silent against an extern crate, `RecoveryState` and `FromComponents` silent against
+  a second glob.
 
-  **The residual, stated:** a consumer glob-importing both `tokora::types::*` and a prelude of
-  their own containing a trait named `RecoveryState` or `FromComponents` gets
-  `ambiguous_glob_imported_traits` — warn-by-default, rust-lang/rust#152822 — and the first glob
-  wins. It is pinned as a test rather than left as prose, so if that lint becomes the hard error
-  its future-incompatibility note promises, the suite says so. A trait reached through a glob can be rebound by a second glob without
-  an error. Reproduced against `rustc 1.100.0-nightly`, three arrangements behave differently:
-  two globs offering the same **type** name is `error[E0659]`; two globs offering the same method
-  through **differently named** traits is `error[E0034]`; but two globs offering the same **trait
-  name** *compiles*, warns under the warn-by-default `ambiguous_glob_imported_traits`
-  (rust-lang/rust#152822), and resolves to whichever glob was written **first** — so
-  `use tokora::types::*; use their_crate::*;` could silently rebind a consumer's own `is_valid`,
-  in either direction depending on import order.
-
-  Moving the three questions off inherent methods closed that rebind at the type and reopened it
-  at the re-export; naming the module closes it for good. A consumer's glob-imported trait is now
-  unopposed. **That is superseded**: the module it moved into was itself a name in `types::*`, of
-  the one kind that is silent against an extern crate, so the trait came back to `types` as an
-  item. See *there is no `types::recovery` module* above for the measured table and the residual
-  this leaves.
+  **The residual, named as what it is.** A consumer with a dependency named or aliased `recovery`
+  who writes `use tokora::types::*;` has every `recovery::…` path rebound to tokora, with no error
+  and no warning. The only lever left is the module's *name*, and that is **probability, not
+  safety**: no identifier is barred from being a crate alias. It is not pulled, because the gain
+  cannot be quantified and the churn is real.
 
 - **The recovery carriers keep `PartialEq`/`Eq` derived, and only the other four are hand-written**
   (#320). Replacing all six derives dropped the compiler-generated `StructuralPartialEq`, so a
@@ -1005,7 +993,7 @@ and will red until they do.
   now stands as a consumer would write it — which is also the regression test.
 
 - **`IntoComponents::Components` on all nineteen recovery carriers becomes
-  `types::Components { span, payload, status }` — a named struct, not a tuple** (#320). `Ident`, `Keyword` and the
+  `types::recovery::Components { span, payload, status }` — a named struct, not a tuple** (#320). `Ident`, `Keyword` and the
   seventeen `Lit*` types hold a span, a payload and a recovery status, and returned two of the
   three. The trait's own contract is that a decomposition is complete with no information loss,
   and the test of that is whether the output rebuilds the input: it did not, so
@@ -2594,9 +2582,8 @@ and will red until they do.
 **`Status` is a new public name in `tokora::types`** (#320). A consumer with
 `use tokora::types::*;` and a `Status` of their own gets `error[E0659]` at the name, resolved by an
 explicit import or an `as` alias. `RecoveryState` and `FromComponents` are **not** in that
-namespace in an earlier draft; they are back in `types` as items, because the module that held
-them was itself a silently-shadowing name. Both silent axes cannot be closed at once — see
-**Changed (breaking)** for the measured table and the accepted residual.
+namespace — they live in `tokora::types::recovery` and must be named, because a trait behind a
+glob is picked silently where a type is not.
 
 *Three earlier drafts of this release listed more names here, and all are withdrawn.* The third
 listed `with_status` as a new inherent associated function that could not be displaced silently,

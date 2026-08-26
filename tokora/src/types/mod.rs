@@ -86,29 +86,24 @@ pub use ident::*;
 pub use ident_list::*;
 pub use keyword::*;
 pub use lit::*;
-// Everything the recovery API exposes is re-exported here as ITEMS, and `recovery` is a private
-// module, because the kinds resolve differently under a consumer's glob. Measured against
-// rustc 1.100.0-nightly, over three axes:
+// Nothing from `recovery` is re-exported here, and that includes `Status`.
 //
-//                    vs an extern crate    vs a second glob    vs a local definition
-//   module           SILENT redirect       E0659               local wins
-//   trait            E0790                 SILENT, 1st glob    local wins
-//   type / fn/const  E0599 / no interaction E0659              local wins
+// An earlier draft did re-export the type, on a measurement that said a TYPE name collides loudly
+// under a consumer's glob while a TRAIT name does not. The type half of that was wrong: the probe
+// asked the shadowing type for an associated item it did not have, so it could only be loud. With
+// both sides carrying the item the consumer reaches for, a glob-added type silently shadows an
+// extern crate of the same name exactly as a module does — a dependency aliased `Status` has
+// `Status::Error.is_error()` flip from its answer to tokora's, both revisions compiling.
 //
-// A `pub mod recovery` therefore put a MODULE name into `types::*`, and a consumer with a
-// dependency named `recovery` had every `recovery::...` path silently rebound to tokora — a whole
-// crate path prefix, in code unrelated to this API. Re-exporting the items instead removes that
-// entirely and leaves only the trait names, whose only silent axis is a second glob and whose
-// blast radius is four method names on tokora's own carriers. Both cannot be closed at once: a
-// public trait must live in a module, and every module is either already globbed or a new name in
-// one. That is written out on `recovery`'s own header.
-pub use recovery::{Components, FromComponents, RecoveryState, Status};
+// So the count is what matters, not the kind: `recovery` alone puts ONE new name into `types::*`,
+// where re-exporting the four items puts four, two silent on each axis. See `recovery`'s header
+// for the re-measured table and the residual this leaves.
 
 mod ident;
 mod ident_list;
 mod keyword;
 mod lit;
-mod recovery;
+pub mod recovery;
 
 /// A type representing a recoverable parse node, which can be a valid node,
 /// an error node with span, or a missing node with span.

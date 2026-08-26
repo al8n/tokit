@@ -8,7 +8,7 @@ use crate::{
   logos::{self, Logos},
   span::Spanned,
   token::Token as TokenTrait,
-  types::Components,
+  types::recovery::Components,
 };
 
 #[derive(Debug, Clone, Logos, PartialEq)]

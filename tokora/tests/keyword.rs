@@ -10,7 +10,7 @@ use tokora::{
   logos::{self, Logos},
   token::{KeywordToken, PunctuatorToken},
   try_parse_input::ParseAttempt,
-  types::{Components, Keyword},
+  types::{Keyword, recovery::Components},
 };
 
 // ── Token with keywords ─────────────────────────────────────────────────────
