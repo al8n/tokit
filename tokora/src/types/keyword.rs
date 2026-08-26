@@ -55,7 +55,7 @@
 //! allowing creation of placeholder keywords during error recovery:
 //!
 //! ```rust,ignore
-//! use tokora::error::ErrorNode;
+//! use tokora::{error::ErrorNode, types::RecoveryState};
 //!
 //! // Create placeholder for malformed identifier
 //! let bad_ident = Keyword::<String, SimpleSpan, YulLang>::error(span);
@@ -66,9 +66,9 @@
 //! assert!(missing_ident.is_missing());
 //! ```
 //!
-//! Which of the three states a keyword is in is read from
-//! [`is_valid`](Keyword::is_valid), [`is_error`](Keyword::is_error) and
-//! [`is_missing`](Keyword::is_missing), never from the payload. The payload of a placeholder
+//! Which of the three states a keyword is in is read from [`RecoveryState`](super::RecoveryState)
+//! — which must be in scope — or from [`Keyword::status`] in a const context, never from the
+//! payload. The payload of a placeholder
 //! is whatever `S::error` / `S::missing` produced — for `&str` the literal `"<error>"`, a
 //! value a caller can also spell by hand — and it is mutable through
 //! [`source_mut`](Keyword::source_mut), so it reports what the node says rather than whether
@@ -347,7 +347,7 @@ impl<S, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
   /// # Examples
   ///
   /// ```rust
-  /// use tokora::{SimpleSpan, types::{Keyword, Status}};
+  /// use tokora::{SimpleSpan, types::{Keyword, RecoveryState, Status}};
   /// # struct MyLang;
   ///
   /// let span = SimpleSpan::new(0, 4);
@@ -476,22 +476,18 @@ impl<S: ?Sized, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
     &self.ident
   }
 
-  /// Returns `true` is this keyword represents an error keyword.
+  /// Returns the recovery state of this keyword.
+  ///
+  /// The three questions — valid, error, missing — are asked through
+  /// [`RecoveryState`](super::RecoveryState), which has to be in scope. They are not inherent
+  /// methods because those names are ones a consumer may already have on an extension trait of
+  /// their own, and an inherent method wins that pick silently; see the trait for the argument.
+  ///
+  /// This accessor is inherent so that the state stays readable in a const context, which a
+  /// trait method cannot be: `x.status().is_valid()` is `const` all the way down.
   #[inline(always)]
-  pub const fn is_error(&self) -> bool {
-    self.status.is_error()
-  }
-
-  /// Returns `true` is this keyword represents a missing keyword.
-  #[inline(always)]
-  pub const fn is_missing(&self) -> bool {
-    self.status.is_missing()
-  }
-
-  /// Returns `true` is this keyword is valid (not error or missing).
-  #[inline(always)]
-  pub const fn is_valid(&self) -> bool {
-    self.status.is_valid()
+  pub const fn status(&self) -> Status {
+    self.status
   }
 }
 
@@ -577,6 +573,13 @@ impl<S, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
       span,
       ident: f(ident),
     }
+  }
+}
+
+impl<S: ?Sized, Span, Lang: ?Sized> super::RecoveryState for Keyword<S, Span, Lang> {
+  #[inline(always)]
+  fn status(&self) -> Status {
+    self.status
   }
 }
 

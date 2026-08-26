@@ -968,3 +968,131 @@ fn no_carrier_demands_a_trait_of_its_language_marker() {
   assert!(list.is_valid());
   assert_eq!(list, list.clone());
 }
+
+// --- A name this branch adds must not silently displace a consumer's own ---
+
+/// A downstream crate's scope, reproduced: the carriers are imported, and
+/// [`RecoveryState`](super::RecoveryState) deliberately is **not**. That is the position an
+/// upgrading consumer is in, and it is why this is a module — `use super::*` in the parent puts
+/// the trait in scope, and a trait in scope contributes its method names whatever it is bound to.
+mod consumer_scope {
+  use crate::{
+    SimpleSpan,
+    error::ErrorNode,
+    types::{LitDecimal, Status},
+  };
+
+  /// A downstream extension trait with the three names, meaning something of its own.
+  ///
+  /// This is the review's example for tokora#320: a consumer whose `is_valid` asks whether a
+  /// `LitDecimal`'s payload actually parses as a number. `LitDecimal::new` marks every payload
+  /// `Status::Valid`, so if tokora's answer displaced this one the check would be bypassed and
+  /// `"nope"` would read as a valid decimal, with nothing at the call site to say so.
+  trait ConsumerChecks {
+    fn is_valid(&self) -> bool;
+    fn is_error(&self) -> bool;
+    fn is_missing(&self) -> bool;
+  }
+
+  impl ConsumerChecks for LitDecimal<&str> {
+    /// Deliberately the opposite answer from tokora's: `<error>` does not parse as a number, and
+    /// `"12"` does, whatever either value's recovery status is.
+    fn is_valid(&self) -> bool {
+      !self.data_ref().is_empty() && self.data_ref().chars().all(|c| c.is_ascii_digit())
+    }
+
+    fn is_error(&self) -> bool {
+      !ConsumerChecks::is_valid(self)
+    }
+
+    fn is_missing(&self) -> bool {
+      self.data_ref().is_empty()
+    }
+  }
+
+  /// tokora's own answer, reached without importing the trait — which is what a fully qualified
+  /// path is for, and what the consumer would write on the rare call that wants it.
+  fn tokora_status(lit: &LitDecimal<&str>) -> Status {
+    <LitDecimal<&str> as crate::types::RecoveryState>::status(lit)
+  }
+
+  /// **The cell, and its two directions.**
+  ///
+  /// *Here*, with only the consumer's trait in scope, every unqualified `is_valid` reaches the
+  /// consumer's method — which is exactly the behaviour an upgrade must not change. Before
+  /// tokora#320 moved the three questions onto a trait they were inherent methods on all
+  /// seventeen `Lit*` types and on `Keyword`, and Rust prefers an inherent method over a trait's
+  /// at an unqualified call site, so this function kept compiling and the two assertions marked
+  /// below **reversed** — silently, with no diagnostic anywhere.
+  ///
+  /// *In the parent module*, where `use super::*` does put `RecoveryState` in scope beside a
+  /// consumer trait, the same call is `error[E0034]: multiple applicable items in scope`, naming
+  /// both candidates. That is not hypothetical: writing this cell in the parent produced exactly
+  /// that error, which is why it lives here.
+  ///
+  /// Ambiguity, or an explicit choice, or no change at all. Never a different answer.
+  #[test]
+  fn a_consumers_own_predicate_is_not_displaced_by_tokoras() {
+    let span = SimpleSpan::new(0, 4);
+
+    // A recovery placeholder. Both sides agree it is not valid, for different reasons.
+    let recovered = LitDecimal::<&str>::error(span);
+    assert!(
+      !recovered.is_valid(),
+      "the consumer's check owns the unqualified call"
+    );
+    assert!(recovered.is_error());
+
+    // The pair that reverses if the inherent methods come back: the consumer rejects this
+    // payload, tokora's status calls it valid, and the unqualified call must be the consumer's.
+    let nonsense = LitDecimal::<&str>::new(span, "nope");
+    assert!(
+      !nonsense.is_valid(),
+      "the consumer rejects a non-numeric payload"
+    );
+    assert!(
+      tokora_status(&nonsense).is_valid(),
+      "tokora's own answer is the opposite one, and naming it is how you get it",
+    );
+
+    // A digit payload the consumer accepts, so the cell is not one-sided.
+    let real = LitDecimal::<&str>::new(span, "12");
+    assert!(real.is_valid());
+    assert!(!real.is_missing());
+    assert!(tokora_status(&real).is_valid());
+  }
+
+  /// A consumer constructor with the same name and arity as the new inherent `with_status`.
+  trait ConsumerCtor {
+    fn with_status(span: SimpleSpan, data: &'static str, ok: bool) -> Self;
+  }
+
+  impl ConsumerCtor for LitDecimal<&'static str> {
+    fn with_status(span: SimpleSpan, data: &'static str, ok: bool) -> Self {
+      LitDecimal::new(span, if ok { data } else { "" })
+    }
+  }
+
+  /// `with_status` is a new inherent name on nineteen carriers, and the review grouped it with the
+  /// three questions. It is in the population but not in the *silent* half, and this is the
+  /// argument rather than the assertion.
+  ///
+  /// The three questions take no arguments and return `bool`, so a consumer's method of that name
+  /// has an identical signature and a displacement is invisible. `with_status` takes a
+  /// [`Status`](crate::types::Status) — a type that did not exist before tokora#320 — so no method
+  /// a consumer already wrote can have that parameter type. Displacing one is `error[E0308]` at
+  /// the call site: `ConsumerCtor::with_status(span, "42", false)` written unqualified now
+  /// resolves to tokora's and fails to typecheck on the `bool`.
+  #[test]
+  fn with_status_cannot_be_displaced_silently() {
+    let span = SimpleSpan::new(0, 2);
+
+    // tokora's inherent one wins the unqualified pick, and its third argument is a `Status`.
+    let ours = LitDecimal::<&str>::with_status(span, "42", Status::Missing);
+    assert!(tokora_status(&ours).is_missing());
+
+    // The consumer's is still reachable, by name.
+    let theirs = <LitDecimal<&str> as ConsumerCtor>::with_status(span, "42", false);
+    assert_eq!(theirs.data_ref(), &"");
+  }
+}

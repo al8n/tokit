@@ -57,3 +57,53 @@ impl Status {
     matches!(self, Self::Valid)
   }
 }
+
+/// Reads the recovery state of a syntax carrier: [`Ident`](super::Ident),
+/// [`Keyword`](super::Keyword) and every `Lit*` type implement it.
+///
+/// # Why the three questions live on a trait
+///
+/// `is_valid`, `is_error` and `is_missing` are names a consumer may already have on their own
+/// extension trait, meaning something of their own — "this literal's payload parses as a number",
+/// say. Rust prefers an **inherent** method over a trait's at an unqualified call site, so
+/// shipping these as inherent methods would have made `literal.is_valid()` keep compiling and
+/// quietly stop calling the consumer's check, with no diagnostic anywhere. tokora#320 widened
+/// [`IntoComponents`](crate::utils::IntoComponents) rather than withdrawing it precisely because
+/// widening fails loudly, and the same standard applied here rules inherent predicates out: a
+/// silent change of meaning on upgrade is the one outcome that standard exists to prevent.
+///
+/// On a trait the clash cannot be silent. A consumer who imports both gets an ambiguity error
+/// naming both candidates and picks with `RecoveryState::is_valid(&x)` or their own equivalent; a
+/// consumer who imports neither, or only their own, keeps exactly the behaviour they had.
+///
+/// # `status` is inherent, and that is deliberate
+///
+/// A trait method cannot be `const fn`, so the three questions above are not usable in a const
+/// context. Each carrier therefore keeps a `const fn status(&self)` of its own, and
+/// `x.status().is_valid()` is const all the way down.
+///
+/// That name is inherent, so it *can* win a pick — but it cannot do so silently: it returns
+/// [`Status`], a type that did not exist before tokora#320, so a consumer whose own `status()`
+/// returned something else gets a type error rather than a different answer.
+pub trait RecoveryState {
+  /// The recovery state this value is in.
+  fn status(&self) -> Status;
+
+  /// Returns `true` if the parser found this construct spelled out in the source.
+  #[inline]
+  fn is_valid(&self) -> bool {
+    self.status().is_valid()
+  }
+
+  /// Returns `true` if this value is a malformed-content placeholder.
+  #[inline]
+  fn is_error(&self) -> bool {
+    self.status().is_error()
+  }
+
+  /// Returns `true` if this value is an absent-content placeholder.
+  #[inline]
+  fn is_missing(&self) -> bool {
+    self.status().is_missing()
+  }
+}

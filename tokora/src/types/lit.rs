@@ -77,7 +77,7 @@
 //! All literal types implement [`ErrorNode`] when `S: ErrorNode`:
 //!
 //! ```rust,ignore
-//! use tokora::types::LitDecimal;
+//! use tokora::types::{LitDecimal, RecoveryState};
 //! use tokora::error::ErrorNode;
 //!
 //! // Create placeholder for malformed literal
@@ -89,8 +89,8 @@
 //! assert!(missing_lit.is_missing());
 //! ```
 //!
-//! Which of the three states a literal is in is read from `is_valid`, `is_error` and
-//! `is_missing`, never from the data. A placeholder's data is whatever `D::error` /
+//! Which of the three states a literal is in is read from the `RecoveryState` trait — which must
+//! be in scope — or from the inherent `status` accessor in a const context, never from the data. A placeholder's data is whatever `D::error` /
 //! `D::missing` produced — for `&str` the literal `"<error>"`, a value a caller can also spell
 //! by hand — and it is mutable through `data_mut`, so it reports what the node says rather
 //! than whether the parser found one.
@@ -314,22 +314,18 @@ macro_rules! define_literal {
         &self.data
       }
 
-      /// Returns `true` is this literal represents an error literal.
+      /// Returns the recovery state of this literal.
+      ///
+      /// The three questions — valid, error, missing — are asked through `RecoveryState`, which
+      /// has to be in scope. They are not inherent methods because those names are ones a
+      /// consumer may already have on an extension trait of their own, and an inherent method
+      /// wins that pick silently; see the trait for the argument.
+      ///
+      /// This accessor is inherent so that the state stays readable in a const context, which a
+      /// trait method cannot be: `x.status().is_valid()` is `const` all the way down.
       #[inline(always)]
-      pub const fn is_error(&self) -> bool {
-        self.status.is_error()
-      }
-
-      /// Returns `true` is this literal represents a missing literal.
-      #[inline(always)]
-      pub const fn is_missing(&self) -> bool {
-        self.status.is_missing()
-      }
-
-      /// Returns `true` is this literal is valid (not error or missing).
-      #[inline(always)]
-      pub const fn is_valid(&self) -> bool {
-        self.status.is_valid()
+      pub const fn status(&self) -> Status {
+        self.status
       }
     }
 
@@ -370,6 +366,15 @@ macro_rules! define_literal {
         D: Copy,
       {
         self.data
+      }
+    }
+
+    impl<D: ?::core::marker::Sized, Span, Lang: ?::core::marker::Sized> $crate::types::RecoveryState
+      for $name<D, Span, Lang>
+    {
+      #[inline(always)]
+      fn status(&self) -> Status {
+        self.status
       }
     }
 

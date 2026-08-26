@@ -86,7 +86,7 @@ and will red until they do.
   `Status` is `#[non_exhaustive]`: a fourth recovery state is admissible later, so a `match` needs
   a wildcard arm and `is_valid()` is deliberately not `!is_error() && !is_missing()`.
 
-- **`Keyword::{is_valid, is_error, is_missing}`, and the same three on every `Lit*` type**
+- **`types::RecoveryState`, and a `const fn status` on all nineteen recovery carriers**
   (#301). `Keyword` and the seventeen literal carriers implemented `ErrorNode` — so
   `error(span)` and `missing(span)` were public and documented as recovery placeholders — while
   holding no field that could record which of the three states a value was in. The only way to
@@ -94,13 +94,29 @@ and will red until they do.
   the `"<error>"` / `"<missing>"` sentinel, which is a value a caller can spell by hand and edit
   afterwards through `source_mut` / `data_mut`.
 
-  Each of the eighteen now carries the same private `Status` `Ident` has carried since #266, set
-  by `new` (valid) and by the two `ErrorNode` constructors, and read by these predicates. The
-  rule they are all keeping is stated once, on `ErrorNode` itself, under **Two Shapes of
-  Implementor**: a *payload* type such as `&str` has nowhere to put a state and so its
-  placeholder is a sentinel; a *carrier* type with fields of its own owes a status field. The
-  trait's own diagnostics example used to demonstrate the sentinel comparison and now reads the
-  predicates.
+  Each of the nineteen now carries the same private `Status` `Ident` has carried since #266, set
+  by `new` (valid) and by the two `ErrorNode` constructors. The rule they are all keeping is
+  stated once, on `ErrorNode` itself, under **Two Shapes of Implementor**: a *payload* type such
+  as `&str` has nowhere to put a state and so its placeholder is a sentinel; a *carrier* type with
+  fields of its own owes a status field. The trait's own diagnostics example used to demonstrate
+  the sentinel comparison and now reads the state.
+
+  **`is_valid`, `is_error` and `is_missing` are on `RecoveryState`, not on the carriers**, and
+  that is the point rather than a detail. Those three names are ones a downstream crate may
+  already have on an extension trait of its own — "this literal's payload parses as a number" —
+  and Rust prefers an inherent method over a trait's at an unqualified call site. Shipping them
+  inherent would have left `literal.is_valid()` compiling and quietly answering a different
+  question after an upgrade, with no diagnostic anywhere. On a trait the clash is
+  `error[E0034]: multiple applicable items in scope` naming both candidates, or no change at all
+  for a consumer who does not import ours. Widening `IntoComponents` rather than withdrawing it
+  was justified below by exactly this standard — that a change of meaning must not be silent —
+  and these methods are the case it would otherwise have excluded.
+
+  `status` stays **inherent** because a trait method cannot be `const fn`:
+  `x.status().is_valid()` is const all the way down, which `x.is_valid()` through a trait can
+  never be. It can win a pick, but not silently — it returns `Status`, a type that did not exist
+  before, so displacing a consumer's own `status()` is a type error rather than a different
+  answer.
 
 - **`cst::TreeCheckpoint` — the builder's own checkpoint, carrying the one number `rowan`'s does
   not** (#316). Returned by `SyntaxTreeBuilder::checkpoint` and spent by `start_node_at`; it wraps
@@ -842,6 +858,28 @@ and will red until they do.
   `UnclosedEmitter` beside a converting sibling forces `ComposableEmitter` to include one of them:
   the converting one fails `Silent` verbatim, and the bound-free one stops covering the delimited
   driver the bundle exists for.
+
+- **`Ident::{is_valid, is_error, is_missing}` move to the `RecoveryState` trait** (#320). They have
+  been inherent `const fn`s since #266. Keeping them there while the other eighteen carriers
+  answered through a trait would have reintroduced exactly the `Ident`-versus-the-rest drift the
+  shared `Status` exists to prevent: the declared semantic channel would have had two spellings,
+  and which one a reader needs would depend on which carrier they held.
+
+  Migration is `use tokora::types::RecoveryState;`, and rustc names it — an unimported trait method
+  is `error[E0599]` with *"items from traits can only be used if the trait is in scope"*. In a
+  const context, where a trait method cannot go at all, it is `ident.status().is_valid()`.
+
+  Two arguments were weighed and rejected. Leaving `Ident` inherent is safe for the upgrade but is
+  the drift above. Deprecated inherent forwarders keep both properties, at the cost of warning on
+  call sites that are not wrong yet and of leaving `Ident` — alone among the nineteen — able to
+  displace a consumer's extension trait for another release. The break is taken instead, in a
+  cycle that is already breaking, because it is loud, mechanical, and prospective: it also means a
+  consumer who adds an `is_valid` of their own *after* upgrading gets ambiguity rather than
+  silence.
+
+  `IdentList` keeps its three as inherent methods and does **not** implement the trait. They are
+  not the same question: a list is an aggregate, and `is_error` and `is_missing` can both be true
+  of one at once, which no single `Status` can say.
 
 - **The recovery carriers stop demanding traits of their language marker** (#320). `Ident`,
   `Keyword`, the seventeen `Lit*` types and `IdentList` derived `Debug`, `Copy`, `Clone`,
@@ -2421,19 +2459,22 @@ and will red until they do.
 
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
 
-**`with_status` is a new inherent method on all nineteen recovery carriers, and `Status` is a new
-public name in `tokora::types`** (#320). The same inherent-pick exposure as the predicates below,
-plus a glob exposure: a consumer with `use tokora::types::*;` and a `Status` of their own now has
-an ambiguity at that name. **The fixes are UFCS for the method and an explicit import or alias for
-the name.**
+**`status` and `with_status` are new inherent names on all nineteen recovery carriers, and
+`Status` and `RecoveryState` are new public names in `tokora::types`** (#320). Both methods can
+win the pick over a consumer's extension item, and **neither can do so silently**: each mentions
+`Status` in its signature — as the return type and as the third parameter — and that type did not
+exist before this release, so no item a consumer already wrote can have the same one. Displacing
+either is a type error at the call site, not a different answer. The fix is UFCS,
+`MyExt::status(&kw)`. The two new type names are a glob exposure: a consumer with
+`use tokora::types::*;` and a `Status` or `RecoveryState` of their own gets an ambiguity at the
+name, resolved by an explicit import or an `as` alias.
 
-**`is_valid`, `is_error` and `is_missing` are new inherent methods on `Keyword` and on all
-seventeen `Lit*` types** (#301). An inherent item wins the pick over an extension trait's, so a
-consumer who defined any of those three names on one of these carriers — through a trait of their
-own, taking `&self`, which is the receiver tokora's take — now runs tokora's item at an
-unqualified call site. The names are not incidental: they are the three `Ident` has shipped since
-#266, and the whole point of #301 is that the eighteen carriers answer the same question the same
-way. **The fix is UFCS**, `MyExt::is_error(&kw)`, which pins the item on either revision.
+*An earlier draft of this release listed `is_valid`, `is_error` and `is_missing` here as new
+inherent methods on `Keyword` and the seventeen `Lit*` types, with UFCS offered as the fix. That
+entry is withdrawn: those three are on `RecoveryState` and were never shipped inherent. A note in
+this section is the right home for a name that fails loudly and the wrong one for a name that
+rebinds in silence, which is what a `&self` predicate returning `bool` does — the review of #320
+made that argument and it is correct.*
 
 **`InputRef::trip_snapshot` and `InputRef::tripped_during_attempt` are new inherent methods on a
 type that already shipped.** An inherent item wins the pick over an extension trait's, so a

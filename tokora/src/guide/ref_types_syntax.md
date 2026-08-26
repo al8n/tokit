@@ -130,22 +130,30 @@ Read the parameter's *name*, not just its letter.
 
 ```text
 impl<S, Span, Lang> Ident<S, Span, Lang> {
-    const fn new(span: Span, source: S) -> Self;
-    const fn span(&self) -> Span where Span: Copy;        // + span_ref / span_mut
-    const fn source(&self) -> S where S: Copy;             // + source_ref / source_mut
-    fn bump(&mut self, by: &Span::Offset) -> &mut Self where Span: crate::Span;
+    const fn new(span: Span, source: S) -> Self;           // status: Valid
     const fn with_status(span: Span, source: S, status: Status) -> Self;
-    const fn is_valid/is_error/is_missing(&self) -> bool;  // the recovery status
+    const fn span(&self) -> Span where Span: Copy;         // + span_ref / span_mut
+    const fn source(&self) -> S where S: Copy;             // + source_ref / source_mut
+    const fn status(&self) -> Status;                      // const, so usable in a const context
     fn bump(&mut self, by: &Span::Offset) -> &mut Self where Span: crate::Span;
     fn map<U>(self, f: impl FnOnce(S) -> U) -> Ident<U, Span, Lang>;
 }
-// Keyword has the same new/with_status/span*/source*/map and the same three predicates — it
-// carries the same status, so converting into `Ident` via `From` carries it across rather than
-// declaring the result valid. `bump` is Ident's alone. Every `Lit*` type carries it too.
+
+// The three questions are on a trait, and it has to be imported:
+impl RecoveryState for Ident<..> { fn status(&self) -> Status;
+                                   fn is_valid/is_error/is_missing(&self) -> bool; }
+
+// Keyword and every `Lit*` type carry the same status and the same two doors to it, so
+// converting a Keyword into an Ident via `From` carries the state across rather than declaring
+// the result valid. `bump` is Ident's alone.
+//
+// `IdentList` keeps is_valid/is_error/is_missing as INHERENT methods and does not implement the
+// trait: a list is an aggregate, and is_error and is_missing can both be true of one at once,
+// which no single Status can say.
 ```
 
 ```rust
-use tokora::{SimpleSpan, error::ErrorNode, types::{Ident, Keyword}, utils::IntoComponents};
+use tokora::{SimpleSpan, error::ErrorNode, types::{Ident, Keyword, RecoveryState}, utils::IntoComponents};
 
 struct MyLang;
 

@@ -54,7 +54,7 @@
 //! allowing creation of placeholder identifiers during error recovery:
 //!
 //! ```rust,ignore
-//! use tokora::error::ErrorNode;
+//! use tokora::{error::ErrorNode, types::RecoveryState};
 //!
 //! // Create placeholder for malformed identifier
 //! let bad_ident = Ident::<String, SimpleSpan, YulLang>::error(span);
@@ -391,22 +391,18 @@ impl<S: ?Sized, Span, Lang: ?Sized> Ident<S, Span, Lang> {
     &self.ident
   }
 
-  /// Returns `true` is this identifier represents an error identifier.
+  /// Returns the recovery state of this identifier.
+  ///
+  /// The three questions — valid, error, missing — are asked through
+  /// [`RecoveryState`](super::RecoveryState), which has to be in scope. They are not inherent
+  /// methods because those names are ones a consumer may already have on an extension trait of
+  /// their own, and an inherent method wins that pick silently; see the trait for the argument.
+  ///
+  /// This accessor is inherent so that the state stays readable in a const context, which a
+  /// trait method cannot be: `x.status().is_valid()` is `const` all the way down.
   #[inline(always)]
-  pub const fn is_error(&self) -> bool {
-    self.status.is_error()
-  }
-
-  /// Returns `true` is this identifier represents a missing identifier.
-  #[inline(always)]
-  pub const fn is_missing(&self) -> bool {
-    self.status.is_missing()
-  }
-
-  /// Returns `true` is this identifier is valid (not error or missing).
-  #[inline(always)]
-  pub const fn is_valid(&self) -> bool {
-    self.status.is_valid()
+  pub const fn status(&self) -> Status {
+    self.status
   }
 }
 
@@ -447,7 +443,7 @@ impl<S, Span, Lang: ?Sized> Ident<S, Span, Lang> {
   /// # Examples
   ///
   /// ```rust
-  /// use tokora::{SimpleSpan, types::{Ident, Status}, utils::IntoComponents};
+  /// use tokora::{SimpleSpan, types::{Ident, RecoveryState, Status}, utils::IntoComponents};
   /// # struct MyLang;
   ///
   /// let span = SimpleSpan::new(0, 4);
@@ -529,6 +525,13 @@ impl<S, Span, Lang: ?Sized> Ident<S, Span, Lang> {
       span,
       ident: f(ident),
     }
+  }
+}
+
+impl<S: ?Sized, Span, Lang: ?Sized> super::RecoveryState for Ident<S, Span, Lang> {
+  #[inline(always)]
+  fn status(&self) -> Status {
+    self.status
   }
 }
 
