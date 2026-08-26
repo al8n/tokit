@@ -437,7 +437,6 @@ where
   ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
     Ctx::Emitter: UnclosedEmitter<'inp, L, Lang>,
-    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: crate::emitter::FromUnclosed<'inp, L, Lang>,
   {
     self.emitter_view().emit_unclosed(err)
   }

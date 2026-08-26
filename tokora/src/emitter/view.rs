@@ -475,7 +475,6 @@ where
   ) -> Result<(), E::Error>
   where
     E: UnclosedEmitter<'inp, L, Lang>,
-    E::Error: crate::emitter::FromUnclosed<'inp, L, Lang>,
   {
     self.emitter.emit_unclosed(err)
   }

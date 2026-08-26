@@ -1,6 +1,6 @@
 use crate::{
   container::Container as ContainerT,
-  emitter::{FromUnclosed, FullContainerEmitter, SeparatedEmitter, UnclosedEmitter},
+  emitter::{FullContainerEmitter, SeparatedEmitter, UnclosedEmitter},
   error::Unclosed,
 };
 
@@ -45,8 +45,7 @@ impl<'c, 'inp, L, P, Sep, O, Condition, Ctx, Delim, W, Lang: ?Sized>
       + FullContainerEmitter<'inp, L, Lang>
       + UnclosedEmitter<'inp, L, Lang>,
     Ctx: ParseContext<'inp, L, Lang>,
-    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error:
-      From<UnexpectedEot<L::Offset, Lang>> + FromUnclosed<'inp, L, Lang>,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
     Container: DelimiterHandler<'inp, L> + SeparatorHandler<'inp, L> + ContainerT<O>,
     EH: EndStateHandler<'inp, 'closure, Sep, O, L, Ctx, Lang>,
     CH: ContinueStateHandler<'inp, 'closure, Sep, O, L, Ctx, Lang>,

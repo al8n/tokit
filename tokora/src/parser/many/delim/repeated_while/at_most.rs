@@ -20,8 +20,7 @@ where
     + TooManyEmitter<'inp, L, Lang>
     + UnclosedEmitter<'inp, L, Lang>,
   Ctx: ParseContext<'inp, L, Lang>,
-  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error:
-    From<UnexpectedEot<L::Offset, Lang>> + FromUnclosed<'inp, L, Lang>,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
   Container: Default + ContainerT<O> + DelimiterHandler<'inp, L>,
 {
   fn parse_input(

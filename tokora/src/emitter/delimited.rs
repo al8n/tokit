@@ -148,21 +148,71 @@ pub trait UnclosedEmitter<'a, L, Lang: ?Sized = ()>: Emitter<'a, L, Lang> {
   /// [`DelimiterKind`](crate::delimiter::DelimiterKind) and its name is the pair's display
   /// name.
   ///
-  /// # Why the `FromUnclosed` bound sits on the method, not on the trait
+  /// # Why there is no `FromUnclosed` bound here
   ///
-  /// This placement is **chosen**, not a leftover, and is recorded here so a later cleanup does
-  /// not "fix" it. Method-level means pay-when-you-call: an emitter that drops diagnostics and
-  /// never routes an unclosed pair costs nothing for this capability. Hoisting it to the trait
-  /// would force **every** `UnclosedEmitter` implementor's error type to carry `FromUnclosed`
-  /// unconditionally — a bound derived from trait surface rather than from behaviour, which is
-  /// the same defect this release removed from `Silent`'s pratt impl.
+  /// [`FromUnclosed`] is named by the **implementations that convert** —
+  /// [`Fatal`](crate::emitter::Fatal) returns the converted value and `Verbose` records it, so
+  /// both impl blocks carry `E: FromUnclosed` — and by nothing else.
+  /// [`Silent`](crate::emitter::Silent) and [`Ignored`](crate::utils::marker::Ignored) discard
+  /// the diagnostic and their impls are bound-free, exactly like their siblings across the
+  /// rest of the emitter family.
+  ///
+  /// This method used to carry `Self::Error: FromUnclosed` instead, on a "pay when you call"
+  /// argument. The argument does not survive contact with the dropping emitters, which is why
+  /// it is recorded here rather than removed silently: a method-level bound is paid by
+  /// **every** caller of the capability, including the ones whose implementation is `Ok(())`.
+  /// `Silent<E>` could not call its own no-op unless `E` implemented a conversion the body
+  /// never performs, `ComposableEmitter` advertised a member that its own bound could not
+  /// call, and every delimited driver restated the conversion on the error type of an emitter
+  /// that might never convert anything. A bound derived from trait surface rather than from
+  /// behaviour is the defect this crate removed from `Silent`'s pratt impl, and
+  /// `PrattEmitter` is the shape that repair left behind:
+  /// bound-free method, conversion on the converting impls.
+  ///
+  /// What it costs: an implementor whose body performs the conversion states it on its own
+  /// impl block, as the two in-crate converting emitters do. What it buys: the bound is
+  /// collected only where something is actually converted.
+  ///
+  /// A dropping emitter over an error type that implements *nothing* satisfies the capability,
+  /// and the bound alone is enough to call the method:
+  ///
+  /// ```rust
+  /// use tokora::{Lexer, emitter::{Silent, UnclosedEmitter}};
+  ///
+  /// struct Opaque;
+  ///
+  /// fn has_capability<'inp, L: Lexer<'inp>, E: UnclosedEmitter<'inp, L>>() {}
+  ///
+  /// fn probe<'inp, L: Lexer<'inp>>() {
+  ///   has_capability::<L, Silent<Opaque>>();
+  /// }
+  /// ```
+  ///
+  /// The converting emitter over the same error type does not, because its body really does
+  /// perform the conversion. `Emitter` is assumed here so the only obligation left standing is
+  /// the delimiter one:
+  ///
+  /// ```rust,compile_fail,E0277
+  /// use tokora::{Lexer, emitter::{Emitter, Fatal, UnclosedEmitter}};
+  ///
+  /// struct Opaque;
+  ///
+  /// fn has_capability<'inp, L: Lexer<'inp>, E: UnclosedEmitter<'inp, L>>() {}
+  ///
+  /// fn probe<'inp, L: Lexer<'inp>>()
+  /// where
+  ///   Fatal<Opaque>: Emitter<'inp, L>,
+  /// {
+  ///   // `Opaque` has no `FromUnclosed` impl, and `Fatal`'s body needs one.
+  ///   has_capability::<L, Fatal<Opaque>>();
+  /// }
+  /// ```
   fn emit_unclosed<Delimiter>(
     &mut self,
     err: Unclosed<Delimiter, L::Span, Lang>,
   ) -> Result<(), Self::Error>
   where
-    L: Lexer<'a>,
-    Self::Error: FromUnclosed<'a, L, Lang>;
+    L: Lexer<'a>;
 }
 
 impl<'a, L, U, Lang: ?Sized> UnclosedEmitter<'a, L, Lang> for &mut U
@@ -176,7 +226,6 @@ where
   ) -> Result<(), Self::Error>
   where
     L: Lexer<'a>,
-    Self::Error: FromUnclosed<'a, L, Lang>,
   {
     (**self).emit_unclosed(err)
   }

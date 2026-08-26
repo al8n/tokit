@@ -11,7 +11,7 @@ use crate::{
     CstProfile, KindValidator,
     event::{Event, EventMark, TOMBSTONE},
   },
-  emitter::{CstEmitter, Emitter, Fatal, Verbose},
+  emitter::{CstEmitter, Emitter, Fatal, Silent, Verbose},
   error::token::{UnexpectedToken, UnexpectedTokenOf},
   input::{Balance, Cursor, Input},
   span::Spanned,
@@ -213,6 +213,18 @@ const _: () = {
 
   impl<O, Lang: ?Sized> From<NonAssociativeChain<O, Lang>> for TestErr {
     fn from(_: NonAssociativeChain<O, Lang>) -> Self {
+      Self::Unexpected
+    }
+  }
+
+  // `Verbose` and `Fatal` convert the unclosed diagnostic, so their `UnclosedEmitter` impls
+  // name `FromUnclosed` on the error type. `Silent` and `Ignored` do not, and this fixture
+  // wraps the converting ones.
+  impl<'a, L, Lang: ?Sized> crate::emitter::FromUnclosed<'a, L, Lang> for TestErr
+  where
+    L: Lexer<'a>,
+  {
+    fn from_unclosed<D>(_: crate::error::Unclosed<D, L::Span, Lang>) -> Self {
       Self::Unexpected
     }
   }
@@ -2297,10 +2309,11 @@ fn cst_composition_census_every_family_method_is_overridden() {
   //
   // Scope, stated: the *family* question — does `Sink` serve every trait the public bundles
   // name — is answered by `sink_satisfies_the_public_emitter_bundles`, bound on the bundles
-  // themselves. What this block adds is a second error type: `UnclosedEmitter`'s conversion
-  // sits on the *method* rather than the trait, so a deliberately-thin error type must still be
-  // able to satisfy it. The other capability traits require conversions `SesErr` does not
-  // carry, so asserting them here would test the fixture rather than the sink.
+  // themselves. What this block adds is a second error type, over both halves of the
+  // conversion split: `Verbose` converts the unclosed diagnostic and so demands `FromUnclosed`
+  // on its error type, while `Silent` drops it and demands nothing. `Sink` must forward the
+  // capability under both, and the dropping arm is the one that proves the forwarding impl
+  // inherits only the inner capability rather than restating a conversion.
   {
     const fn serves_unclosed<'a, L, E>()
     where
@@ -2309,6 +2322,7 @@ fn cst_composition_census_every_family_method_is_overridden() {
     {
     }
     serves_unclosed::<MiniLexer<'_>, SesSink<'_>>();
+    serves_unclosed::<MiniLexer<'_>, Sink<'_, MiniLexer<'_>, Silent<SesErr>>>();
   }
 
   for name in overridden {
@@ -6623,6 +6637,15 @@ impl<D, S, Lang: ?Sized> From<crate::error::Unclosed<D, S, Lang>> for SesErr {
 
 impl<H, O, Lang: ?Sized, Set: Clone> From<crate::error::UnexpectedEnd<H, O, Lang, Set>> for SesErr {
   fn from(_: crate::error::UnexpectedEnd<H, O, Lang, Set>) -> Self {
+    Self::Lex
+  }
+}
+
+impl<'a, L, Lang: ?Sized> crate::emitter::FromUnclosed<'a, L, Lang> for SesErr
+where
+  L: Lexer<'a>,
+{
+  fn from_unclosed<D>(_: crate::error::Unclosed<D, L::Span, Lang>) -> Self {
     Self::Lex
   }
 }
