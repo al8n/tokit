@@ -134,16 +134,20 @@ impl<S, Span, Lang> Ident<S, Span, Lang> {
     const fn span(&self) -> Span where Span: Copy;        // + span_ref / span_mut
     const fn source(&self) -> S where S: Copy;             // + source_ref / source_mut
     fn bump(&mut self, by: &Span::Offset) -> &mut Self where Span: crate::Span;
-    const fn is_valid/is_error/is_missing(&self) -> bool;  // recovery status (Ident only)
+    const fn with_status(span: Span, source: S, status: Status) -> Self;
+    const fn is_valid/is_error/is_missing(&self) -> bool;  // the recovery status
+    fn bump(&mut self, by: &Span::Offset) -> &mut Self where Span: crate::Span;
     fn map<U>(self, f: impl FnOnce(S) -> U) -> Ident<U, Span, Lang>;
 }
-// Keyword has the same new/span*/source*/map, but no is_valid/is_error/is_missing and no bump —
-// it carries no status of its own, and converts into `Ident` for free via `From`.
+// Keyword has the same new/with_status/span*/source*/map and the same three predicates — it
+// carries the same status, so converting into `Ident` via `From` carries it across rather than
+// declaring the result valid. `bump` is Ident's alone. Every `Lit*` type carries it too.
 ```
 
 ```rust
 use tokora::{SimpleSpan, error::ErrorNode, types::{Ident, Keyword}, utils::IntoComponents};
 
+#[derive(Debug, PartialEq)]
 struct MyLang;
 
 let ident = Ident::<&str, SimpleSpan, MyLang>::new(SimpleSpan::new(5, 11), "my_var");
@@ -161,10 +165,17 @@ let kw = Keyword::<&str, SimpleSpan, MyLang>::new(SimpleSpan::new(0, 3), "let");
 let as_ident: Ident<&str, SimpleSpan, MyLang> = kw.into();
 assert_eq!(as_ident.source_ref(), &"let");
 
-// Both destructure via `IntoComponents`; `.map` transforms the payload in place.
-let (span, source) = ident.into_components();
-let upper = Ident::<&str, SimpleSpan, MyLang>::new(span, source).map(|s| s.to_uppercase());
+// Both destructure via `IntoComponents`, into span, payload AND status. The status is in the
+// tuple because `with_status` is the inverse: rebuilding through `new` would declare a recovered
+// node valid, which is the laundering the three-part decomposition exists to prevent.
+let (span, source, status) = ident.into_components();
+let upper = Ident::<&str, SimpleSpan, MyLang>::with_status(span, source, status)
+    .map(|s| s.to_uppercase());
 assert_eq!(upper.source_ref(), "MY_VAR");
+assert!(upper.is_valid());
+
+let (span, source, status) = bad.into_components();
+assert!(Ident::<&str, SimpleSpan, MyLang>::with_status(span, source, status).is_error());
 ```
 
 Both also have real combinator entry points, not just bare constructors. Once the token type opts
@@ -182,8 +193,8 @@ Keyword::<(), ()>::try_parse(inp) -> Result<ParseAttempt<Keyword<L::Token, L::Sp
 ```
 
 [`IdentList<S, Span = SimpleSpan, Container = Vec<Ident<S, Span>>, Lang: ?Sized = ()>`](crate::types::IdentList)
-aggregates already-parsed identifiers. It has no status of its own — `is_valid`/`is_error`/
-`is_missing` scan the elements on every call:
+aggregates already-parsed identifiers. It stores no status of its own — `is_valid`/`is_error`/
+`is_missing` scan the elements on every call, so the list's answer is its segments':
 
 ```rust
 use tokora::{SimpleSpan, error::ErrorNode, types::{Ident, IdentList}};

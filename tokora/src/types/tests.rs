@@ -143,9 +143,10 @@ fn ident_list_of_mapped_recovery_segments_is_not_valid() {
 fn ident_into_components() {
   use crate::utils::IntoComponents;
   let ident = Ident::<&str>::new(SimpleSpan::new(0, 3), "foo");
-  let (span, source) = ident.into_components();
+  let (span, source, status) = ident.into_components();
   assert_eq!(span, SimpleSpan::new(0, 3));
   assert_eq!(source, "foo");
+  assert!(status.is_valid());
 }
 
 #[test]
@@ -196,7 +197,8 @@ fn keyword_map() {
 #[test]
 fn keyword_into_components() {
   let kw = Keyword::<&str>::new(SimpleSpan::new(0, 3), "let");
-  let (span, source) = kw.into_components();
+  let (span, source, status) = kw.into_components();
+  assert!(status.is_valid());
   assert_eq!(span, SimpleSpan::new(0, 3));
   assert_eq!(source, "let");
 }
@@ -376,7 +378,8 @@ fn lit_hex_new() {
 fn lit_into_components() {
   use crate::utils::IntoComponents;
   let lit = LitDecimal::<&str>::new(SimpleSpan::new(0, 2), "42");
-  let (span, data) = IntoComponents::into_components(lit);
+  let (span, data, status) = IntoComponents::into_components(lit);
+  assert!(status.is_valid());
   assert_eq!(span, SimpleSpan::new(0, 2));
   assert_eq!(data, "42");
 }
@@ -518,7 +521,8 @@ fn keyword_as_span() {
 fn keyword_into_components_trait() {
   use crate::utils::IntoComponents;
   let kw = Keyword::<&str>::new(SimpleSpan::new(0, 3), "let");
-  let (span, source) = IntoComponents::into_components(kw);
+  let (span, source, status) = IntoComponents::into_components(kw);
+  assert!(status.is_valid());
   assert_eq!(span, SimpleSpan::new(0, 3));
   assert_eq!(source, "let");
 }
@@ -526,9 +530,10 @@ fn keyword_into_components_trait() {
 #[test]
 fn keyword_into_components_method() {
   let kw = Keyword::<&str>::new(SimpleSpan::new(0, 3), "let");
-  let (span, source) = kw.into_components();
+  let (span, source, status) = kw.into_components();
   assert_eq!(span, SimpleSpan::new(0, 3));
   assert_eq!(source, "let");
+  assert!(status.is_valid());
 }
 
 // --- Additional Ident tests for coverage ---
@@ -549,7 +554,8 @@ fn ident_as_span() {
 fn ident_into_components_trait() {
   use crate::utils::IntoComponents;
   let ident = Ident::<&str>::new(SimpleSpan::new(0, 3), "foo");
-  let (span, source) = IntoComponents::into_components(ident);
+  let (span, source, status) = IntoComponents::into_components(ident);
+  assert!(status.is_valid());
   assert_eq!(span, SimpleSpan::new(0, 3));
   assert_eq!(source, "foo");
 }
@@ -687,7 +693,8 @@ fn lit_false_new() {
 fn lit_decimal_into_components_trait() {
   use crate::utils::IntoComponents;
   let lit = LitHex::<&str>::new(SimpleSpan::new(0, 4), "0xFF");
-  let (span, data) = IntoComponents::into_components(lit);
+  let (span, data, status) = IntoComponents::into_components(lit);
+  assert!(status.is_valid());
   assert_eq!(span, SimpleSpan::new(0, 4));
   assert_eq!(data, "0xFF");
 }
@@ -722,4 +729,137 @@ fn lit_bump() {
   let mut lit = LitDecimal::<&str>::new(SimpleSpan::new(0, 2), "42");
   lit.bump(&5);
   assert_eq!(lit.span(), SimpleSpan::new(5, 7));
+}
+
+// --- Round trip: decompose and rebuild, over every carrier and every state ---
+
+/// Decomposes and rebuilds one carrier in each of its three states, and checks four things per
+/// state: the span survives, the payload survives, **the status survives**, and the rebuilt value
+/// equals the one it came from.
+///
+/// The last is the one that matters. `IntoComponents` promises a complete decomposition, so its
+/// output has to be enough to reconstruct the input — and before tokora#320 it was not: the tuple
+/// was `(Span, Payload)` over a carrier holding a status too, so `error(span)` and
+/// `new(span, "<error>")` decomposed identically and any rebuild through `new` reported a
+/// recovery placeholder as valid syntax.
+///
+/// Written over the carrier list rather than over one exemplar, because that list is the
+/// population: seventeen of the nineteen come from one `define_literal!` body, and a test that
+/// named only `LitDecimal` would report green over the sixteen it never ran.
+macro_rules! assert_status_survives_a_round_trip {
+  ($($carrier:ident),+ $(,)?) => {
+    $({
+      let span = SimpleSpan::new(3, 9);
+
+      for status in [Status::Valid, Status::Error, Status::Missing] {
+        let name = stringify!($carrier);
+        let original = $carrier::<&str>::with_status(span, "payload", status);
+
+        let (sp, payload, st) = IntoComponents::into_components(original);
+        assert_eq!(sp, span, "{name} in {status:?}: span");
+        assert_eq!(payload, "payload", "{name} in {status:?}: payload");
+        assert_eq!(st, status, "{name} in {status:?}: status survives the decomposition");
+
+        let rebuilt = $carrier::<&str>::with_status(sp, payload, st);
+        assert_eq!(rebuilt, original, "{name} in {status:?}: the round trip is the identity");
+        assert_eq!(rebuilt.is_valid(), status.is_valid(), "{name} in {status:?}: is_valid");
+        assert_eq!(rebuilt.is_error(), status.is_error(), "{name} in {status:?}: is_error");
+        assert_eq!(rebuilt.is_missing(), status.is_missing(), "{name} in {status:?}: is_missing");
+      }
+    })+
+  };
+}
+
+#[test]
+fn every_carrier_survives_a_decompose_and_rebuild_in_every_state() {
+  use crate::utils::IntoComponents;
+
+  assert_status_survives_a_round_trip!(
+    Ident,
+    Keyword,
+    Lit,
+    LitDecimal,
+    LitHex,
+    LitOctal,
+    LitBinary,
+    LitFloat,
+    LitHexFloat,
+    LitString,
+    LitMultilineString,
+    LitRawString,
+    LitChar,
+    LitByte,
+    LitByteString,
+    LitBool,
+    LitTrue,
+    LitFalse,
+    LitNull,
+  );
+}
+
+/// `Keyword` carries a second decomposition door: an inherent `into_components` that wins the
+/// pick over the trait's at an unqualified call site. The two returning different shapes would be
+/// a defect no diagnostic reports, so both are driven here.
+#[test]
+fn keywords_inherent_decomposition_agrees_with_the_trait_one() {
+  use crate::utils::IntoComponents;
+
+  let span = SimpleSpan::new(1, 5);
+
+  for status in [Status::Valid, Status::Error, Status::Missing] {
+    let kw = Keyword::<&str>::with_status(span, "then", status);
+
+    let inherent = Keyword::into_components(kw);
+    let via_trait = IntoComponents::into_components(kw);
+
+    assert_eq!(inherent, via_trait, "{status:?}: the two doors agree");
+    assert_eq!(
+      inherent.2, status,
+      "{status:?}: the inherent door carries the status"
+    );
+    assert_eq!(
+      Keyword::<&str>::with_status(inherent.0, inherent.1, inherent.2),
+      kw,
+      "{status:?}: the inherent door's output rebuilds its input",
+    );
+  }
+}
+
+/// The states an `ErrorNode` constructor declares survive the same trip. This is the shape a
+/// consumer actually writes — take a recovered node apart, put it back — and the one that used to
+/// come back valid.
+#[test]
+fn an_error_node_placeholder_survives_a_decompose_and_rebuild() {
+  use crate::utils::IntoComponents;
+
+  let span = SimpleSpan::new(0, 5);
+
+  for (label, kw, lit) in [
+    (
+      "error",
+      Keyword::<&str>::error(span),
+      LitDecimal::<&str>::error(span),
+    ),
+    (
+      "missing",
+      Keyword::<&str>::missing(span),
+      LitDecimal::<&str>::missing(span),
+    ),
+  ] {
+    let (sp, src, st) = IntoComponents::into_components(kw);
+    let rebuilt = Keyword::<&str>::with_status(sp, src, st);
+    assert_eq!(rebuilt, kw, "{label}: keyword round trip");
+    assert!(
+      !rebuilt.is_valid(),
+      "{label}: a rebuilt keyword is not valid syntax"
+    );
+
+    let (sp, data, st) = IntoComponents::into_components(lit);
+    let rebuilt = LitDecimal::<&str>::with_status(sp, data, st);
+    assert_eq!(rebuilt, lit, "{label}: literal round trip");
+    assert!(
+      !rebuilt.is_valid(),
+      "{label}: a rebuilt literal is not valid syntax"
+    );
+  }
 }

@@ -127,9 +127,10 @@ use crate::{
 /// # let span = SimpleSpan::new(0, 3);
 /// let ident = Ident::<&str, SimpleSpan, MyLang>::new(span, "foo");
 ///
-/// // Destructure into span and source
-/// let (span, source) = ident.into_components();
+/// // Destructure into span, source and recovery status
+/// let (span, source, status) = ident.into_components();
 /// assert_eq!(source, "foo");
+/// assert!(status.is_valid());
 /// ```
 ///
 /// ## Mutable Access
@@ -164,11 +165,26 @@ impl<S: ?Sized, Span, Lang: ?Sized> AsSpan<Span> for Ident<S, Span, Lang> {
 }
 
 impl<S, Span, Lang: ?Sized> IntoComponents for Ident<S, Span, Lang> {
-  type Components = (Span, S);
+  /// The span, the source, **and the recovery status** — every field this type holds beyond the
+  /// zero-sized language marker, which the rebuild names in its own type.
+  ///
+  /// The status is here because this trait promises a complete decomposition and because
+  /// [`with_status`](Ident::with_status) is the inverse: without it in both, a consumer who took
+  /// a carrier apart and put it back together would have to rebuild through
+  /// [`new`](Ident::new), which always declares the result valid — the same laundering tokora#303
+  /// removed from [`map`](Ident::map), reached one door over.
+  type Components = (Span, S, Status);
 
   #[inline(always)]
   fn into_components(self) -> Self::Components {
-    (self.span, self.ident)
+    let Self {
+      _lang,
+      status,
+      span,
+      ident,
+    } = self;
+
+    (span, ident, status)
   }
 }
 
@@ -331,8 +347,34 @@ impl<S, Span, Lang: ?Sized> Ident<S, Span, Lang> {
     Self::with_status(span, source, Status::Valid)
   }
 
+  /// Creates an identifier with an explicitly given recovery status.
+  ///
+  /// The inverse of [`into_components`](IntoComponents::into_components), and the only
+  /// constructor that can express a state other than valid over a payload the caller chose:
+  /// [`new`](Self::new) always declares the result valid, and
+  /// [`ErrorNode::error`](ErrorNode::error) / [`ErrorNode::missing`](ErrorNode::missing) pick the
+  /// payload themselves. A dialect with its own placeholder spelling needs this one.
+  ///
+  /// # Examples
+  ///
+  /// ```rust
+  /// use tokora::{SimpleSpan, types::{Ident, Status}, utils::IntoComponents};
+  /// # #[derive(Debug, Clone, Copy, PartialEq)]
+  /// # struct MyLang;
+  ///
+  /// let span = SimpleSpan::new(0, 4);
+  /// let recovered = Ident::<&str, SimpleSpan, MyLang>::with_status(span, "name", Status::Missing);
+  ///
+  /// assert!(recovered.is_missing());
+  /// assert_eq!(recovered.source_ref(), &"name");
+  ///
+  /// // Round trip: the three components rebuild the value they came from.
+  /// let (span, source, status) = recovered.into_components();
+  /// let rebuilt = Ident::<&str, SimpleSpan, MyLang>::with_status(span, source, status);
+  /// assert_eq!(rebuilt, recovered);
+  /// ```
   #[inline(always)]
-  pub(super) const fn with_status(span: Span, source: S, status: Status) -> Self {
+  pub const fn with_status(span: Span, source: S, status: Status) -> Self {
     Self {
       span,
       ident: source,

@@ -142,9 +142,10 @@ use crate::{
 /// # let span = SimpleSpan::new(0, 3);
 /// let ident = Keyword::<&str, SimpleSpan, MyLang>::new(span, "foo");
 ///
-/// // Destructure into span and source
-/// let (span, source) = ident.into_components();
+/// // Destructure into span, source and recovery status
+/// let (span, source, status) = ident.into_components();
 /// assert_eq!(source, "foo");
+/// assert!(status.is_valid());
 /// ```
 ///
 /// ## Mutable Access
@@ -204,11 +205,19 @@ impl<S: ?Sized, Span, Lang: ?Sized> AsSpan<Span> for Keyword<S, Span, Lang> {
 }
 
 impl<S, Span, Lang: ?Sized> IntoComponents for Keyword<S, Span, Lang> {
-  type Components = (Span, S);
+  /// The span, the source, **and the recovery status** — every field this type holds beyond the
+  /// zero-sized language marker, which the rebuild names in its own type.
+  ///
+  /// The status is here because this trait promises a complete decomposition and because
+  /// [`with_status`](Keyword::with_status) is the inverse: without it in both, a consumer who
+  /// took a carrier apart and put it back together would have to rebuild through
+  /// [`new`](Keyword::new), which always declares the result valid — the same laundering
+  /// tokora#303 removed from [`map`](Keyword::map), reached one door over.
+  type Components = (Span, S, Status);
 
   #[inline(always)]
   fn into_components(self) -> Self::Components {
-    (self.span, self.ident)
+    Keyword::into_components(self)
   }
 }
 
@@ -238,8 +247,34 @@ impl<S, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
     Self::with_status(span, source, Status::Valid)
   }
 
+  /// Creates a keyword with an explicitly given recovery status.
+  ///
+  /// The inverse of [`into_components`](Self::into_components), and the only constructor that
+  /// can express a state other than valid over a payload the caller chose: [`new`](Self::new)
+  /// always declares the result valid, and [`ErrorNode::error`](ErrorNode::error) /
+  /// [`ErrorNode::missing`](ErrorNode::missing) pick the payload themselves. A dialect with its
+  /// own placeholder spelling needs this one.
+  ///
+  /// # Examples
+  ///
+  /// ```rust
+  /// use tokora::{SimpleSpan, types::{Keyword, Status}};
+  /// # #[derive(Debug, Clone, Copy, PartialEq)]
+  /// # struct MyLang;
+  ///
+  /// let span = SimpleSpan::new(0, 4);
+  /// let recovered = Keyword::<&str, SimpleSpan, MyLang>::with_status(span, "then", Status::Missing);
+  ///
+  /// assert!(recovered.is_missing());
+  /// assert_eq!(recovered.source_ref(), &"then");
+  ///
+  /// // Round trip: the three components rebuild the value they came from.
+  /// let (span, source, status) = recovered.into_components();
+  /// let rebuilt = Keyword::<&str, SimpleSpan, MyLang>::with_status(span, source, status);
+  /// assert_eq!(rebuilt, recovered);
+  /// ```
   #[inline(always)]
-  const fn with_status(span: Span, source: S, status: Status) -> Self {
+  pub const fn with_status(span: Span, source: S, status: Status) -> Self {
     Self {
       span,
       ident: source,
@@ -403,10 +438,28 @@ impl<S, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
     self.ident
   }
 
-  /// Consumes the identifier and returns the span and source string.
+  /// Consumes the keyword and returns the span, the source string and the recovery status.
+  ///
+  /// This is an inherent method with the same name as
+  /// [`IntoComponents::into_components`](IntoComponents::into_components), which `Keyword` also
+  /// implements, and an inherent item wins the pick at an unqualified call site. That makes the
+  /// two returning *different* shapes a defect no diagnostic would report, so the trait impl
+  /// delegates here rather than repeating the body. `Ident` and the `Lit*` family have no such
+  /// second door.
+  ///
+  /// The status is part of the result because [`with_status`](Self::with_status) is the inverse
+  /// and a decomposition that dropped it could only be rebuilt through [`new`](Self::new), which
+  /// always declares the result valid.
   #[inline(always)]
-  pub fn into_components(self) -> (Span, S) {
-    (self.span, self.ident)
+  pub fn into_components(self) -> (Span, S, Status) {
+    let Self {
+      _lang,
+      status,
+      span,
+      ident,
+    } = self;
+
+    (span, ident, status)
   }
 
   /// Maps the source string to a new type, preserving the span, the language, and the

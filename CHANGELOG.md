@@ -71,6 +71,21 @@ and will red until they do.
 
 ### Added
 
+- **`types::Status`, and `with_status` on all nineteen recovery carriers** (#320). The recovery
+  state stops being a private field and becomes a value a consumer can hold: it is returned by
+  `IntoComponents` (see **Changed (breaking)**) and accepted back by
+  `Ident::with_status`, `Keyword::with_status` and each `Lit*::with_status`, which are the inverses
+  of that decomposition and make a decompose-and-rebuild the identity in all three states.
+
+  `with_status` is also the only constructor that can express a state other than valid over a
+  payload the **caller** chose — `new` always declares the result valid, and `ErrorNode::error` /
+  `ErrorNode::missing` pick the payload themselves — so a dialect with its own placeholder
+  spelling now has a door. Without it a complete decomposition would still have ended in
+  laundering, because the only public way back in forced `Valid`.
+
+  `Status` is `#[non_exhaustive]`: a fourth recovery state is admissible later, so a `match` needs
+  a wildcard arm and `is_valid()` is deliberately not `!is_error() && !is_missing()`.
+
 - **`Keyword::{is_valid, is_error, is_missing}`, and the same three on every `Lit*` type**
   (#301). `Keyword` and the seventeen literal carriers implemented `ErrorNode` — so
   `error(span)` and `missing(span)` were public and documented as recovery placeholders — while
@@ -827,6 +842,31 @@ and will red until they do.
   `UnclosedEmitter` beside a converting sibling forces `ComposableEmitter` to include one of them:
   the converting one fails `Silent` verbatim, and the bound-free one stops covering the delimited
   driver the bundle exists for.
+
+- **`IntoComponents::Components` on all nineteen recovery carriers gains the status:
+  `(Span, Payload)` becomes `(Span, Payload, Status)`** (#320). `Ident`, `Keyword` and the
+  seventeen `Lit*` types hold a span, a payload and a recovery status, and returned two of the
+  three. The trait's own contract is that a decomposition is complete with no information loss,
+  and the test of that is whether the output rebuilds the input: it did not, so
+  `LitDecimal::error(span)` and `LitDecimal::new(span, "<error>")` decomposed **identically**, and
+  anything that took a carrier apart and put it back together through `new` reported a recovery
+  placeholder as valid syntax — the laundering #303 removed from `Ident::map`, reached one door
+  over. `Keyword`'s inherent `into_components`, which wins the pick over the trait's at an
+  unqualified call site, widens with it and the trait impl now delegates to it so the two shapes
+  cannot drift.
+
+  **`Ident` is included even though it predates this**, because it is the model the #266 rule
+  points at and the type this branch held up as correct; a model with the hole teaches the hole,
+  and leaving it would have left `Ident::into_components` returning a 2-tuple beside `Keyword`'s
+  3-tuple.
+
+  Migration is a compile error at every site, never a silent change: `let (span, src) = x
+  .into_components();` becomes `let (span, src, status) = …`, and `_` if the status is not wanted.
+  The status is **appended** rather than inserted after the span, against the trait's ordering
+  convention, so that `.0` and `.1` keep their meanings and only destructuring arity breaks.
+  Withdrawing the impls was the alternative and is worse: for an owned payload `into_components`
+  is the only extraction that does not clone, and withdrawal removes a capability where widening
+  completes it.
 
 - **`CachedToken::state` and `CachedToken::into_components` are crate-internal** (#311). The regime
   a cached token carries is now an opaque payload: carried, cloned and moved, never read.
@@ -2359,6 +2399,12 @@ and will red until they do.
   `increase_both_and_check`'s claimed it decreased recursion (it increases both).
 
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
+
+**`with_status` is a new inherent method on all nineteen recovery carriers, and `Status` is a new
+public name in `tokora::types`** (#320). The same inherent-pick exposure as the predicates below,
+plus a glob exposure: a consumer with `use tokora::types::*;` and a `Status` of their own now has
+an ambiguity at that name. **The fixes are UFCS for the method and an explicit import or alias for
+the name.**
 
 **`is_valid`, `is_error` and `is_missing` are new inherent methods on `Keyword` and on all
 seventeen `Lit*` types** (#301). An inherent item wins the pick over an extension trait's, so a

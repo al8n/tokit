@@ -313,7 +313,7 @@ fn keyword_try_parse_returns_token() {
     let result = Keyword::try_parse(inp)?;
     Ok(match result {
       ParseAttempt::Accept(kw) => {
-        let (_span, tok) = kw.into_components();
+        let (_span, tok, _status) = kw.into_components();
         Some(tok)
       }
       ParseAttempt::Decline => None,
@@ -338,7 +338,7 @@ fn keyword_try_parse_sliced_accept() {
     let result = Keyword::try_parse_sliced(inp)?;
     Ok(match result {
       ParseAttempt::Accept(kw) => Some({
-        let (_span, src) = kw.into_components();
+        let (_span, src, _status) = kw.into_components();
         src
       }),
       ParseAttempt::Decline => None,
@@ -425,7 +425,7 @@ fn keyword_try_parse_exact_returns_token() {
     let result = Keyword::try_parse_exact(&"return").try_parse_input(inp)?;
     Ok(match result {
       ParseAttempt::Accept(kw) => Some({
-        let (_span, src) = kw.into_components();
+        let (_span, src, _status) = kw.into_components();
         src
       }),
       ParseAttempt::Decline => None,
@@ -450,7 +450,7 @@ fn keyword_try_parse_exact_sliced_accept() {
     let result = Keyword::try_parse_exact_sliced(&"if").try_parse_input(inp)?;
     Ok(match result {
       ParseAttempt::Accept(kw) => Some({
-        let (_span, src) = kw.into_components();
+        let (_span, src, _status) = kw.into_components();
         src
       }),
       ParseAttempt::Decline => None,
@@ -524,7 +524,7 @@ fn keyword_try_parse_multiple() {
       let result = Keyword::try_parse(inp)?;
       match result {
         ParseAttempt::Accept(kw) => keywords.push({
-          let (_span, src) = kw.into_components();
+          let (_span, src, _status) = kw.into_components();
           src
         }),
         ParseAttempt::Decline => break,

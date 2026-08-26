@@ -94,6 +94,21 @@ mod to_equivalent;
 /// - Ensure the decomposition is complete (no information loss)
 /// - Document the component structure clearly
 ///
+/// ### "Complete" is measured against the fields, not against what a caller usually wants
+///
+/// The completeness line above is the whole contract, and it is easy to keep in spirit and break
+/// in fact: a decomposition that returns the parts a caller normally *reaches for* is not the
+/// same as one that returns every part the value is made of. The test is whether the output can
+/// rebuild the input — if the type has a constructor the components cannot reach, the missing
+/// argument is the missing component.
+///
+/// tokora#320 is that defect: the carriers in [`types`](crate::types) returned `(Span, Payload)`
+/// while holding a recovery status too, so a parse placeholder and a real one decomposed
+/// identically and every rebuild reported the placeholder as valid syntax. Their `Components`
+/// now carries [`Status`](crate::types::Status) as well, and each carrier's `with_status`
+/// constructor is the inverse. A zero-sized marker such as `PhantomData<Lang>` is the one thing
+/// a decomposition may leave out, because the rebuild names it in its own type.
+///
 /// ## Component Ordering Convention
 ///
 /// To maintain consistency across implementations, follow this ordering:

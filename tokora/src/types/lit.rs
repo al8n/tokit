@@ -171,11 +171,20 @@ macro_rules! define_literal {
     }
 
     impl<D, Span, Lang: ?::core::marker::Sized> IntoComponents for $name<D, Span, Lang> {
-      type Components = (Span, D);
+      /// The span, the data, **and the recovery status** — every field this type holds beyond
+      /// the zero-sized language marker, which the rebuild names in its own type.
+      ///
+      /// The status is here because this trait promises a complete decomposition and because
+      /// `with_status` is the inverse: without it in both, a consumer who took a literal apart
+      /// and put it back together would have to rebuild through `new`, which always declares the
+      /// result valid.
+      type Components = (Span, D, Status);
 
       #[inline(always)]
       fn into_components(self) -> Self::Components {
-        (self.span, self.data)
+        let Self { _lang, status, span, data } = self;
+
+        (span, data, status)
       }
     }
 
@@ -253,8 +262,14 @@ macro_rules! define_literal {
         Self::with_status(span, data, Status::Valid)
       }
 
+      /// Creates a literal with an explicitly given recovery status.
+      ///
+      /// The inverse of `into_components`, and the only constructor that can express a state
+      /// other than valid over data the caller chose: `new` always declares the result valid,
+      /// and `ErrorNode::error` / `ErrorNode::missing` pick the data themselves. A dialect with
+      /// its own placeholder spelling needs this one.
       #[inline(always)]
-      const fn with_status(span: Span, data: D, status: Status) -> Self {
+      pub const fn with_status(span: Span, data: D, status: Status) -> Self {
         Self {
           span,
           data,
