@@ -781,6 +781,37 @@ and will red until they do.
 
 ### Changed (breaking)
 
+- **`UnclosedEmitter::emit_unclosed` no longer imposes `Self::Error: FromUnclosed`, and `Fatal`
+  and `Verbose` implement the trait only where their error type carries that conversion** (#270).
+  The bound was on the trait method, so it was charged to every *caller* of the capability rather
+  than to the implementations that perform the conversion. `Silent<E>` could not call its own
+  no-op unless `E` implemented a conversion its body never performs; a generic function bounded by
+  `UnclosedEmitter` — or by `ComposableEmitter`, which advertises the member — could not call it
+  without restating the bound; and twenty delimited/list driver where-clauses restated it on the
+  error type of an emitter that might never convert anything. All of those are gone, along with
+  the restatements on `InputRef::emit_unclosed`, `EmitterView::emit_unclosed` and the `&mut U` and
+  `Sink` forwarders, which now inherit the inner capability and nothing else.
+
+  **This is `PrattEmitter`'s arrangement, not a new one.** The same defect was removed from
+  `Silent`'s pratt impl in 0.9, leaving a bound-free method with `FromPrattError` on `Fatal`'s and
+  `Verbose`'s impl blocks. The delimiter capability was the last member of the family that still
+  derived a requirement from trait surface rather than from behaviour.
+
+  **What breaks.** `Fatal<E>` and `Verbose<E, S>` used to satisfy `UnclosedEmitter` — and so
+  `ComposableEmitter` — for every `E`, while the method they advertised could not be called unless
+  `E: FromUnclosed`. They now satisfy it exactly where `E: FromUnclosed`, so the obligation is
+  reported at the bundle bound rather than at a call the consumer could never write. A downstream
+  emitter whose own body performs the conversion states `Self::Error: FromUnclosed` on its impl
+  block; one that merely repeats the bound on the method compiles unchanged wherever its error
+  type really implements the conversion. `ComposableParseContext` already required
+  `Error: FromTokenErrors`, which names `FromUnclosed`, so nothing driving through the context
+  bundle pays anything new.
+
+  **Splitting the trait was the alternative, and it relocates the defect.** A bound-free
+  `UnclosedEmitter` beside a converting sibling forces `ComposableEmitter` to include one of them:
+  the converting one fails `Silent` verbatim, and the bound-free one stops covering the delimited
+  driver the bundle exists for.
+
 - **`CachedToken::state` and `CachedToken::into_components` are crate-internal** (#311). The regime
   a cached token carries is now an opaque payload: carried, cloned and moved, never read.
 
@@ -1367,6 +1398,26 @@ and will red until they do.
   directly — to keep building.
 
 ### Fixed
+
+- **A borrowed token keeps its punctuation and pratt capabilities** (#268). `Token`,
+  `IdentifierToken`, `KeywordToken` and every `LitToken` predicate forward from `T` to `&'a T`;
+  `PunctuatorToken` and `PrattToken` did not, so a lexer or adapter whose token type is `&T`
+  passed the base bound and four capability bounds and then failed to compile on punctuation or
+  on token-level pratt, for the same semantic token. Both forwarding impls are added.
+
+  **The punctuation impl is generated from the same arm sequence that generates the trait.** Every
+  constructor there defaults to `None`, so a hand-maintained forwarding list compiles while
+  silently answering `None` for whatever arm it dropped — the same defect with the compile error
+  removed. `PunctuatorTokenExt` and `SpannedPunctuatorToken` are blanket impls over
+  `T: PunctuatorToken` and follow from it with no new impl of their own.
+
+  **The pratt impl stays generic in `Expr` and `Power`.** A token type may classify for more than
+  one expression family, and an impl pinned to the `i64` default would carry one of those
+  classifications across the borrow while the base `Token` impl carried the whole token.
+
+  `FromLogos` is the one member of the family with no reference impl and cannot have one: it
+  constructs (`fn from_logos(Self::Logos) -> Self`), and a `&'a T` cannot be built from an owned
+  logos token.
 
 - **A green tree deep enough to abort in its own destructor can no longer be materialized**
   (#316). The construction half of an uncatchable process abort reachable from safe third-party
