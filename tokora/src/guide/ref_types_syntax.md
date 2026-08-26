@@ -147,7 +147,6 @@ impl<S, Span, Lang> Ident<S, Span, Lang> {
 ```rust
 use tokora::{SimpleSpan, error::ErrorNode, types::{Ident, Keyword}, utils::IntoComponents};
 
-#[derive(Debug, PartialEq)]
 struct MyLang;
 
 let ident = Ident::<&str, SimpleSpan, MyLang>::new(SimpleSpan::new(5, 11), "my_var");

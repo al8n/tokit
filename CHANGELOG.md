@@ -843,6 +843,27 @@ and will red until they do.
   the converting one fails `Silent` verbatim, and the bound-free one stops covering the delimited
   driver the bundle exists for.
 
+- **The recovery carriers stop demanding traits of their language marker** (#320). `Ident`,
+  `Keyword`, the seventeen `Lit*` types and `IdentList` derived `Debug`, `Copy`, `Clone`,
+  `PartialEq`, `Eq` and `Hash`, and a derive constrains **every** type parameter — so each of the
+  six carried a `Lang:` bound that nothing in the body uses, since `PhantomData<T>` implements all
+  six for any `T` unconditionally. `Ident<&str, SimpleSpan, MyLang>` was therefore not printable,
+  copyable, comparable or hashable unless the consumer derived those on the marker too, for a
+  reason that does not exist. `IdentList` demanded it twice over: `S` appears only in
+  `PhantomData<S>` and in the default container type, so `S: Debug` was spurious as well.
+
+  The six are now written out with bounds naming only the parameters the body reads.
+  **Nothing else changes**: `Debug` prints the same fields in declaration order, `PartialEq`
+  short-circuits in the same order, and `Hash` feeds the same bytes, because `PhantomData` hashes
+  nothing. Listed as breaking only because an impl's bounds are part of the surface — every
+  program that compiled before still compiles, and some that did not now do.
+
+  This is filed here rather than as a follow-up because #320's first draft **worked around it in a
+  doctest**, adding `#[derive(Debug, Clone, Copy, PartialEq)]` to a marker to make the example
+  build. Published documentation that teaches a consumer to derive four traits on a marker for a
+  reason that is not real is worse than the bare defect, so the workaround is gone and the example
+  now stands as a consumer would write it — which is also the regression test.
+
 - **`IntoComponents::Components` on all nineteen recovery carriers gains the status:
   `(Span, Payload)` becomes `(Span, Payload, Status)`** (#320). `Ident`, `Keyword` and the
   seventeen `Lit*` types hold a span, a payload and a recovery status, and returned two of the

@@ -6,7 +6,6 @@ use crate::{span::AsSpan, types::Ident};
 ///
 /// `S` remains sized because the default container stores `Ident<S, Span>` values
 /// inline in a `Vec`; use the individual [`Ident`] carrier for an unsized source.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[cfg(any(feature = "alloc", feature = "std"))]
 pub struct IdentList<
   S,
@@ -24,13 +23,103 @@ pub struct IdentList<
 ///
 /// `S` remains sized to keep this type's API consistent with its `Vec`-backed
 /// form; use the individual [`Ident`] carrier for an unsized source.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[cfg(not(any(feature = "alloc", feature = "std")))]
 pub struct IdentList<S, Span, Container, Lang: ?Sized = ()> {
   span: Span,
   identifiers: Container,
   _m: PhantomData<S>,
   _lang: PhantomData<Lang>,
+}
+
+// The six impls below replace a `derive`, and the only thing that changes is the bound list.
+//
+// A derive constrains **every** type parameter, so `#[derive(Debug)]` on a type holding a
+// `PhantomData<Lang>` emitted `Lang: Debug` — a requirement on a marker that is never printed,
+// never compared and never hashed, because `PhantomData<T>` implements all six for any `T`
+// unconditionally. The effect was that `IdentList<..., MyLang>` was not `Debug`, `Copy` or
+// comparable unless the consumer derived those on `MyLang` too, for a reason that does not
+// exist. tokora#320 caught it the way such things are caught: a doctest that would not compile
+// until four derives were added to the marker.
+//
+// Rendered output and comparison order are unchanged. `Debug` still prints every field in
+// declaration order including the marker, `PartialEq` still short-circuits in that order, and
+// `Hash` still feeds the same bytes — `PhantomData` hashes nothing, so omitting it is not a
+// change.
+
+impl<S, Span, Container, Lang> ::core::fmt::Debug for IdentList<S, Span, Container, Lang>
+where
+  Span: ::core::fmt::Debug,
+  Container: ::core::fmt::Debug,
+  Lang: ?Sized,
+{
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    // Declaration order, which is the order the derive printed in: `span`, `identifiers`, then
+    // the two markers. Nothing about the rendering changes here, only the bounds above.
+    f.debug_struct("IdentList")
+      .field("span", &&self.span)
+      .field("identifiers", &&self.identifiers)
+      .field("_m", &&self._m)
+      .field("_lang", &&self._lang)
+      .finish()
+  }
+}
+
+impl<S, Span, Container, Lang> ::core::clone::Clone for IdentList<S, Span, Container, Lang>
+where
+  Span: ::core::clone::Clone,
+  Container: ::core::clone::Clone,
+  Lang: ?Sized,
+{
+  #[inline]
+  fn clone(&self) -> Self {
+    Self {
+      _m: ::core::marker::PhantomData,
+      _lang: ::core::marker::PhantomData,
+      span: ::core::clone::Clone::clone(&self.span),
+      identifiers: ::core::clone::Clone::clone(&self.identifiers),
+    }
+  }
+}
+
+impl<S, Span, Container, Lang> ::core::marker::Copy for IdentList<S, Span, Container, Lang>
+where
+  Span: ::core::marker::Copy,
+  Container: ::core::marker::Copy,
+  Lang: ?Sized,
+{
+}
+
+impl<S, Span, Container, Lang> ::core::cmp::PartialEq for IdentList<S, Span, Container, Lang>
+where
+  Span: ::core::cmp::PartialEq,
+  Container: ::core::cmp::PartialEq,
+  Lang: ?Sized,
+{
+  #[inline]
+  fn eq(&self, other: &Self) -> bool {
+    self.span == other.span && self.identifiers == other.identifiers
+  }
+}
+
+impl<S, Span, Container, Lang> ::core::cmp::Eq for IdentList<S, Span, Container, Lang>
+where
+  Span: ::core::cmp::Eq,
+  Container: ::core::cmp::Eq,
+  Lang: ?Sized,
+{
+}
+
+impl<S, Span, Container, Lang> ::core::hash::Hash for IdentList<S, Span, Container, Lang>
+where
+  Span: ::core::hash::Hash,
+  Container: ::core::hash::Hash,
+  Lang: ?Sized,
+{
+  #[inline]
+  fn hash<H: ::core::hash::Hasher>(&self, state: &mut H) {
+    ::core::hash::Hash::hash(&self.span, state);
+    ::core::hash::Hash::hash(&self.identifiers, state);
+  }
 }
 
 impl<S, Span, Container, Lang: ?Sized> AsSpan<Span> for IdentList<S, Span, Container, Lang> {

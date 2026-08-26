@@ -148,7 +148,6 @@ macro_rules! define_literal {
       #[doc = "// " $example_desc]
       #[doc = "let bad_lit = " $name "::<String, SimpleSpan, YulLang>::error(span);"]
       /// ```
-      #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
       pub struct $name<
         D: ?::core::marker::Sized $( = $default)?,
         Span = $crate::__private::span::SimpleSpan,
@@ -158,6 +157,90 @@ macro_rules! define_literal {
         status: Status,
         span: Span,
         data: D,
+      }
+
+      // Written out rather than derived, and the only thing that changes is the bound list. A
+      // derive constrains **every** type parameter, so `#[derive(Debug)]` here emitted
+      // `Lang: Debug` — a requirement on a marker that is never printed, compared or hashed,
+      // since `PhantomData<T>` implements all six for any `T` unconditionally. Seventeen literal
+      // types were unusable with an underived language marker for a reason that does not exist.
+      //
+      // Rendering, comparison order and hashed bytes are unchanged: every field is still visited
+      // in declaration order, the possibly-unsized one still goes in behind a second reference
+      // the way the derive passes it, and `PhantomData` hashes nothing.
+      impl<D, Span, Lang> ::core::fmt::Debug for $name<D, Span, Lang>
+      where
+        D: ::core::fmt::Debug + ?::core::marker::Sized,
+        Span: ::core::fmt::Debug,
+        Lang: ?::core::marker::Sized,
+      {
+        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+          f.debug_struct(::core::stringify!($name))
+            .field("_lang", &&self._lang)
+            .field("status", &&self.status)
+            .field("span", &&self.span)
+            .field("data", &&self.data)
+            .finish()
+        }
+      }
+
+      impl<D, Span, Lang> ::core::clone::Clone for $name<D, Span, Lang>
+      where
+        D: ::core::clone::Clone,
+        Span: ::core::clone::Clone,
+        Lang: ?::core::marker::Sized,
+      {
+        #[inline]
+        fn clone(&self) -> Self {
+          Self {
+            _lang: PhantomData,
+            status: self.status,
+            span: ::core::clone::Clone::clone(&self.span),
+            data: ::core::clone::Clone::clone(&self.data),
+          }
+        }
+      }
+
+      impl<D, Span, Lang> ::core::marker::Copy for $name<D, Span, Lang>
+      where
+        D: ::core::marker::Copy,
+        Span: ::core::marker::Copy,
+        Lang: ?::core::marker::Sized,
+      {
+      }
+
+      impl<D, Span, Lang> ::core::cmp::PartialEq for $name<D, Span, Lang>
+      where
+        D: ::core::cmp::PartialEq + ?::core::marker::Sized,
+        Span: ::core::cmp::PartialEq,
+        Lang: ?::core::marker::Sized,
+      {
+        #[inline]
+        fn eq(&self, other: &Self) -> bool {
+          self.status == other.status && self.span == other.span && self.data == other.data
+        }
+      }
+
+      impl<D, Span, Lang> ::core::cmp::Eq for $name<D, Span, Lang>
+      where
+        D: ::core::cmp::Eq + ?::core::marker::Sized,
+        Span: ::core::cmp::Eq,
+        Lang: ?::core::marker::Sized,
+      {
+      }
+
+      impl<D, Span, Lang> ::core::hash::Hash for $name<D, Span, Lang>
+      where
+        D: ::core::hash::Hash + ?::core::marker::Sized,
+        Span: ::core::hash::Hash,
+        Lang: ?::core::marker::Sized,
+      {
+        #[inline]
+        fn hash<H: ::core::hash::Hasher>(&self, state: &mut H) {
+          ::core::hash::Hash::hash(&self.status, state);
+          ::core::hash::Hash::hash(&self.span, state);
+          ::core::hash::Hash::hash(&self.data, state);
+        }
       }
     }
 

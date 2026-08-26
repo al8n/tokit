@@ -165,12 +165,101 @@ use crate::{
 /// *ident.span_mut() = SimpleSpan::new(10, 18);
 /// assert_eq!(ident.span(), SimpleSpan::new(10, 18));
 /// ```
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Keyword<S: ?Sized, Span = SimpleSpan, Lang: ?Sized = ()> {
   _lang: PhantomData<Lang>,
   status: Status,
   span: Span,
   ident: S,
+}
+
+// The six impls below replace a `derive`, and the only thing that changes is the bound list.
+//
+// A derive constrains **every** type parameter, so `#[derive(Debug)]` on a type holding a
+// `PhantomData<Lang>` emitted `Lang: Debug` — a requirement on a marker that is never printed,
+// never compared and never hashed, because `PhantomData<T>` implements all six for any `T`
+// unconditionally. The effect was that `Keyword<..., MyLang>` was not `Debug`, `Copy` or
+// comparable unless the consumer derived those on `MyLang` too, for a reason that does not
+// exist. tokora#320 caught it the way such things are caught: a doctest that would not compile
+// until four derives were added to the marker.
+//
+// Rendered output and comparison order are unchanged. `Debug` still prints every field in
+// declaration order including the marker, `PartialEq` still short-circuits in that order, and
+// `Hash` still feeds the same bytes — `PhantomData` hashes nothing, so omitting it is not a
+// change.
+
+impl<S, Span, Lang> ::core::fmt::Debug for Keyword<S, Span, Lang>
+where
+  S: ::core::fmt::Debug + ?Sized,
+  Span: ::core::fmt::Debug,
+  Lang: ?Sized,
+{
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    f.debug_struct("Keyword")
+      .field("_lang", &&self._lang)
+      .field("status", &&self.status)
+      .field("span", &&self.span)
+      .field("ident", &&self.ident)
+      .finish()
+  }
+}
+
+impl<S, Span, Lang> ::core::clone::Clone for Keyword<S, Span, Lang>
+where
+  S: ::core::clone::Clone,
+  Span: ::core::clone::Clone,
+  Lang: ?Sized,
+{
+  #[inline]
+  fn clone(&self) -> Self {
+    Self {
+      _lang: ::core::marker::PhantomData,
+      status: self.status,
+      span: ::core::clone::Clone::clone(&self.span),
+      ident: ::core::clone::Clone::clone(&self.ident),
+    }
+  }
+}
+
+impl<S, Span, Lang> ::core::marker::Copy for Keyword<S, Span, Lang>
+where
+  S: ::core::marker::Copy,
+  Span: ::core::marker::Copy,
+  Lang: ?Sized,
+{
+}
+
+impl<S, Span, Lang> ::core::cmp::PartialEq for Keyword<S, Span, Lang>
+where
+  S: ::core::cmp::PartialEq + ?Sized,
+  Span: ::core::cmp::PartialEq,
+  Lang: ?Sized,
+{
+  #[inline]
+  fn eq(&self, other: &Self) -> bool {
+    self.status == other.status && self.span == other.span && self.ident == other.ident
+  }
+}
+
+impl<S, Span, Lang> ::core::cmp::Eq for Keyword<S, Span, Lang>
+where
+  S: ::core::cmp::Eq + ?Sized,
+  Span: ::core::cmp::Eq,
+  Lang: ?Sized,
+{
+}
+
+impl<S, Span, Lang> ::core::hash::Hash for Keyword<S, Span, Lang>
+where
+  S: ::core::hash::Hash + ?Sized,
+  Span: ::core::hash::Hash,
+  Lang: ?Sized,
+{
+  #[inline]
+  fn hash<H: ::core::hash::Hasher>(&self, state: &mut H) {
+    ::core::hash::Hash::hash(&self.status, state);
+    ::core::hash::Hash::hash(&self.span, state);
+    ::core::hash::Hash::hash(&self.ident, state);
+  }
 }
 
 impl<S, Span, Lang: ?Sized> From<Keyword<S, Span, Lang>> for super::Ident<S, Span, Lang> {
@@ -259,7 +348,6 @@ impl<S, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
   ///
   /// ```rust
   /// use tokora::{SimpleSpan, types::{Keyword, Status}};
-  /// # #[derive(Debug, Clone, Copy, PartialEq)]
   /// # struct MyLang;
   ///
   /// let span = SimpleSpan::new(0, 4);

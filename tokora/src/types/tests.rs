@@ -863,3 +863,108 @@ fn an_error_node_placeholder_survives_a_decompose_and_rebuild() {
     );
   }
 }
+
+// --- A language marker is a marker: no carrier may demand traits of it ---
+
+/// A language marker written the way a consumer actually writes one — a bare unit struct with
+/// **no derives at all**.
+///
+/// This is the whole instrument. Every carrier in this module holds a `PhantomData<Lang>`, and a
+/// `derive` constrains every type parameter, so the six derived impls each carried a `Lang:` bound
+/// that nothing in the body uses: `PhantomData<T>` is `Debug`, `Clone`, `Copy`, `PartialEq`, `Eq`
+/// and `Hash` for any `T`, unconditionally. Before tokora#320 that made
+/// `Ident<&str, SimpleSpan, BareLang>` neither printable, copyable, comparable nor hashable, and
+/// the cells below did not compile.
+///
+/// It was found the way such things are found — a doctest that would not build until four derives
+/// were added to its marker — and the workaround was the reason to fix it rather than file it:
+/// published documentation that derives `Debug + Clone + Copy + PartialEq` on a marker teaches a
+/// consumer to do the same for a reason that does not exist.
+struct BareLang;
+
+/// The six traits every carrier in this module claims. `Recoverable` is deliberately absent: it
+/// claims `PartialOrd`/`Ord` as well and `Copy` not at all, and it holds no `PhantomData`, so it
+/// is not in this population.
+fn requires_the_six<T>(_: &T)
+where
+  T: core::fmt::Debug + Clone + Copy + PartialEq + Eq + core::hash::Hash,
+{
+}
+
+#[derive(Default)]
+struct CountingHasher(u64);
+
+impl core::hash::Hasher for CountingHasher {
+  fn finish(&self) -> u64 {
+    self.0
+  }
+
+  fn write(&mut self, bytes: &[u8]) {
+    self.0 = self.0.wrapping_add(bytes.len() as u64);
+  }
+}
+
+/// Names the bound and then exercises it, so the cell proves the impls work rather than only that
+/// they resolve.
+macro_rules! assert_marker_is_not_a_bound {
+  ($($carrier:ident),+ $(,)?) => {
+    $({
+      use core::hash::{Hash, Hasher};
+
+      let span = SimpleSpan::new(2, 8);
+      let value = $carrier::<&str, SimpleSpan, BareLang>::with_status(span, "x", Status::Error);
+
+      requires_the_six(&value);
+
+      let copied = value;
+      let cloned = value.clone();
+      assert_eq!(copied, cloned, concat!(stringify!($carrier), ": Copy and Clone agree"));
+      assert!(
+        format!("{value:?}").starts_with(concat!(stringify!($carrier), " {")),
+        concat!(stringify!($carrier), ": Debug names the type"),
+      );
+
+      let mut h = CountingHasher::default();
+      value.hash(&mut h);
+      assert_ne!(h.finish(), 0, concat!(stringify!($carrier), ": Hash reaches the fields"));
+    })+
+  };
+}
+
+#[test]
+fn no_carrier_demands_a_trait_of_its_language_marker() {
+  assert_marker_is_not_a_bound!(
+    Ident,
+    Keyword,
+    Lit,
+    LitDecimal,
+    LitHex,
+    LitOctal,
+    LitBinary,
+    LitFloat,
+    LitHexFloat,
+    LitString,
+    LitMultilineString,
+    LitRawString,
+    LitChar,
+    LitByte,
+    LitByteString,
+    LitBool,
+    LitTrue,
+    LitFalse,
+    LitNull,
+  );
+
+  // `IdentList` is the twentieth, and the one where **two** parameters were phantom: `S` appears
+  // only in `PhantomData<S>` and in the default container, so a derive demanded `S: Debug` too.
+  // The container has to be `Copy` for the `Copy` cell to mean anything, so it is an array.
+  let span = SimpleSpan::new(0, 3);
+  let segments = [Ident::<&str, SimpleSpan, BareLang>::new(span, "foo")];
+  let list = IdentList::<&str, SimpleSpan, [Ident<&str, SimpleSpan, BareLang>; 1], BareLang>::new(
+    span, segments,
+  );
+
+  requires_the_six(&list);
+  assert!(list.is_valid());
+  assert_eq!(list, list.clone());
+}
