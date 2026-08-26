@@ -82,13 +82,22 @@
 //!
 //! // Create placeholder for malformed literal
 //! let bad_lit = LitDecimal::<String, SimpleSpan, YulLang>::error(span);
+//! assert!(bad_lit.is_error());
 //!
 //! // Create placeholder for missing literal
 //! let missing_lit = LitDecimal::<String, SimpleSpan, YulLang>::missing(span);
+//! assert!(missing_lit.is_missing());
 //! ```
+//!
+//! Which of the three states a literal is in is read from `is_valid`, `is_error` and
+//! `is_missing`, never from the data. A placeholder's data is whatever `D::error` /
+//! `D::missing` produced — for `&str` the literal `"<error>"`, a value a caller can also spell
+//! by hand — and it is mutable through `data_mut`, so it reports what the node says rather
+//! than whether the parser found one.
 
 use core::marker::PhantomData;
 
+use super::status::Status;
 use crate::{error::ErrorNode, span::AsSpan, utils::IntoComponents};
 
 /// A macro to generate literal type structures.
@@ -146,6 +155,7 @@ macro_rules! define_literal {
         Lang: ?::core::marker::Sized = (),
       > {
         _lang: PhantomData<Lang>,
+        status: Status,
         span: Span,
         data: D,
       }
@@ -211,6 +221,24 @@ macro_rules! define_literal {
       pub const fn data_ref(&self) -> &D {
         &self.data
       }
+
+      /// Returns `true` is this literal represents an error literal.
+      #[inline(always)]
+      pub const fn is_error(&self) -> bool {
+        self.status.is_error()
+      }
+
+      /// Returns `true` is this literal represents a missing literal.
+      #[inline(always)]
+      pub const fn is_missing(&self) -> bool {
+        self.status.is_missing()
+      }
+
+      /// Returns `true` is this literal is valid (not error or missing).
+      #[inline(always)]
+      pub const fn is_valid(&self) -> bool {
+        self.status.is_valid()
+      }
     }
 
     impl<D, Span, Lang: ?::core::marker::Sized> $name<D, Span, Lang> {
@@ -222,9 +250,15 @@ macro_rules! define_literal {
       /// - `data`: The literal's data
       #[inline(always)]
       pub const fn new(span: Span, data: D) -> Self {
+        Self::with_status(span, data, Status::Valid)
+      }
+
+      #[inline(always)]
+      const fn with_status(span: Span, data: D, status: Status) -> Self {
         Self {
           span,
           data,
+          status,
           _lang: PhantomData,
         }
       }
@@ -247,15 +281,21 @@ macro_rules! define_literal {
       Span: Clone,
     {
       /// Creates a placeholder literal for **malformed content**.
+      ///
+      /// The result reports itself through `is_error`; the data is a placeholder, not the
+      /// channel.
       #[inline(always)]
       fn error(span: Span) -> Self {
-        Self::new(span.clone(), D::error(span))
+        Self::with_status(span.clone(), D::error(span), Status::Error)
       }
 
       /// Creates a placeholder literal for **missing required content**.
+      ///
+      /// The result reports itself through `is_missing`; the data is a placeholder, not the
+      /// channel.
       #[inline(always)]
       fn missing(span: Span) -> Self {
-        Self::new(span.clone(), D::missing(span))
+        Self::with_status(span.clone(), D::missing(span), Status::Missing)
       }
     }
   };

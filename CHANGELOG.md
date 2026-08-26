@@ -71,6 +71,22 @@ and will red until they do.
 
 ### Added
 
+- **`Keyword::{is_valid, is_error, is_missing}`, and the same three on every `Lit*` type**
+  (#301). `Keyword` and the seventeen literal carriers implemented `ErrorNode` — so
+  `error(span)` and `missing(span)` were public and documented as recovery placeholders — while
+  holding no field that could record which of the three states a value was in. The only way to
+  tell a recovered node from one spelled out in the source was to compare its payload against
+  the `"<error>"` / `"<missing>"` sentinel, which is a value a caller can spell by hand and edit
+  afterwards through `source_mut` / `data_mut`.
+
+  Each of the eighteen now carries the same private `Status` `Ident` has carried since #266, set
+  by `new` (valid) and by the two `ErrorNode` constructors, and read by these predicates. The
+  rule they are all keeping is stated once, on `ErrorNode` itself, under **Two Shapes of
+  Implementor**: a *payload* type such as `&str` has nowhere to put a state and so its
+  placeholder is a sentinel; a *carrier* type with fields of its own owes a status field. The
+  trait's own diagnostics example used to demonstrate the sentinel comparison and now reads the
+  predicates.
+
 - **`cst::TreeCheckpoint` — the builder's own checkpoint, carrying the one number `rowan`'s does
   not** (#316). Returned by `SyntaxTreeBuilder::checkpoint` and spent by `start_node_at`; it wraps
   `rowan::Checkpoint` beside the flat child index the depth ledger charges a retro-wrap against.
@@ -1419,6 +1435,19 @@ and will red until they do.
   constructs (`fn from_logos(Self::Logos) -> Self`), and a `&'a T` cannot be built from an owned
   logos token.
 
+- **`From<Keyword> for Ident` carries the recovery status instead of fabricating `Valid`**
+  (#301). `Keyword::<&str>::missing(span).into()` produced an `Ident` reporting `is_valid()`,
+  and an `IdentList` containing that segment then reported itself valid as a whole. The
+  conversion was documented as unfixable at the call site because the information did not exist
+  on the source side; it does now, and it crosses unchanged. `Keyword::map` carries it too, for
+  the reason `Ident::map` does — mapping `&str` to `String` changes how a spelling is stored,
+  not whether there was one.
+
+  **Two behaviours change with no diagnostic.** `Keyword::error(span)` no longer compares equal
+  to `Keyword::new(span, "<error>")`, and hashes differently, because the status is part of the
+  value; and the eighteen carriers grow one field, so `Keyword<&str, SimpleSpan>` goes from 32 to
+  40 bytes — exactly `Ident<&str, SimpleSpan>`'s size, which already paid it.
+
 - **A green tree deep enough to abort in its own destructor can no longer be materialized**
   (#316). The construction half of an uncatchable process abort reachable from safe third-party
   code: `rowan`'s recursive release of a green tree. Both public construction doors are covered —
@@ -2314,6 +2343,14 @@ and will red until they do.
   `increase_both_and_check`'s claimed it decreased recursion (it increases both).
 
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
+
+**`is_valid`, `is_error` and `is_missing` are new inherent methods on `Keyword` and on all
+seventeen `Lit*` types** (#301). An inherent item wins the pick over an extension trait's, so a
+consumer who defined any of those three names on one of these carriers — through a trait of their
+own, taking `&self`, which is the receiver tokora's take — now runs tokora's item at an
+unqualified call site. The names are not incidental: they are the three `Ident` has shipped since
+#266, and the whole point of #301 is that the eighteen carriers answer the same question the same
+way. **The fix is UFCS**, `MyExt::is_error(&kw)`, which pins the item on either revision.
 
 **`InputRef::trip_snapshot` and `InputRef::tripped_during_attempt` are new inherent methods on a
 type that already shipped.** An inherent item wins the pick over an extension trait's, so a

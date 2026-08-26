@@ -91,6 +91,7 @@ mod ident;
 mod ident_list;
 mod keyword;
 mod lit;
+mod status;
 
 /// A type representing a recoverable parse node, which can be a valid node,
 /// an error node with span, or a missing node with span.

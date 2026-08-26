@@ -207,18 +207,105 @@ fn keyword_into_ident() {
   let ident: Ident<&str> = kw.into();
   assert_eq!(ident.source(), "let");
   assert_eq!(ident.span(), SimpleSpan::new(0, 3));
+  assert!(ident.is_valid());
 }
 
 #[test]
 fn keyword_error_node() {
   let err = Keyword::<&str>::error(SimpleSpan::new(0, 5));
+  assert!(err.is_error());
+  assert!(!err.is_valid());
   assert_eq!(err.source(), "<error>");
 }
 
 #[test]
 fn keyword_missing_node() {
   let missing = Keyword::<&str>::missing(SimpleSpan::new(0, 5));
+  assert!(missing.is_missing());
+  assert!(!missing.is_valid());
   assert_eq!(missing.source(), "<missing>");
+}
+
+/// The conversion carries the recovery status instead of fabricating `Valid`. The valid row is
+/// the non-vacuity control: it passed before this channel existed, so a green table is evidence
+/// about the two recovery rows.
+#[test]
+fn keyword_into_ident_carries_the_recovery_status() {
+  let span = SimpleSpan::new(4, 7);
+
+  let rows: [(&str, Keyword<&str>, [bool; 3]); 3] = [
+    ("valid", Keyword::new(span, "let"), [true, false, false]),
+    ("error", Keyword::error(span), [false, true, false]),
+    ("missing", Keyword::missing(span), [false, false, true]),
+  ];
+
+  for (label, keyword, [valid, error, missing]) in rows {
+    let ident: Ident<&str> = keyword.into();
+    assert_eq!(ident.is_valid(), valid, "{label}: is_valid");
+    assert_eq!(ident.is_error(), error, "{label}: is_error");
+    assert_eq!(ident.is_missing(), missing, "{label}: is_missing");
+  }
+}
+
+/// A source-only `map` changes how the spelling is stored, not whether the parser found one.
+#[test]
+fn keyword_map_preserves_recovery_status() {
+  let span = SimpleSpan::new(0, 3);
+
+  let rows: [(&str, Keyword<&str>, &str, [bool; 3]); 3] = [
+    (
+      "valid",
+      Keyword::new(span, "let"),
+      "LET",
+      [true, false, false],
+    ),
+    (
+      "error",
+      Keyword::error(span),
+      "<ERROR>",
+      [false, true, false],
+    ),
+    (
+      "missing",
+      Keyword::missing(span),
+      "<MISSING>",
+      [false, false, true],
+    ),
+  ];
+
+  for (label, keyword, expected_source, [valid, error, missing]) in rows {
+    let mapped: Keyword<String> = keyword.map(str::to_uppercase);
+    assert_eq!(mapped.source_ref(), expected_source, "{label}: source");
+    assert_eq!(mapped.span(), span, "{label}: span");
+    assert_eq!(mapped.is_valid(), valid, "{label}: is_valid");
+    assert_eq!(mapped.is_error(), error, "{label}: is_error");
+    assert_eq!(mapped.is_missing(), missing, "{label}: is_missing");
+  }
+}
+
+/// The payload is not the channel: spelling a sentinel into a carrier by hand does not make it
+/// a recovery placeholder, and editing a placeholder's payload does not make it valid syntax.
+#[test]
+fn a_sentinel_payload_is_not_a_recovery_status() {
+  let span = SimpleSpan::new(0, 7);
+
+  let mut hand_written = Keyword::<&str>::new(span, "<error>");
+  assert!(hand_written.is_valid());
+  assert!(!hand_written.is_error());
+
+  *hand_written.source_mut() = "<missing>";
+  assert!(hand_written.is_valid());
+  assert!(!hand_written.is_missing());
+
+  let mut recovered = Keyword::<&str>::missing(span);
+  *recovered.source_mut() = "let";
+  assert!(recovered.is_missing());
+  assert!(!recovered.is_valid());
+
+  let mut lit = LitDecimal::<&str>::error(span);
+  *lit.data_mut() = "42";
+  assert!(lit.is_error());
+  assert!(!lit.is_valid());
 }
 
 // --- Literal types tests ---
@@ -248,12 +335,16 @@ fn lit_decimal_data_mut() {
 #[test]
 fn lit_decimal_error_node() {
   let err = LitDecimal::<&str>::error(SimpleSpan::new(0, 5));
+  assert!(err.is_error());
+  assert!(!err.is_valid());
   assert_eq!(err.data(), "<error>");
 }
 
 #[test]
 fn lit_decimal_missing_node() {
   let missing = LitDecimal::<&str>::missing(SimpleSpan::new(0, 5));
+  assert!(missing.is_missing());
+  assert!(!missing.is_valid());
   assert_eq!(missing.data(), "<missing>");
 }
 
@@ -604,13 +695,26 @@ fn lit_decimal_into_components_trait() {
 #[test]
 fn lit_error_node_generic() {
   let err = Lit::<&str>::error(SimpleSpan::new(0, 5));
+  assert!(err.is_error());
+  assert!(!err.is_valid());
   assert_eq!(err.data(), "<error>");
 }
 
 #[test]
 fn lit_missing_node_generic() {
   let missing = Lit::<&str>::missing(SimpleSpan::new(0, 5));
+  assert!(missing.is_missing());
+  assert!(!missing.is_valid());
   assert_eq!(missing.data(), "<missing>");
+}
+
+/// A literal built by `new` is valid, whatever its data type — the status is the channel, and
+/// `new` is the door that declares it.
+#[test]
+fn a_literal_built_by_new_is_valid() {
+  assert!(LitDecimal::<&str>::new(SimpleSpan::new(0, 2), "42").is_valid());
+  assert!(LitBool::<bool>::new(SimpleSpan::new(0, 4), true).is_valid());
+  assert!(LitNull::<()>::new(SimpleSpan::new(0, 4), ()).is_valid());
 }
 
 #[test]

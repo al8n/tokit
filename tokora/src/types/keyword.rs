@@ -59,13 +59,24 @@
 //!
 //! // Create placeholder for malformed identifier
 //! let bad_ident = Keyword::<String, SimpleSpan, YulLang>::error(span);
+//! assert!(bad_ident.is_error());
 //!
 //! // Create placeholder for missing identifier
 //! let missing_ident = Keyword::<String, SimpleSpan, YulLang>::missing(span);
+//! assert!(missing_ident.is_missing());
 //! ```
+//!
+//! Which of the three states a keyword is in is read from
+//! [`is_valid`](Keyword::is_valid), [`is_error`](Keyword::is_error) and
+//! [`is_missing`](Keyword::is_missing), never from the payload. The payload of a placeholder
+//! is whatever `S::error` / `S::missing` produced — for `&str` the literal `"<error>"`, a
+//! value a caller can also spell by hand — and it is mutable through
+//! [`source_mut`](Keyword::source_mut), so it reports what the node says rather than whether
+//! the parser found one.
 
 use core::marker::PhantomData;
 
+use super::status::Status;
 use crate::{
   error::ErrorNode,
   span::{AsSpan, SimpleSpan},
@@ -156,26 +167,32 @@ use crate::{
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Keyword<S: ?Sized, Span = SimpleSpan, Lang: ?Sized = ()> {
   _lang: PhantomData<Lang>,
+  status: Status,
   span: Span,
   ident: S,
 }
 
 impl<S, Span, Lang: ?Sized> From<Keyword<S, Span, Lang>> for super::Ident<S, Span, Lang> {
-  /// The resulting identifier is reported as valid unconditionally. `Keyword` has no field
-  /// that can hold a recovery status and no predicate that can report one, so there is
-  /// nothing to carry across. This conversion therefore cannot distinguish a keyword that
-  /// was spelled out in the source from one built by `Keyword::error` or `Keyword::missing`,
-  /// and it reports the latter as valid too — that gap is tracked as tokora#301 and is not
-  /// fixable here, because the information does not exist on the source side.
+  /// The recovery status crosses unchanged: a keyword built by
+  /// [`error`](ErrorNode::error) or [`missing`](ErrorNode::missing) becomes an identifier that
+  /// reports itself the same way, and only a keyword actually spelled out in the source
+  /// produces a valid one. Both carriers hold the same status type, so there is nothing to
+  /// fabricate here — which is what tokora#301 fixed, and why this impl no longer rebuilds
+  /// through [`Ident::new`](super::Ident::new).
   ///
   /// The source is destructured exhaustively so that a `Keyword` field added later stops this
   /// impl from compiling — a cross-type rebuild cannot be made total on the target side, but it
   /// can be made total on the side whose fields it reads.
   #[inline(always)]
   fn from(keyword: Keyword<S, Span, Lang>) -> Self {
-    let Keyword { _lang, span, ident } = keyword;
+    let Keyword {
+      _lang,
+      status,
+      span,
+      ident,
+    } = keyword;
 
-    Self::new(span, ident)
+    Self::with_status(span, ident, status)
   }
 }
 
@@ -218,9 +235,15 @@ impl<S, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
   /// ```
   #[inline(always)]
   pub const fn new(span: Span, source: S) -> Self {
+    Self::with_status(span, source, Status::Valid)
+  }
+
+  #[inline(always)]
+  const fn with_status(span: Span, source: S, status: Status) -> Self {
     Self {
       span,
       ident: source,
+      status,
       _lang: PhantomData,
     }
   }
@@ -329,6 +352,24 @@ impl<S: ?Sized, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
   pub const fn source_ref(&self) -> &S {
     &self.ident
   }
+
+  /// Returns `true` is this keyword represents an error keyword.
+  #[inline(always)]
+  pub const fn is_error(&self) -> bool {
+    self.status.is_error()
+  }
+
+  /// Returns `true` is this keyword represents a missing keyword.
+  #[inline(always)]
+  pub const fn is_missing(&self) -> bool {
+    self.status.is_missing()
+  }
+
+  /// Returns `true` is this keyword is valid (not error or missing).
+  #[inline(always)]
+  pub const fn is_valid(&self) -> bool {
+    self.status.is_valid()
+  }
 }
 
 impl<S, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
@@ -368,19 +409,30 @@ impl<S, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
     (self.span, self.ident)
   }
 
-  /// Maps the source string to a new type, preserving the span and language.
+  /// Maps the source string to a new type, preserving the span, the language, and the
+  /// recovery status.
   ///
-  /// Destructures `Self` exhaustively rather than rebuilding through [`Self::new`]. Today
-  /// the two are equivalent, because `Keyword` carries nothing beyond the span, the source
-  /// and the language marker — but a `new`-based body drops any field added later without
+  /// Recovery status is orthogonal to the source representation: mapping `Keyword<&str>` to
+  /// `Keyword<String>` changes how the spelling is stored, not whether the parser actually
+  /// found a keyword there. An [`error`](ErrorNode::error) or [`missing`](ErrorNode::missing)
+  /// placeholder therefore stays one across the map.
+  ///
+  /// Destructures `Self` exhaustively rather than rebuilding through [`Self::new`], because
+  /// `new` always produces a valid keyword: a `new`-based body would drop the status without
   /// a diagnostic, which is exactly how [`Ident::map`](super::Ident::map) came to launder
   /// recovery placeholders into valid syntax. This form fails to compile instead.
   #[inline(always)]
   pub fn map<U>(self, f: impl FnOnce(S) -> U) -> Keyword<U, Span, Lang> {
-    let Self { _lang, span, ident } = self;
+    let Self {
+      _lang,
+      status,
+      span,
+      ident,
+    } = self;
 
     Keyword {
       _lang,
+      status,
       span,
       ident: f(ident),
     }
@@ -405,10 +457,11 @@ where
   ///
   /// // Parser found "123abc" where an identifier was expected
   /// let bad_ident = Keyword::<String, SimpleSpan, YulLang>::error(span);
+  /// assert!(bad_ident.is_error());
   /// ```
   #[inline]
   fn error(span: Span) -> Self {
-    Self::new(span.clone(), S::error(span))
+    Self::with_status(span.clone(), S::error(span), Status::Error)
   }
 
   /// Creates a placeholder identifier for **missing required content**.
@@ -427,9 +480,10 @@ where
   /// // Correct: let name = 5;
   /// // Found:   let = 5;
   /// let missing_ident = Keyword::<String, SimpleSpan, YulLang>::missing(span);
+  /// assert!(missing_ident.is_missing());
   /// ```
   #[inline]
   fn missing(span: Span) -> Self {
-    Self::new(span.clone(), S::missing(span))
+    Self::with_status(span.clone(), S::missing(span), Status::Missing)
   }
 }

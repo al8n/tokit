@@ -65,20 +65,12 @@
 
 use core::marker::PhantomData;
 
+use super::status::Status;
 use crate::{
   error::ErrorNode,
   span::{AsSpan, SimpleSpan},
   utils::IntoComponents,
 };
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-#[repr(u8)]
-#[non_exhaustive]
-enum Status {
-  Valid,
-  Error,
-  Missing,
-}
 
 /// A language identifier with span tracking.
 ///
@@ -297,19 +289,19 @@ impl<S: ?Sized, Span, Lang: ?Sized> Ident<S, Span, Lang> {
   /// Returns `true` is this identifier represents an error identifier.
   #[inline(always)]
   pub const fn is_error(&self) -> bool {
-    matches!(self.status, Status::Error)
+    self.status.is_error()
   }
 
   /// Returns `true` is this identifier represents a missing identifier.
   #[inline(always)]
   pub const fn is_missing(&self) -> bool {
-    matches!(self.status, Status::Missing)
+    self.status.is_missing()
   }
 
   /// Returns `true` is this identifier is valid (not error or missing).
   #[inline(always)]
   pub const fn is_valid(&self) -> bool {
-    matches!(self.status, Status::Valid)
+    self.status.is_valid()
   }
 }
 
@@ -340,7 +332,7 @@ impl<S, Span, Lang: ?Sized> Ident<S, Span, Lang> {
   }
 
   #[inline(always)]
-  const fn with_status(span: Span, source: S, status: Status) -> Self {
+  pub(super) const fn with_status(span: Span, source: S, status: Status) -> Self {
     Self {
       span,
       ident: source,

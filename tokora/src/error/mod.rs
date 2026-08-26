@@ -203,11 +203,11 @@ mod unicode_escape;
 /// fn report_errors(ast: &Program) {
 ///     for node in ast.nodes() {
 ///         match node {
-///             Node::Identifier(id) if id.0 == "<error>" => {
+///             Node::Identifier(id) if id.is_error() => {
 ///                 eprintln!("error: malformed identifier at {:?}", node.span());
 ///                 eprintln!("help: identifiers cannot start with digits");
 ///             }
-///             Node::Identifier(id) if id.0 == "<missing>" => {
+///             Node::Identifier(id) if id.is_missing() => {
 ///                 eprintln!("error: expected identifier at {:?}", node.span());
 ///                 eprintln!("help: insert a name here");
 ///             }
@@ -219,9 +219,25 @@ mod unicode_escape;
 ///
 /// # Best Practices
 ///
+/// ## Two Shapes of Implementor, and Only One of Them May Use a Sentinel
+///
+/// A **payload** type — `&str`, `&[u8]`, an interned handle — has nowhere to put a recovery
+/// state, so its placeholder *is* a sentinel value: the impls below produce `"<error>"` and
+/// `"<missing>"`. That is the whole of what such an impl can promise.
+///
+/// A **carrier** type — one with fields of its own, such as [`Ident`](crate::types::Ident),
+/// [`Keyword`](crate::types::Keyword) or the `Lit*` family — must instead hold the state in a
+/// field and report it through `is_valid` / `is_error` / `is_missing`, because a carrier's
+/// payload is generic and publicly mutable: a caller can spell `"<error>"` by hand, and can
+/// edit a placeholder's payload afterwards, so comparing the payload against a sentinel answers
+/// *what does this node say* and never *did the parser find one here*. A carrier that
+/// implements this trait with no such field advertises two states it cannot represent — that
+/// was tokora#301, and the constructors below are where the state is set, not merely where a
+/// marker is chosen.
+///
 /// ## Use Consistent Sentinel Values
 ///
-/// Choose recognizable placeholder values that:
+/// For a payload type, choose recognizable placeholder values that:
 /// - Cannot occur in valid source code
 /// - Are easy to detect in downstream passes
 /// - Clearly indicate error vs missing
