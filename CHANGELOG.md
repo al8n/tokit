@@ -975,8 +975,8 @@ and will red until they do.
   reason that is not real is worse than the bare defect, so the workaround is gone and the example
   now stands as a consumer would write it — which is also the regression test.
 
-- **`IntoComponents::Components` on all nineteen recovery carriers gains the status:
-  `(Span, Payload)` becomes `(Span, Payload, Status)`** (#320). `Ident`, `Keyword` and the
+- **`IntoComponents::Components` on all nineteen recovery carriers becomes
+  `types::recovery::Components { span, payload, status }` — a named struct, not a tuple** (#320). `Ident`, `Keyword` and the
   seventeen `Lit*` types hold a span, a payload and a recovery status, and returned two of the
   three. The trait's own contract is that a decomposition is complete with no information loss,
   and the test of that is whether the output rebuilds the input: it did not, so
@@ -992,13 +992,43 @@ and will red until they do.
   and leaving it would have left `Ident::into_components` returning a 2-tuple beside `Keyword`'s
   3-tuple.
 
-  Migration is a compile error at every site, never a silent change: `let (span, src) = x
-  .into_components();` becomes `let (span, src, status) = …`, and `_` if the status is not wanted.
-  The status is **appended** rather than inserted after the span, against the trait's ordering
-  convention, so that `.0` and `.1` keep their meanings and only destructuring arity breaks.
-  Withdrawing the impls was the alternative and is worse: for an owned payload `into_components`
-  is the only extraction that does not clone, and withdrawal removes a capability where widening
-  completes it.
+  Migration is a compile error at every site: `let (span, src) = x.into_components();` becomes
+  `let Components { span, payload, .. } = …`. Withdrawing the impls was the alternative and is
+  worse: for an owned payload `into_components` is the only extraction that does not clone, and
+  withdrawal removes a capability where completing it is what was needed.
+
+  **A three-tuple was tried first and is not safe**, which is why the shape is a struct. Widening
+  `(Span, Payload)` to `(Span, Payload, Status)` was defended on the grounds that the arity changes
+  and every stale destructuring therefore breaks loudly. One line defeats that:
+
+  ```rust,ignore
+  let (_, .., value) = literal.into_components();
+  value.is_valid()
+  ```
+
+  `..` matches zero elements against a pair and one against a triple, so `value` is the payload
+  before and the status after. Both compile whenever the payload also answers `is_valid`, and
+  since `new` assigns `Status::Valid`, a payload the caller's own check rejects then reports
+  valid. `(.., b)` and `.1` are the same defect in other spellings.
+
+  That was the third exemption of its kind refuted in this release — after *the return type
+  differs* and *the argument type is a `Status`* — and all three failed the same way: each
+  estimated what a consumer could have written, and estimated it too small. So this is not a
+  better-argued exemption but a shape no tuple pattern can match at all. Ten shapes were compiled
+  against both the old pair and the new struct: `(a, b)`, `(_, b)`, `(a, ..)`, `(_, .., b)`,
+  `(.., b)`, a trailing comma, `ref` bindings, a `match` arm, `.0` and `.1`. All ten build against
+  the pair — that is the control — and all ten are refused against the struct, with `E0308` for the
+  patterns and `E0609` for the index accesses. Eight of them are `compile_fail` doctests on
+  `Components` with the codes pinned, and the pinning was itself checked by planting a wrong code.
+
+  It is the better API besides: three positional parts whose third is a status is exactly the
+  shape that made `..` dangerous, and a named field says which is which.
+
+  **The stated residual.** A consumer who never looks inside the value keeps compiling —
+  `format!("{:?}", x.into_components())`, or passing it to a generic sink. What they observe
+  changes; what they can *extract* does not, because every pattern, index and typed argument is
+  now refused. There is no spelling that silently hands back the status where the payload used to
+  be.
 
 - **`CachedToken::state` and `CachedToken::into_components` are crate-internal** (#311). The regime
   a cached token carries is now an opaque payload: carried, cloned and moved, never read.

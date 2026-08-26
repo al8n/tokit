@@ -162,6 +162,122 @@ pub trait RecoveryState {
   }
 }
 
+/// The parts a recovery carrier decomposes into: a span, a payload, and the recovery state.
+///
+/// This is [`IntoComponents::Components`](crate::utils::IntoComponents::Components) for
+/// [`Ident`](super::Ident), [`Keyword`](super::Keyword) and every `Lit*` type, the return of
+/// `Keyword`'s inherent `into_components`, and the argument of
+/// [`FromComponents::from_components`]. One shape in all three
+/// places, so the decomposition and its inverse cannot disagree about what a part is.
+///
+/// # Why a struct and not a three-tuple
+///
+/// The three-tuple came first, and it was defended as safe on the grounds that widening the old
+/// `(Span, Payload)` changes the **arity**, so every existing destructuring breaks loudly. That
+/// is false, and one line defeats it:
+///
+/// ```rust,ignore
+/// let (_, .., value) = literal.into_components();
+/// value.is_valid()
+/// ```
+///
+/// `..` matches zero elements against the old pair and one against the triple, so `value` is the
+/// payload before and the status after. Both compile whenever the payload also answers
+/// `is_valid`, and since `new` assigns [`Status::Valid`], a payload the caller's own check
+/// rejects then reports valid. `(.., b)` and `t.1` are the same defect in other spellings.
+///
+/// That was the third exemption of its kind on this branch to be refuted — after "the return type
+/// differs" and "the argument type is a `Status`" — and all three failed the same way: each
+/// estimated *what a consumer could have written* and estimated it too small. So this is not a
+/// better-argued exemption. It is a shape that **no** tuple pattern can match, whatever it binds
+/// and however it spells the rest, because a braced struct is not a tuple. `let (a, b)`,
+/// `(_, b)`, `(a, ..)`, `(_, .., b)`, `(.., b)`, a trailing comma, `ref` bindings, a `match` arm,
+/// `.0` and `.1` were each compiled against both shapes: all ten build on 0.9 and all ten are
+/// rejected here, with `E0308` for the patterns and `E0609` for the index accesses.
+///
+/// It is also the better API. Three positional parts whose third is a status is exactly the shape
+/// that made `..` dangerous; a named field says which is which.
+///
+/// # Every pre-existing tuple pattern, refused
+///
+/// Each of these is the source a 0.9 consumer wrote against `(Span, Payload)`, and each is now a
+/// compile error with the code named — so a stale destructuring cannot survive the upgrade in any
+/// spelling, whatever it binds and however it elides the rest.
+///
+/// ```compile_fail,E0308
+/// # use tokora::{SimpleSpan, types::LitDecimal, utils::IntoComponents};
+/// # let lit = LitDecimal::<&str>::new(SimpleSpan::new(0, 2), "42");
+/// let (span, payload) = lit.into_components();
+/// ```
+///
+/// ```compile_fail,E0308
+/// # use tokora::{SimpleSpan, types::LitDecimal, utils::IntoComponents};
+/// # let lit = LitDecimal::<&str>::new(SimpleSpan::new(0, 2), "42");
+/// let (_, payload) = lit.into_components();
+/// ```
+///
+/// ```compile_fail,E0308
+/// # use tokora::{SimpleSpan, types::LitDecimal, utils::IntoComponents};
+/// # let lit = LitDecimal::<&str>::new(SimpleSpan::new(0, 2), "42");
+/// let (span, ..) = lit.into_components();
+/// ```
+///
+/// The one that made a three-tuple unsafe — `..` matches zero elements against a pair and one
+/// against a triple, so this bound the payload before and the status after:
+///
+/// ```compile_fail,E0308
+/// # use tokora::{SimpleSpan, types::LitDecimal, utils::IntoComponents};
+/// # let lit = LitDecimal::<&str>::new(SimpleSpan::new(0, 2), "42");
+/// let (_, .., value) = lit.into_components();
+/// ```
+///
+/// ```compile_fail,E0308
+/// # use tokora::{SimpleSpan, types::LitDecimal, utils::IntoComponents};
+/// # let lit = LitDecimal::<&str>::new(SimpleSpan::new(0, 2), "42");
+/// let (.., value) = lit.into_components();
+/// ```
+///
+/// ```compile_fail,E0308
+/// # use tokora::{SimpleSpan, types::LitDecimal, utils::IntoComponents};
+/// # let lit = LitDecimal::<&str>::new(SimpleSpan::new(0, 2), "42");
+/// match lit.into_components() { (_, payload) => { let _ = payload; } }
+/// ```
+///
+/// Index access is refused too, with its own code:
+///
+/// ```compile_fail,E0609
+/// # use tokora::{SimpleSpan, types::LitDecimal, utils::IntoComponents};
+/// # let lit = LitDecimal::<&str>::new(SimpleSpan::new(0, 2), "42");
+/// let _ = lit.into_components().1;
+/// ```
+///
+/// ```compile_fail,E0609
+/// # use tokora::{SimpleSpan, types::LitDecimal, utils::IntoComponents};
+/// # let lit = LitDecimal::<&str>::new(SimpleSpan::new(0, 2), "42");
+/// let _ = lit.into_components().0;
+/// ```
+///
+/// What replaces them binds by name, so no elision can slide a binding onto the status:
+///
+/// ```rust
+/// # use tokora::{SimpleSpan, types::{LitDecimal, recovery::Components}, utils::IntoComponents};
+/// # let lit = LitDecimal::<&str>::new(SimpleSpan::new(0, 2), "42");
+/// let Components { span, payload, status } = lit.into_components();
+/// assert_eq!(payload, "42");
+/// assert!(status.is_valid());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Components<Span, Payload> {
+  /// Where the construct was, or would have been.
+  pub span: Span,
+  /// The spelling the carrier holds. For a recovery placeholder this is whatever
+  /// [`ErrorNode`](crate::error::ErrorNode) produced, and it is **not** the recovery channel —
+  /// read `status`.
+  pub payload: Payload,
+  /// Whether the parser found the construct, found something malformed, or found nothing.
+  pub status: Status,
+}
+
 /// Rebuilds a syntax carrier from the components [`IntoComponents`](crate::utils::IntoComponents)
 /// took it apart into — the exact inverse, over the same associated type.
 ///

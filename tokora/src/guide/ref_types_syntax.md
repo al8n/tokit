@@ -142,7 +142,8 @@ impl<S, Span, Lang> Ident<S, Span, Lang> {
 // `unsafe { zeroed() }` infers as the consumer's status before the upgrade and as tokora's
 // after, both compile, and a zero-valued rejection becomes Valid.
 impl FromComponents for Ident<..> { fn from_components(c: Self::Components) -> Self; }
-//                                  // exactly the inverse of into_components
+// Components is a NAMED STRUCT { span, payload, status }, not a 3-tuple: `let (_, .., v) = ..`
+// binds the payload against a pair and the status against a triple, and both compile.
 
 // The recovery state is read through a trait, and ONLY through it — there is no inherent
 // accessor of any name, because an inherent one can be displaced by a consumer's extension
@@ -165,7 +166,7 @@ impl RecoveryState for Ident<..> { fn status(&self) -> Status;
 use tokora::{SimpleSpan, error::ErrorNode, types::{Ident, Keyword}, utils::IntoComponents};
 // `RecoveryState` is NOT in `types::*` — a trait reached through a glob can be rebound by a
 // second glob with only a warning, so it has to be named:
-use tokora::types::recovery::{FromComponents, RecoveryState};
+use tokora::types::recovery::{Components, FromComponents, RecoveryState};
 
 struct MyLang;
 
@@ -187,14 +188,14 @@ assert_eq!(as_ident.source_ref(), &"let");
 // Both destructure via `IntoComponents`, into span, payload AND status. The status is in the
 // tuple because `FromComponents` is the inverse: rebuilding through `new` would declare a
 // recovered node valid, which is the laundering the three-part decomposition exists to prevent.
-let (span, source, status) = ident.into_components();
-let upper = Ident::<&str, SimpleSpan, MyLang>::from_components((span, source, status))
+let Components { span, payload, status } = ident.into_components();
+let upper = Ident::<&str, SimpleSpan, MyLang>::from_components(Components { span, payload, status })
     .map(|s| s.to_uppercase());
 assert_eq!(upper.source_ref(), "MY_VAR");
 assert!(upper.is_valid());
 
-let (span, source, status) = bad.into_components();
-assert!(Ident::<&str, SimpleSpan, MyLang>::from_components((span, source, status)).is_error());
+let parts = bad.into_components();
+assert!(Ident::<&str, SimpleSpan, MyLang>::from_components(parts).is_error());
 ```
 
 Both also have real combinator entry points, not just bare constructors. Once the token type opts

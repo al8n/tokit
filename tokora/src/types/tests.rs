@@ -1,7 +1,7 @@
 use super::*;
 // `RecoveryState` is no longer re-exported into `types`, so `use super::*` does not bring it in —
 // which is the whole repair, and this line is what an ordinary consumer writes instead.
-use super::recovery::{FromComponents, RecoveryState};
+use super::recovery::{Components, FromComponents, RecoveryState};
 use std::{
   string::{String, ToString},
   vec,
@@ -146,7 +146,11 @@ fn ident_list_of_mapped_recovery_segments_is_not_valid() {
 fn ident_into_components() {
   use crate::utils::IntoComponents;
   let ident = Ident::<&str>::new(SimpleSpan::new(0, 3), "foo");
-  let (span, source, status) = ident.into_components();
+  let Components {
+    span,
+    payload: source,
+    status,
+  } = ident.into_components();
   assert_eq!(span, SimpleSpan::new(0, 3));
   assert_eq!(source, "foo");
   assert!(status.is_valid());
@@ -200,7 +204,11 @@ fn keyword_map() {
 #[test]
 fn keyword_into_components() {
   let kw = Keyword::<&str>::new(SimpleSpan::new(0, 3), "let");
-  let (span, source, status) = kw.into_components();
+  let Components {
+    span,
+    payload: source,
+    status,
+  } = kw.into_components();
   assert!(status.is_valid());
   assert_eq!(span, SimpleSpan::new(0, 3));
   assert_eq!(source, "let");
@@ -381,7 +389,11 @@ fn lit_hex_new() {
 fn lit_into_components() {
   use crate::utils::IntoComponents;
   let lit = LitDecimal::<&str>::new(SimpleSpan::new(0, 2), "42");
-  let (span, data, status) = IntoComponents::into_components(lit);
+  let Components {
+    span,
+    payload: data,
+    status,
+  } = IntoComponents::into_components(lit);
   assert!(status.is_valid());
   assert_eq!(span, SimpleSpan::new(0, 2));
   assert_eq!(data, "42");
@@ -524,7 +536,11 @@ fn keyword_as_span() {
 fn keyword_into_components_trait() {
   use crate::utils::IntoComponents;
   let kw = Keyword::<&str>::new(SimpleSpan::new(0, 3), "let");
-  let (span, source, status) = IntoComponents::into_components(kw);
+  let Components {
+    span,
+    payload: source,
+    status,
+  } = IntoComponents::into_components(kw);
   assert!(status.is_valid());
   assert_eq!(span, SimpleSpan::new(0, 3));
   assert_eq!(source, "let");
@@ -533,7 +549,11 @@ fn keyword_into_components_trait() {
 #[test]
 fn keyword_into_components_method() {
   let kw = Keyword::<&str>::new(SimpleSpan::new(0, 3), "let");
-  let (span, source, status) = kw.into_components();
+  let Components {
+    span,
+    payload: source,
+    status,
+  } = kw.into_components();
   assert_eq!(span, SimpleSpan::new(0, 3));
   assert_eq!(source, "let");
   assert!(status.is_valid());
@@ -557,7 +577,11 @@ fn ident_as_span() {
 fn ident_into_components_trait() {
   use crate::utils::IntoComponents;
   let ident = Ident::<&str>::new(SimpleSpan::new(0, 3), "foo");
-  let (span, source, status) = IntoComponents::into_components(ident);
+  let Components {
+    span,
+    payload: source,
+    status,
+  } = IntoComponents::into_components(ident);
   assert!(status.is_valid());
   assert_eq!(span, SimpleSpan::new(0, 3));
   assert_eq!(source, "foo");
@@ -696,7 +720,11 @@ fn lit_false_new() {
 fn lit_decimal_into_components_trait() {
   use crate::utils::IntoComponents;
   let lit = LitHex::<&str>::new(SimpleSpan::new(0, 4), "0xFF");
-  let (span, data, status) = IntoComponents::into_components(lit);
+  let Components {
+    span,
+    payload: data,
+    status,
+  } = IntoComponents::into_components(lit);
   assert!(status.is_valid());
   assert_eq!(span, SimpleSpan::new(0, 4));
   assert_eq!(data, "0xFF");
@@ -756,14 +784,14 @@ macro_rules! assert_status_survives_a_round_trip {
 
       for status in [Status::Valid, Status::Error, Status::Missing] {
         let name = stringify!($carrier);
-        let original = $carrier::<&str>::from_components((span, "payload", status));
+        let original = $carrier::<&str>::from_components(Components { span, payload: "payload", status });
 
-        let (sp, payload, st) = IntoComponents::into_components(original);
+        let Components { span: sp, payload, status: st } = IntoComponents::into_components(original);
         assert_eq!(sp, span, "{name} in {status:?}: span");
         assert_eq!(payload, "payload", "{name} in {status:?}: payload");
         assert_eq!(st, status, "{name} in {status:?}: status survives the decomposition");
 
-        let rebuilt = $carrier::<&str>::from_components((sp, payload, st));
+        let rebuilt = $carrier::<&str>::from_components(Components { span: sp, payload, status: st });
         assert_eq!(rebuilt, original, "{name} in {status:?}: the round trip is the identity");
         assert_eq!(rebuilt.is_valid(), status.is_valid(), "{name} in {status:?}: is_valid");
         assert_eq!(rebuilt.is_error(), status.is_error(), "{name} in {status:?}: is_error");
@@ -810,18 +838,22 @@ fn keywords_inherent_decomposition_agrees_with_the_trait_one() {
   let span = SimpleSpan::new(1, 5);
 
   for status in [Status::Valid, Status::Error, Status::Missing] {
-    let kw = Keyword::<&str>::from_components((span, "then", status));
+    let kw = Keyword::<&str>::from_components(Components {
+      span,
+      payload: "then",
+      status,
+    });
 
     let inherent = Keyword::into_components(kw);
     let via_trait = IntoComponents::into_components(kw);
 
     assert_eq!(inherent, via_trait, "{status:?}: the two doors agree");
     assert_eq!(
-      inherent.2, status,
+      inherent.status, status,
       "{status:?}: the inherent door carries the status"
     );
     assert_eq!(
-      Keyword::<&str>::from_components((inherent.0, inherent.1, inherent.2)),
+      Keyword::<&str>::from_components(inherent),
       kw,
       "{status:?}: the inherent door's output rebuilds its input",
     );
@@ -849,16 +881,32 @@ fn an_error_node_placeholder_survives_a_decompose_and_rebuild() {
       LitDecimal::<&str>::missing(span),
     ),
   ] {
-    let (sp, src, st) = IntoComponents::into_components(kw);
-    let rebuilt = Keyword::<&str>::from_components((sp, src, st));
+    let Components {
+      span: sp,
+      payload: src,
+      status: st,
+    } = IntoComponents::into_components(kw);
+    let rebuilt = Keyword::<&str>::from_components(Components {
+      span: sp,
+      payload: src,
+      status: st,
+    });
     assert_eq!(rebuilt, kw, "{label}: keyword round trip");
     assert!(
       !rebuilt.is_valid(),
       "{label}: a rebuilt keyword is not valid syntax"
     );
 
-    let (sp, data, st) = IntoComponents::into_components(lit);
-    let rebuilt = LitDecimal::<&str>::from_components((sp, data, st));
+    let Components {
+      span: sp,
+      payload: data,
+      status: st,
+    } = IntoComponents::into_components(lit);
+    let rebuilt = LitDecimal::<&str>::from_components(Components {
+      span: sp,
+      payload: data,
+      status: st,
+    });
     assert_eq!(rebuilt, lit, "{label}: literal round trip");
     assert!(
       !rebuilt.is_valid(),
@@ -931,7 +979,7 @@ macro_rules! assert_marker_is_not_a_bound {
       use core::hash::{Hash, Hasher};
 
       let span = SimpleSpan::new(2, 8);
-      let value = $carrier::<&str, SimpleSpan, BareLang>::from_components((span, "x", Status::Error));
+      let value = $carrier::<&str, SimpleSpan, BareLang>::from_components(Components { span, payload: "x", status: Status::Error });
 
       requires_the_four(&value);
 
@@ -948,7 +996,7 @@ macro_rules! assert_marker_is_not_a_bound {
 
       // The other two, over a marker that carries them — which is what the `PartialEq` derive
       // costs and what `StructuralPartialEq` buys back.
-      let eq_marked = $carrier::<&str, SimpleSpan, EqLang>::from_components((span, "x", Status::Error));
+      let eq_marked = $carrier::<&str, SimpleSpan, EqLang>::from_components(Components { span, payload: "x", status: Status::Error });
       requires_the_other_two(&eq_marked);
       assert_eq!(eq_marked, eq_marked.clone(), concat!(stringify!($carrier), ": Eq over an Eq marker"));
     })+
@@ -1396,7 +1444,11 @@ fn a_const_carrier_is_usable_in_a_match_pattern() {
   // A recovery placeholder is a different value from a hand-spelled one, in a pattern too — the
   // status is part of what the pattern matches.
   assert_eq!(
-    classify_ident(Ident::from_components(((), "let", Status::Missing))),
+    classify_ident(Ident::from_components(Components {
+      span: (),
+      payload: "let",
+      status: Status::Missing
+    })),
     0,
     "the status participates in structural matching",
   );
@@ -1462,5 +1514,89 @@ mod second_glob {
       <LitDecimal<&str> as crate::types::recovery::RecoveryState>::status(&nonsense).is_valid(),
       "tokora's recovery status is the opposite answer, reached by naming the trait",
     );
+  }
+}
+
+// --- No pattern written against the old two-tuple may compile against the new shape ---
+
+/// **The differential for `Components` being a braced struct rather than a three-tuple.**
+///
+/// The widening from `(Span, Payload)` to `(Span, Payload, Status)` was defended as loud because
+/// it changes the arity. One line defeats that: `let (_, .., value) = literal.into_components();`
+/// binds `value` to the payload against a pair and to the status against a triple, and both
+/// compile whenever the payload also answers `is_valid`. Since `new` assigns `Status::Valid`, a
+/// payload the caller's own check rejects then reports valid. `(.., b)` and `.1` are the same
+/// defect in other spellings.
+///
+/// That was the third exemption of its kind refuted on this branch — after *the return type
+/// differs* and *the argument type is a `Status`* — and all three estimated the set of things a
+/// consumer could have written, and estimated it too small. So the repair is not a better-argued
+/// exemption but a shape no tuple pattern can match at all.
+///
+/// # How that was established
+///
+/// Ten pattern shapes were compiled against both the old pair and the new struct, as standalone
+/// programs, and the pair is the control rather than an assumption — all ten build against it:
+///
+/// | pattern | old `(Span, Payload)` | `Components` |
+/// |---|---|---|
+/// | `let (a, b)` | builds | `E0308` |
+/// | `let (_, b)` | builds | `E0308` |
+/// | `let (a, ..)` | builds | `E0308` |
+/// | `let (_, .., b)` | builds | `E0308` |
+/// | `let (.., b)` | builds | `E0308` |
+/// | `let (_, b,)` (trailing comma) | builds | `E0308` |
+/// | `let (ref a, ref b)` | builds | `E0308` |
+/// | `match .. { (_, b) => }` | builds | `E0308` |
+/// | `t.0` | builds | `E0609` |
+/// | `t.1` | builds | `E0609` |
+///
+/// The cell below is the in-tree half: it holds the shapes a consumer would have written, in the
+/// form they now have to take. Each is `compile_fail` in its tuple spelling — that half cannot be
+/// a runtime assertion, so it is a doctest on
+/// [`Components`](super::recovery::Components) rather than a `#[test]`, and this function pins the
+/// *positive* half: that the named form binds what its name says.
+#[test]
+fn the_components_struct_binds_by_name_not_by_position() {
+  use crate::utils::IntoComponents;
+
+  let span = SimpleSpan::new(1, 5);
+
+  // A payload whose own notion of validity disagrees with the recovery status, which is what
+  // makes a mis-bound third element dangerous rather than merely wrong.
+  let lit = LitDecimal::<&str>::new(span, "nope");
+  let Components {
+    span: got_span,
+    payload,
+    status,
+  } = IntoComponents::into_components(lit);
+
+  assert_eq!(got_span, span);
+  assert_eq!(payload, "nope", "the payload binds by name");
+  assert!(
+    status.is_valid(),
+    "the status binds by name, and `new` declared it valid"
+  );
+
+  // The `..` that used to move: with a struct it can only elide *named* fields, so the binding
+  // that survives is the one the author named, not the one position three happens to hold.
+  let Components { payload, .. } = IntoComponents::into_components(lit);
+  assert_eq!(
+    payload, "nope",
+    "`..` cannot slide a binding onto the status"
+  );
+
+  let Components { status, .. } = IntoComponents::into_components(lit);
+  assert!(status.is_valid());
+
+  // Round trip through the same shape, in all three states.
+  for st in [Status::Valid, Status::Error, Status::Missing] {
+    let original = LitDecimal::<&str>::from_components(Components {
+      span,
+      payload: "42",
+      status: st,
+    });
+    let rebuilt = LitDecimal::<&str>::from_components(original.into_components());
+    assert_eq!(rebuilt, original, "{st:?}: the round trip is the identity");
   }
 }

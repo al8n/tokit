@@ -251,13 +251,13 @@ macro_rules! define_literal {
       /// `FromComponents` is the inverse: without it in both, a consumer who took a literal apart
       /// and put it back together would have to rebuild through `new`, which always declares the
       /// result valid.
-      type Components = (Span, D, Status);
+      type Components = $crate::types::recovery::Components<Span, D>;
 
       #[inline(always)]
       fn into_components(self) -> Self::Components {
         let Self { _lang, status, span, data } = self;
 
-        (span, data, status)
+        $crate::types::recovery::Components { span, payload: data, status }
       }
     }
 
@@ -348,9 +348,9 @@ macro_rules! define_literal {
     {
       #[inline(always)]
       fn from_components(components: Self::Components) -> Self {
-        let (span, data, status) = components;
+        let $crate::types::recovery::Components { span, payload, status } = components;
 
-        Self::with_status(span, data, status)
+        Self::with_status(span, payload, status)
       }
     }
 

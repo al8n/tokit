@@ -122,14 +122,15 @@ use crate::{
 /// ## Extracting Components
 ///
 /// ```rust
-/// # use tokora::{SimpleSpan, types::Ident, utils::IntoComponents};
+/// # use tokora::{SimpleSpan, types::{Ident, recovery::Components}, utils::IntoComponents};
 /// # struct MyLang;
 /// # let span = SimpleSpan::new(0, 3);
 /// let ident = Ident::<&str, SimpleSpan, MyLang>::new(span, "foo");
 ///
-/// // Destructure into span, source and recovery status
-/// let (span, source, status) = ident.into_components();
-/// assert_eq!(source, "foo");
+/// // Destructure into span, payload and recovery status. A named struct, not a tuple: see
+/// // `types::recovery::Components` for the `..` pattern that made a three-tuple unsafe.
+/// let Components { span, payload, status } = ident.into_components();
+/// assert_eq!(payload, "foo");
 /// assert!(status.is_valid());
 /// ```
 ///
@@ -257,7 +258,7 @@ impl<S, Span, Lang: ?Sized> IntoComponents for Ident<S, Span, Lang> {
   /// a carrier apart and put it back together would have to rebuild through
   /// [`new`](Ident::new), which always declares the result valid — the same laundering tokora#303
   /// removed from [`map`](Ident::map), reached one door over.
-  type Components = (Span, S, Status);
+  type Components = super::recovery::Components<Span, S>;
 
   #[inline(always)]
   fn into_components(self) -> Self::Components {
@@ -268,7 +269,11 @@ impl<S, Span, Lang: ?Sized> IntoComponents for Ident<S, Span, Lang> {
       ident,
     } = self;
 
-    (span, ident, status)
+    super::recovery::Components {
+      span,
+      payload: ident,
+      status,
+    }
   }
 }
 
@@ -547,9 +552,13 @@ impl<S, Span, Lang: ?Sized> Ident<S, Span, Lang> {
 impl<S, Span, Lang: ?Sized> super::recovery::FromComponents for Ident<S, Span, Lang> {
   #[inline(always)]
   fn from_components(components: Self::Components) -> Self {
-    let (span, source, status) = components;
+    let super::recovery::Components {
+      span,
+      payload,
+      status,
+    } = components;
 
-    Self::with_status(span, source, status)
+    Self::with_status(span, payload, status)
   }
 }
 
