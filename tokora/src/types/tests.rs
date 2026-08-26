@@ -1,7 +1,7 @@
 use super::*;
 // `RecoveryState` is no longer re-exported into `types`, so `use super::*` does not bring it in —
 // which is the whole repair, and this line is what an ordinary consumer writes instead.
-use super::recovery::{Components, FromComponents, RecoveryState};
+use super::{Components, FromComponents, RecoveryState};
 use std::{
   string::{String, ToString},
   vec,
@@ -1050,7 +1050,7 @@ fn no_carrier_demands_a_trait_of_its_language_marker() {
 // --- A name this branch adds must not silently displace a consumer's own ---
 
 /// A downstream crate's scope, reproduced: the carriers are imported, and
-/// [`RecoveryState`](super::recovery::RecoveryState) deliberately is **not**. That is the position an
+/// [`RecoveryState`](super::RecoveryState) deliberately is **not**. That is the position an
 /// upgrading consumer is in, and it is why this is a module — `use super::*` in the parent puts
 /// the trait in scope, and a trait in scope contributes its method names whatever it is bound to.
 mod consumer_scope {
@@ -1091,7 +1091,7 @@ mod consumer_scope {
   /// tokora's own answer, reached without importing the trait — which is what a fully qualified
   /// path is for, and what the consumer would write on the rare call that wants it.
   fn tokora_status(lit: &LitDecimal<&str>) -> Status {
-    <LitDecimal<&str> as crate::types::recovery::RecoveryState>::status(lit)
+    <LitDecimal<&str> as crate::types::RecoveryState>::status(lit)
   }
 
   /// **The cell, and its two directions.**
@@ -1337,7 +1337,7 @@ mod consumer_scope {
   /// `MaybeUninit::uninit().assume_init()` is worse — it yields whatever the stack held.
   ///
   /// So the constructor is not in the inherent namespace at all: it is
-  /// [`FromComponents::from_components`](crate::types::recovery::FromComponents::from_components),
+  /// [`FromComponents::from_components`](crate::types::FromComponents::from_components),
   /// a trait method, which a consumer's inherent item outranks. The call below reaches the
   /// consumer's constructor and must keep doing so.
   #[test]
@@ -1379,7 +1379,7 @@ mod consumer_scope {
 
     // tokora's own status-preserving construction is still reachable, by the trait that replaced
     // the constructor — and it is the exact inverse of the decomposition.
-    use crate::{types::recovery::FromComponents, utils::IntoComponents};
+    use crate::{types::FromComponents, utils::IntoComponents};
     let placeholder = LitDecimal::<&str>::error(span);
     let rebuilt = LitDecimal::<&str>::from_components(placeholder.into_components());
     assert_eq!(rebuilt, placeholder);
@@ -1456,24 +1456,22 @@ fn a_const_carrier_is_usable_in_a_match_pattern() {
 
 // --- A second glob must not be able to rebind a consumer's method ---
 
-/// A consumer crate that glob-imports **both** `tokora::types::*` and its own prelude.
+/// **The accepted residual, pinned rather than described.**
 ///
-/// This is the shape that survived moving the three questions onto a trait: the trait was
-/// re-exported into `types`, so `use tokora::types::*;` put it in scope beside a same-named one of
-/// the consumer's — and that is not the hard error a same-named *type* would give.
+/// Round 6 moved `RecoveryState` out of `types::*` because a second glob offering the same trait
+/// name compiles, warns under the warn-by-default `ambiguous_glob_imported_traits`
+/// (rust-lang/rust#152822), and resolves to whichever glob came first. Round 9 moved it back,
+/// because the module that held it was itself a MODULE name in `types::*`, and a module is the
+/// one kind that is silent against an extern crate — a consumer with a dependency named
+/// `recovery` had every `recovery::...` path rebound to tokora, with no diagnostic at all.
 ///
-/// Reproduced against `rustc 1.100.0-nightly` before this was repaired, over three arrangements:
+/// The two cannot both be closed: a public trait must live in a module, and every module is
+/// either already globbed or a new name in one. So this cell no longer asserts that the
+/// consumer's trait wins — it records what actually happens, so the trade is a fact in the test
+/// suite rather than a sentence in a doc comment.
 ///
-/// - two globs, same **trait** name: compiles. `ambiguous_glob_imported_traits` is warn-by-default
-///   (a future-incompatibility, rust-lang/rust#152822) and the call resolves to whichever glob was
-///   written **first**, so either side wins depending on import order.
-/// - two globs, same **type** name: `error[E0659]: ambiguous`. Hard.
-/// - two globs, same method through **differently named** traits: `error[E0034]`. Hard.
-///
-/// The repair is that `RecoveryState` is not in `types::*` at all — it lives in
-/// [`types::recovery`](super::recovery) and must be named. So the glob below contributes no
-/// competing `is_valid`, the consumer's is unopposed, and a consumer who wants tokora's writes an
-/// explicit import, which beats a glob and is a choice rather than an accident.
+/// If `ambiguous_glob_imported_traits` becomes the hard error its future-incompatibility note
+/// promises, this cell stops compiling and that is the signal to revisit.
 mod second_glob {
   /// The consumer's own prelude, glob-exported the way a crate's prelude is.
   mod their_prelude {
@@ -1491,28 +1489,28 @@ mod second_glob {
     }
   }
 
-  /// **The cell.** Two globs, one of them tokora's whole `types` namespace.
+  /// Two globs, one of them tokora's whole `types` namespace, both offering a `RecoveryState`.
   ///
-  /// With `pub use recovery::RecoveryState;` restored in `types/mod.rs` — the plant — this
-  /// function still compiles, emits only `ambiguous_glob_imported_traits`, and the assertion
-  /// below flips: `LitDecimal::new` marks every payload `Status::Valid`, so `"nope"` reads as
-  /// valid and the consumer's check is bypassed with no error anywhere.
+  /// The `allow` is the residual itself: without it this is an error here, because the crate
+  /// denies warnings. A downstream crate gets the warning and the code runs.
   #[test]
-  fn a_glob_of_tokora_types_does_not_rebind_the_consumers_predicate() {
+  #[allow(unused_imports, ambiguous_glob_imported_traits)]
+  fn two_globs_of_the_same_trait_name_resolve_to_the_first_glob() {
     use crate::types::*;
     use their_prelude::*;
 
     let nonsense = LitDecimal::<&str>::new(SimpleSpan::new(0, 4), "nope");
+
+    // tokora's glob is written first, so tokora's trait wins — and `new` called it valid.
     assert!(
-      !nonsense.is_valid(),
-      "a second glob must not rebind the consumer's semantic check",
+      nonsense.is_valid(),
+      "the first glob wins: this is tokora's recovery status, not the consumer's payload check",
     );
 
-    // Tokora's own answer is still reachable, by naming it — which is the cost of the repair and
-    // the whole of it.
+    // The consumer's answer is the opposite one, and is still reachable by naming their trait.
     assert!(
-      <LitDecimal<&str> as crate::types::recovery::RecoveryState>::status(&nonsense).is_valid(),
-      "tokora's recovery status is the opposite answer, reached by naming the trait",
+      !their_prelude::RecoveryState::is_valid(&nonsense),
+      "the consumer's semantic check rejects a non-numeric payload",
     );
   }
 }
@@ -1554,7 +1552,7 @@ mod second_glob {
 /// The cell below is the in-tree half: it holds the shapes a consumer would have written, in the
 /// form they now have to take. Each is `compile_fail` in its tuple spelling — that half cannot be
 /// a runtime assertion, so it is a doctest on
-/// [`Components`](super::recovery::Components) rather than a `#[test]`, and this function pins the
+/// [`Components`](super::Components) rather than a `#[test]`, and this function pins the
 /// *positive* half: that the named form binds what its name says.
 #[test]
 fn the_components_struct_binds_by_name_not_by_position() {

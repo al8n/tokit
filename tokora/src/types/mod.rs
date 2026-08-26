@@ -86,20 +86,29 @@ pub use ident::*;
 pub use ident_list::*;
 pub use keyword::*;
 pub use lit::*;
-// `Status` is re-exported into `types` and `RecoveryState` deliberately is not. Reproduced
-// against rustc 1.100.0-nightly, the two names behave differently under a consumer's second glob:
-// a TYPE name is `error[E0659]: ambiguous`, while a TRAIT name compiles with only a
-// warn-by-default `ambiguous_glob_imported_traits` and silently picks whichever glob came first.
-// A trait in `types::*` would therefore let `use tokora::types::*; use their_crate::*;` rebind a
-// same-named `is_valid` with no error — so the trait must be named to be reached. See
-// `recovery`'s own header.
-pub use recovery::Status;
+// Everything the recovery API exposes is re-exported here as ITEMS, and `recovery` is a private
+// module, because the kinds resolve differently under a consumer's glob. Measured against
+// rustc 1.100.0-nightly, over three axes:
+//
+//                    vs an extern crate    vs a second glob    vs a local definition
+//   module           SILENT redirect       E0659               local wins
+//   trait            E0790                 SILENT, 1st glob    local wins
+//   type / fn/const  E0599 / no interaction E0659              local wins
+//
+// A `pub mod recovery` therefore put a MODULE name into `types::*`, and a consumer with a
+// dependency named `recovery` had every `recovery::...` path silently rebound to tokora — a whole
+// crate path prefix, in code unrelated to this API. Re-exporting the items instead removes that
+// entirely and leaves only the trait names, whose only silent axis is a second glob and whose
+// blast radius is four method names on tokora's own carriers. Both cannot be closed at once: a
+// public trait must live in a module, and every module is either already globbed or a new name in
+// one. That is written out on `recovery`'s own header.
+pub use recovery::{Components, FromComponents, RecoveryState, Status};
 
 mod ident;
 mod ident_list;
 mod keyword;
 mod lit;
-pub mod recovery;
+mod recovery;
 
 /// A type representing a recoverable parse node, which can be a valid node,
 /// an error node with span, or a missing node with span.

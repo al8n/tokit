@@ -1,31 +1,49 @@
-//! The recovery state of a syntax carrier, and the trait that reads it.
+//! The recovery state of a syntax carrier, the trait that reads it, and the parts it decomposes
+//! into. Every item here is re-exported from [`types`](super); this module is **private**.
 //!
-//! # Why this is a module you have to name
+//! # Why the module is private, and why that is not a full repair
 //!
-//! [`RecoveryState`] is deliberately **not** re-exported into [`types`](super), so
-//! `use tokora::types::*;` does not bring it into scope and `use tokora::types::recovery::RecoveryState;`
-//! is how you reach it. That costs one import, and it buys the property the trait exists for.
+//! Three axes, measured against `rustc 1.100.0-nightly` with a consumer whose source never
+//! changes and a library that gains one item:
 //!
-//! A trait and a type behave differently under a consumer's second glob import, which was
-//! reproduced against `rustc 1.100.0-nightly` rather than reasoned about:
+//! |            | vs an extern crate of that name  | vs a second glob            | vs a local def |
+//! |------------|----------------------------------|-----------------------------|----------------|
+//! | **module** | **silent redirect**              | `E0659`                     | local wins     |
+//! | **trait**  | `E0790`                          | **silent, first glob wins** | local wins     |
+//! | type       | `E0599`                          | `E0659`                     | local wins     |
+//! | fn / const | no interaction (value namespace) | `E0659`                     | local wins     |
 //!
-//! - Two globs offering the same **type** name: `error[E0659]: ambiguous`. Hard, at the use site.
-//! - Two globs offering the same **trait** name: it *compiles*. `ambiguous_glob_imported_traits`
-//!   is warn-by-default (a future-incompatibility, rust-lang/rust#152822), and the method call
-//!   silently resolves to whichever glob was written **first** — so either side can win depending
-//!   on import order.
-//! - Two globs offering the same **method** through differently named traits: `error[E0034]`.
-//!   Hard.
+//! A `pub mod recovery` inside `types` put a MODULE name into `use tokora::types::*`, and a
+//! consumer with a dependency named `recovery` then had **every** `recovery::...` path silently
+//! rebound to tokora — a whole crate path prefix, in code with nothing to do with this API, with
+//! no error and no warning. Making the module private removes that.
 //!
-//! So a trait in `types::*` would let `use tokora::types::*; use their_crate::*;` rebind a
-//! consumer's own `is_valid` with no error at all — the same silent rebind that moving these
-//! questions off inherent methods was meant to close, one level further out at the re-export.
-//! Naming the module removes the second glob: a consumer's glob-imported trait is then unopposed,
-//! and a consumer who imports this one explicitly has said which they meant, since an explicit
-//! import beats a glob.
+//! **It does not remove the other one, and the two cannot both be removed.** A public trait has
+//! to live in some module. If that module is already globbed, the trait name is silent on the
+//! second-glob axis; if it is a new module, the module name is silent on the extern-crate axis.
+//! There is no third place to put it, so this is a choice between two residuals rather than a
+//! repair. It was made on blast radius: the module hazard redirects an entire path prefix and is
+//! triggered by a dependency name a consumer may not control, while the trait hazard reaches four
+//! method names on tokora's own carriers and needs a same-named trait glob-imported from the
+//! consumer's own prelude.
 //!
-//! [`Status`] *is* re-exported as `types::Status`, because a type name collides loudly.
+//! The residual, stated: a consumer who glob-imports both `tokora::types::*` and a prelude of
+//! their own holding a trait named `RecoveryState` or `FromComponents` gets
+//! `ambiguous_glob_imported_traits` — a warning, not an error — and the first glob wins.
 
+/// `tokora::types::recovery` is not a path a consumer can name — the module is private and its
+/// items are re-exported from `types`. This is the in-tree pin for that, because the hazard it
+/// closes needs a second crate to demonstrate and so cannot be a unit test:
+///
+/// ```compile_fail,E0603
+/// use tokora::types::recovery::RecoveryState;
+/// ```
+///
+/// The items are reached from `types` directly:
+///
+/// ```rust
+/// use tokora::types::{Components, FromComponents, RecoveryState, Status};
+/// ```
 /// The recovery state of a syntax carrier: whether the parser found the construct, found
 /// something malformed where it should have been, or found nothing at all.
 ///
@@ -260,7 +278,7 @@ pub trait RecoveryState {
 /// What replaces them binds by name, so no elision can slide a binding onto the status:
 ///
 /// ```rust
-/// # use tokora::{SimpleSpan, types::{LitDecimal, recovery::Components}, utils::IntoComponents};
+/// # use tokora::{SimpleSpan, types::{LitDecimal, Components}, utils::IntoComponents};
 /// # let lit = LitDecimal::<&str>::new(SimpleSpan::new(0, 2), "42");
 /// let Components { span, payload, status } = lit.into_components();
 /// assert_eq!(payload, "42");
@@ -282,7 +300,7 @@ pub struct Components<Span, Payload> {
 /// took it apart into — the exact inverse, over the same associated type.
 ///
 /// ```rust
-/// use tokora::{SimpleSpan, error::ErrorNode, types::{LitDecimal, recovery::FromComponents}};
+/// use tokora::{SimpleSpan, error::ErrorNode, types::{LitDecimal, FromComponents}};
 /// use tokora::utils::IntoComponents;
 ///
 /// let placeholder = LitDecimal::<&str>::error(SimpleSpan::new(0, 3));
