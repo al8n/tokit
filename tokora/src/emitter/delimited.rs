@@ -189,8 +189,15 @@ pub trait UnclosedEmitter<'a, L, Lang: ?Sized = ()>: Emitter<'a, L, Lang> {
   /// ```
   ///
   /// The converting emitter over the same error type does not, because its body really does
-  /// perform the conversion. `Emitter` is assumed here so the only obligation left standing is
-  /// the delimiter one:
+  /// perform the conversion. `Fatal`'s impl block names two things — `E: FromUnclosed` and
+  /// `Fatal<E, Lang>: Emitter<'a, L, Lang, Error = E>` — so the whole `Emitter` bound
+  /// **including its `Error` projection** is assumed here, and the missing conversion is then
+  /// the only obligation left standing. Assuming the bare `Emitter<'inp, L>` instead leaves the
+  /// `Error == Opaque` equality outstanding as a *second* unsatisfied obligation, and a cell
+  /// with two of them pins whichever the solver happens to report: it was `E0277` on one rustc
+  /// and `E0271` on the next, and under the latter the cell stayed red even once `Opaque`
+  /// implemented the conversion — red for a reason the repair does not remove, which is a cell
+  /// that witnesses nothing.
   ///
   /// ```rust,compile_fail,E0277
   /// use tokora::{Lexer, emitter::{Emitter, Fatal, UnclosedEmitter}};
@@ -201,7 +208,7 @@ pub trait UnclosedEmitter<'a, L, Lang: ?Sized = ()>: Emitter<'a, L, Lang> {
   ///
   /// fn probe<'inp, L: Lexer<'inp>>()
   /// where
-  ///   Fatal<Opaque>: Emitter<'inp, L>,
+  ///   Fatal<Opaque>: Emitter<'inp, L, Error = Opaque>,
   /// {
   ///   // `Opaque` has no `FromUnclosed` impl, and `Fatal`'s body needs one.
   ///   has_capability::<L, Fatal<Opaque>>();

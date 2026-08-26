@@ -6,7 +6,12 @@ use crate::{emitter::FromUnclosed, error::Unclosed};
 /// `Verbose` records the converted diagnostic, so this bound is a demand something collects on.
 /// A recording emitter over an error type that cannot absorb the diagnostic is therefore not an
 /// [`UnclosedEmitter`] at all, where a dropping one is (see
-/// [`UnclosedEmitter::emit_unclosed`] for that half and for why the bound is not on the method):
+/// [`UnclosedEmitter::emit_unclosed`] for that half and for why the bound is not on the method).
+///
+/// The assumed `Emitter` bound carries `Error = Opaque` deliberately: this impl block names
+/// `Verbose<E, S, Lang>: Emitter<'a, L, Lang, Error = E>` beside the conversion, so without the
+/// projection the cell would carry two unsatisfied obligations and pin whichever the solver
+/// reported first. See [`UnclosedEmitter::emit_unclosed`] for what that cost.
 ///
 /// ```rust,compile_fail,E0277
 /// use tokora::{Lexer, SimpleSpan, emitter::{Emitter, UnclosedEmitter, Verbose}};
@@ -17,7 +22,7 @@ use crate::{emitter::FromUnclosed, error::Unclosed};
 ///
 /// fn probe<'inp, L: Lexer<'inp, Span = SimpleSpan, Offset = usize>>()
 /// where
-///   Verbose<Opaque, SimpleSpan>: Emitter<'inp, L>,
+///   Verbose<Opaque, SimpleSpan>: Emitter<'inp, L, Error = Opaque>,
 /// {
 ///   // `Opaque` has no `FromUnclosed` impl, and `Verbose`'s body needs one.
 ///   has_capability::<L, Verbose<Opaque, SimpleSpan>>();
