@@ -1217,6 +1217,39 @@ INHERENT_SUBJECTS = {
             "with_limitation": ("1_000", "TokenBudget"),
         },
     },
+    # `Status` is minted by the same diff as its three items, so it takes this table's new-owner
+    # shape like every entry above it: the base side cannot name the type at all, and only the
+    # head side's binding has to be right. Its module (`tokora::types`) is NOT new — only the
+    # `Status` name within it is — so a plain `use tokora::types::Status;` already names the
+    # owner in the base-side diagnostic and the `new_module_imports` indirection the
+    # `diagnostic` types need buys nothing here, the same reasoning `Probe`'s entry gives.
+    # `recovery`, the submodule `Status` is re-exported from, is new too, but the owner probed
+    # here is reached through the pre-existing `types` re-export, not through `recovery` itself.
+    #
+    # It is `Copy` and all three items take `self` BY VALUE — not `&self` or `&mut self`, one
+    # step EARLIER than any other receiver kind this table carries. The receiver walk is
+    # therefore stronger than `Code`'s or `Probe`'s (found at the `&T` step): tokora's item is
+    # found at the FIRST candidate, `T` itself, before the generated consumer's `&mut self`
+    # extension method is even a candidate.
+    "Status": {
+        "imports": "use tokora::types::Status;\n",
+        "fixture": "",
+        "ty": "Status",
+        "setup": "",
+        # `Status::Error`, not `::Valid` — the module's own doc header measures exactly this
+        # variant (`Status::Error.is_error()`, "the boolean reads false before and true after"),
+        # so the subject here reproduces the same construction rather than a fresh guess.
+        "build": "  let mut subject: Status = Status::Error;\n",
+        "calls": {
+            "is_valid": ("", "bool"),
+            "is_error": ("", "bool"),
+            "is_missing": ("", "bool"),
+        },
+        # `Status` declares no receiver-less associated function — a consumer does not build one
+        # from a constructor, it is handed back through `RecoveryState::status`. An empty table
+        # rather than an absent key, for the reason `Cst`'s empty `assoc_calls` gives.
+        "assoc_calls": {},
+    },
 }
 
 
