@@ -940,11 +940,18 @@ and will red until they do.
   **no kind is loud on both axes.**
 
   **The placement is not derived from that table.** A draft read it as a budget and chose by
-  counting collidable names; that was the wrong criterion. This release's concern is a *silent
-  semantic change* — code that keeps compiling and means something different, with nothing to tell
-  the consumer. A glob-import name clash is not that: a glob is the consumer's own choice, the
-  clash is its ordinary cost, and it is paid at compile time with a leading `::` as the fix. It is
-  also a rule nothing could follow, since it would mean no public module could ever be added.
+  counting collidable names; that was the wrong criterion. The line this release is drawn on is:
+  **tokora must not silently change what a method on a tokora type means, while a name a consumer's
+  own glob shadows is that glob's cost and `::` is its fix.**
+
+  Those are two axes. `literal.is_valid()` on a `Lit*`, `Ident` or `Keyword` is the first — the
+  consumer holds tokora's type, calls what they believe is their own check, and gets tokora's
+  answer — and every carrier repair in this release is that class. `Status` in `types::*` and the
+  `recovery` module are the second: a path into the consumer's own namespace shadowed by a glob
+  they wrote, in code unrelated to tokora's carriers, with `::` as the remedy in both cases. Note
+  that *loud versus silent* does not sort them — the module clashes loudly and `Status` can clash
+  quietly — which is why the deciding property is whose type the call is on. It is also a rule
+  nothing could follow: no public module or vocabulary type could ever be added again.
 
   **The module keeps the name `recovery`, and the check behind that is dated rather than argued.**
   Against the crates.io API on 2026-08-27: `recovery` 0.1.6, ~16.1k downloads, last updated

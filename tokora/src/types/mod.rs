@@ -90,12 +90,12 @@ pub use lit::*;
 // type without naming the module; `RecoveryState`, `FromComponents` and `Components` are reached
 // through `types::recovery`.
 //
-// That split is ordinary library design, not a safety measurement. A draft of this release chose
-// placements by counting how many names a glob could collide with, and that was the wrong
-// criterion: a glob-import name clash is not a silent semantic change, it is the ordinary cost of
-// a glob, which is the consumer's own choice, and it is paid at compile time with a leading `::`
-// as the one-line fix. `recovery`'s header carries the measured table those rounds produced,
-// which does stand, and the dated crates.io check behind keeping the module's name.
+// That split is ordinary library design, and the line it sits on is stated in `recovery`'s header:
+// tokora must not silently change what a method on a tokora type means, while a name a consumer's
+// own glob shadows is that glob's cost and `::` is its fix. `Status` here is the second kind — a
+// path into the consumer's namespace, not a call on a tokora type — so it is placed where a glob
+// will find it. That header also carries the measured table those rounds produced, both clashes as
+// measured, and the dated crates.io check behind the module's name.
 pub use recovery::Status;
 
 mod ident;

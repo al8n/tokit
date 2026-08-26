@@ -8,8 +8,7 @@
 //! # How a name added to a globbed namespace behaves, by kind
 //!
 //! This table is a measured fact and is the durable result of the rounds that produced it. What it
-//! is **not** is the reason for the placement above — see *Why the placement is not derived from
-//! this table*.
+//! is **not** is the reason for the placement above — see *The line this API is placed on*.
 //!
 //! Measured against `rustc 1.100.0-nightly` with the consumer's source held fixed and the library
 //! gaining one item — and with **both sides exposing the item the consumer reaches for**, which is
@@ -31,54 +30,55 @@
 //!
 //! So **no kind that can carry this API is loud on both axes.** That is the finding, and it holds.
 //!
-//! # Why the placement is not derived from this table
+//! # The line this API is placed on
 //!
-//! A draft of this release read the table as a budget and chose placements by counting how many
-//! names a consumer's glob could collide with. That was the wrong criterion, and two rounds of it
-//! cancelled each other out.
+//! **tokora must not silently change what a method on a tokora type means. A name a consumer's own
+//! glob shadows is that glob's cost, and `::` is its fix.**
 //!
-//! This crate's concern is a **silent semantic change**: code that keeps compiling and means
-//! something different, with nothing to tell the consumer. `map` laundering a recovery placeholder
-//! into valid syntax was that. An inherent `is_valid` displacing a consumer's own was that. A
-//! glob-import name clash is **not**: a glob is the consumer's own choice, the clash is that
-//! choice's ordinary cost, and it is paid at compile time with a leading `::` as the one-line fix.
+//! Those are two different axes, and almost every repair in tokora#320 is the first one.
+//! `literal.is_valid()`, where `literal` is a `Lit*`, an [`Ident`](super::Ident) or a
+//! [`Keyword`](super::Keyword): the consumer is holding **tokora's** type, calling what they
+//! believe is their own check, and getting tokora's answer. That is tokora changing what its own
+//! API means underneath them, with nothing at the call site to say so. Moving the three questions
+//! onto [`RecoveryState`], withdrawing an inherent `status`, withdrawing an inherent `with_status`
+//! for [`FromComponents`], and making [`Components`] a braced struct are all that one class.
 //!
-//! It is also a rule nothing could follow. If a public module may not be added because some crate
-//! might share its name, no public module can ever be added again.
+//! The names in this module's *path* — `Status` in `types::*`, and `recovery` itself — are the
+//! second axis. Neither is a call on a tokora type. Both are a path into the consumer's own
+//! namespace being shadowed by a glob **they** wrote, in code that has nothing to do with tokora's
+//! carriers. That is namespace hygiene: the ordinary cost of `use ...::*`, whose remedy the
+//! language already provides. `::recovery::Recovery` and `::my_status::Status` reach past any glob,
+//! and it is the same one-line remedy in both cases.
 //!
-//! So the placement above is ordinary library design — the vocabulary type where a glob will find
-//! it, the traits behind a path — and the table is kept because it is true, not because it decided
-//! anything.
+//! This matters because the earlier reasoning used *loud versus silent* as the deciding property,
+//! and that does not survive: of these two names the one that clashes loudly is the module, and the
+//! one that can clash quietly is `Status`. Sorting them that way would keep the wrong one. Sorting
+//! by **whose type the call is on** puts both outside the line and leaves every carrier repair
+//! inside it.
 //!
-//! What that costs, measured rather than assumed: with `Status` in `types::*`, a consumer whose
-//! own dependency is aliased `Status` and who writes `use tokora::types::*;` resolves
-//! `Status::Error.is_error()` here rather than to their crate, and both revisions compile. That is
-//! the one name in this API whose glob clash can be quiet rather than a compile error, and it is
-//! accepted for the reason above: a glob is the consumer's choice, and `::` is the fix. The
-//! module's own name does not have that property — see below.
+//! It is also a rule nothing could follow. If a public name may not be added because some crate
+//! might share it, no public module or vocabulary type can ever be added again.
 //!
-//! # The module's name, checked rather than argued
+//! # Both clashes, measured
 //!
-//! A consumer with a dependency named or aliased `recovery` who writes `use tokora::types::*;` has
-//! `recovery::...` paths resolve here instead of to their crate. That is a *silent* change only if
-//! this module also exports the item they were reaching for; reach for anything else and the
-//! result is `E0432` at their own import line, fixed by one leading `::` — which is what
-//! `::recovery::Recovery` is for.
+//! Recorded so nobody re-derives them. They are evidence for the placement above, not open
+//! questions.
 //!
-//! **A crate of this name is published, and that is the evidence for keeping the name rather than
-//! a warning about it.** Checked against the crates.io API on **2026-08-27**: `recovery` 0.1.6,
-//! ~16.1k downloads, last updated 2025-09-14. Its documentation instructs `use recovery::Recovery;`
-//! — and `Recovery` is not one of this module's four names, so a consumer of both crates who
-//! upgrades gets a compile error at that import, measured as `E0432` (plus `E0659` where the name
-//! is then used), never a redirect. The genuinely silent case would need a crate that is both named
-//! `recovery` **and** exports one of `Status`, `Components`, `RecoveryState` or `FromComponents`.
+//! **`Status`, quiet.** A consumer whose own dependency is aliased `Status` and who writes
+//! `use tokora::types::*;` resolves `Status::Error.is_error()` here rather than to their crate.
+//! Compiled both ways against a real second crate: the boolean reads `false` before and `true`
+//! after. Disambiguated by `::my_status::Status`.
 //!
-//! So the name stays, for the reason above rather than because the risk is small: a rename would
-//! be applying *no silent semantic change* to something that is not one. A rename was drafted on
-//! that mistake and withdrawn.
+//! **`recovery`, loud.** A crate of that name **is published** — 0.1.6, ~16.1k downloads, last
+//! updated 2025-09-14, checked against the crates.io API on **2026-08-27** — and its documentation
+//! instructs `use recovery::Recovery;`. `Recovery` is not one of this module's four names, so a
+//! consumer of both crates gets `E0432` at their own import line, plus `E0659` where the name is
+//! then used. Measured, not assumed. Disambiguated by `::recovery::Recovery`.
 //!
-//! If the check above goes stale — that crate yanked, or one published that exports a name this
-//! module also has — the date is what makes the claim re-checkable instead of re-argued.
+//! A rename of this module was drafted when the deciding property was still loud-versus-silent,
+//! and withdrawn. If the check above goes stale — that crate yanked, or one published that exports
+//! a name this module also has — the date is what makes the claim re-checkable instead of
+//! re-argued.
 
 /// Reachable both ways: as `types::Status`, which is where a glob finds it, and through this
 /// module beside the rest of the recovery API.
