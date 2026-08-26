@@ -3,6 +3,7 @@ use super::*;
 // which is the whole repair, and this line is what an ordinary consumer writes instead.
 use super::recovery::{Components, FromComponents, RecoveryState, Status};
 use std::{
+  format,
   string::{String, ToString},
   vec,
   vec::Vec,
