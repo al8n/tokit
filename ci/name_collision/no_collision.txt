@@ -404,3 +404,36 @@ increase_both_and_check/later_pick_discarded
 increase_and_check/same_pick
 increase_and_check/later_pick_used
 increase_and_check/later_pick_discarded
+
+# ── `RecoveryState` — the BY-VALUE consumer keeps its call, on a new owner ────────────────
+#
+# tokora's are `fn status(&self) -> Status` and three defaulted `fn is_*(&self) -> bool` on
+# `RecoveryState`. The `trait_method` template's `same_pick` consumer declares `self` BY VALUE,
+# which is the FIRST step of the receiver walk; the subject is `Keyword<&'static str>`, which
+# derefs to nothing, so there is no earlier step for tokora's `&self` item to be found at — it
+# sits at the step-0 autoref, one pick later. The consumer's item claims the call and tokora's
+# is never a candidate. rustc says exactly that in the same log, and the fifth witness reads it:
+# `unused import: `new_module::RecoveryState``.
+#
+# This is `read_frontier/same_pick`'s analysis verbatim, on an owner the same diff introduces.
+# The verdict differs — `new-owner-nc*` rather than `ok*` — only because a new owner has no
+# before-state to agree WITH; the fact being justified is identical and so is this file's job
+# for it.
+#
+# The control is in the same run and it is what says this is the SHAPE and not a broken probe:
+# the `later_pick_*` rows put the consumer at `&self`, the same pick tokora's item sits at, and
+# every one of them scores `new-owner-err` — rustc reporting E0034 and naming both candidates.
+# So the template does construct a collision on this subject the moment the receiver kinds
+# agree. Read these four rows as "the by-value consumer keeps its call", never as "`status`,
+# `is_valid`, `is_error` and `is_missing` cannot be stolen".
+#
+# Why the subject satisfies the bound, since `recvr` is trusted and not verified: `Keyword` is
+# one of the two types tokora implements `RecoveryState` for in product code
+# (`types/keyword.rs`), and it is chosen over `Ident` — the other one — because `Ident` carries
+# PRE-EXISTING inherent `is_valid`/`is_error`/`is_missing`, which take the call and produce a
+# `witness=0` that measures nothing. That was measured, not reasoned; see the subject note in
+# gen_probe.py.
+status/same_pick
+is_valid/same_pick
+is_error/same_pick
+is_missing/same_pick

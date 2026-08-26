@@ -13,6 +13,10 @@
 #   ok*       both sides AGREE and the row is justified in no_collision.txt     non-fatal
 #   new-owner base cannot resolve the OWNER and head can — the same diff        non-fatal
 #             introduces the owner, so no call site could predate the name
+#   new-owner-err  the same, where head REJECTS the collision (E0034) instead    non-fatal
+#             of taking it — the loud outcome, reachable on one side only
+#   new-owner-nc*  the same, where the CONSUMER's item wins an earlier pick and  non-fatal
+#             no collision is constructed; justified by pick order in no_collision.txt
 #   SILENT    both ran, neither warned, witness differs, not disclosed          FATAL
 #   UNPROBED  both sides agree and it is NOT justified — likely a vacuous probe FATAL
 #   INCONCL   no before-state (base did not run, or the witness was unreadable) FATAL
@@ -204,6 +208,8 @@ loud=0
 okc=0
 incon=0
 newowner=0
+newownererr=0
+newownernc=0
 while IFS=$(printf '\t') read -r cat name owner spelling; do
   [ -n "$cat" ] || continue
   if ! python3 "$HERE/gen_probe.py" "$cat" "$name" "$owner" "$spelling" > "$WORK/probe.rs" 2> "$WORK/gen.err"; then
@@ -503,8 +509,8 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
     # row onto a subject that does exist, which is the vacuous-probe defect this harness was
     # built after: `Gadget::parse_except` cannot collide with `Ident::parse_except`.
     #
-    # FOUR witnesses, not three — "fine" is again being asserted by an absence and this
-    # file's rule is that each such verdict must produce positive evidence:
+    # FIVE witnesses, and TWO head-side shapes — "fine" is again being asserted by an absence
+    # and this file's rule is that each such verdict must produce positive evidence:
     #
     #   * rustc must SAY, on the base side, that it cannot resolve THIS ROW'S OWNER — an
     #     unresolved import / cannot-find / failed-to-resolve diagnostic naming it. A base build
@@ -534,6 +540,16 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
     #     actual evidence (`witness=0*`) rather than a denylist of the shapes known to be broken
     #     — a denylist is silent about the next broken shape nobody has named yet.
     #
+    #   * and the head side must not report the OWNER's import UNUSED. See the fifth witness
+    #     below: an inherent item the subject already carried produces `witness=0` exactly as a
+    #     new trait item does, and only rustc's `unused import` separates them.
+    #
+    # And the silent steal is not the only head-side shape that proves a collision. A new owner
+    # whose item cannot WIN the receiver walk loses the call to the consumer or ties with it,
+    # and a tie is E0034 — rustc naming the collision instead of taking it. That is the
+    # `new-owner-err` arm below, and it is why this branch is a case over `$h` rather than a
+    # single test.
+    #
     # What the row then means is narrow and is printed with it: no pre-existing call site can be
     # stolen. It says nothing about a consumer written AFTER the release, which is out of scope
     # for a two-sided delta harness by construction.
@@ -545,25 +561,137 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
     grep -E "(^|[^A-Za-z0-9_])$owner([^A-Za-z0-9_]|$)" "$WORK/out-head.txt" 2>/dev/null \
       | grep -qE "unresolved import|cannot find|failed to resolve|E0432|E0433|E0412" \
       && head_unresolved=yes
+    # THE FIFTH WITNESS. `witness=0` is CONSUMER-CALLS, so what it establishes is "the
+    # consumer's item did not run" — and for a new owner that is produced by TWO things: the
+    # new item taking the call, which is the verdict, and an item of the same name the SUBJECT
+    # ALREADY CARRIED taking it, which measures nothing. Measured on the branch that found
+    # this: `RecoveryState` is new and declares `is_valid`/`is_error`/`is_missing`, `Ident` has
+    # carried inherent `is_valid`/`is_error`/`is_missing` since before the base ref, and an
+    # inherent item outranks every trait item at the same step. Three rows compiled, ran,
+    # reported `witness=0` and scored `new-owner` over a call that went to a method the base
+    # ref already had. Not one of the four witnesses above disagrees with any of them.
+    #
+    # rustc says it out loud, which is what makes this a check and not a taste: an import that
+    # resolved and was never needed is `unused import`. If the head side reports THIS ROW'S
+    # OWNER unused, tokora's item on that owner was not a candidate, whatever the witness
+    # reads. That is the README's rule — enumerate what else could produce this evidence and
+    # exclude each — applied to `witness=0`: the alternative producer is removed rather than
+    # the witness complicated.
+    #
+    # It bills the generator for one thing and the templates must keep paying it: an owner's
+    # import may NOT carry `#[allow(unused_imports)]`. A suppressed warning is a witness that
+    # cannot fire, and every false green in this file's history was asserted by an absence.
+    owner_unused=""
+    grep -E "(^|[^A-Za-z0-9_])$owner([^A-Za-z0-9_]|$)" "$WORK/out-head.txt" 2>/dev/null \
+      | grep -q "unused import" && owner_unused=yes
+    # The head side's LOUD evidence. `new-owner` took exactly ONE head-side shape as proof that
+    # a collision was constructed — `witness=0`, the silent steal — and a trait method taking
+    # `&self` cannot produce it. The `trait_method` spellings put the consumer's item one pick
+    # EARLIER (`self`, by value) or at the SAME pick (`&self`); there is no LATER pick among
+    # them, so the outcomes are "the consumer wins" and "rustc refuses to choose". The refusal
+    # is E0034, it names the probed item and both candidate impls, and it is strictly stronger
+    # evidence than `witness=0` — the compiler REPORTING the collision rather than taking it.
+    # Classified as bare `no-compile` it scored INCONCL, so ten of one release's fourteen trait
+    # rows were filed "broken probe" over rustc naming the exact collision they were built for.
+    #
+    # The witness is `glob-err`'s, moved from the glob level to the item level — but NOT its
+    # implementation, and the difference is measured rather than assumed. `glob-err` pipes the
+    # name-matching lines into an ambiguity-wording test, i.e. both on ONE line, which is how
+    # E0659 prints: "`X` is ambiguous". E0034 does not: the code is on the header line, the name
+    # is on the label line, and the owner is on a candidate note. Written as one pipe this test
+    # matched nothing and every rejected row stayed INCONCL.
+    #
+    # So it is three conditions over the whole head log, each of them rustc's own words about
+    # THIS row, and all three required:
+    #
+    #   * the error KIND — E0034 / "multiple applicable items in scope";
+    #   * the ambiguity's own label naming this row's ITEM — "multiple `<name>` found";
+    #   * a candidate note naming this row's OWNER — which is the half that proves TOKORA's item
+    #     was one of the two candidates rather than some other pair of the same name.
+    #
+    # Together they exclude what the README's rule asks to be excluded: a head build that broke
+    # elsewhere (no E0034), an ambiguity about a different name (no label), and an ambiguity
+    # between two candidates neither of which is tokora's (no owner note). Cargo naming the probe
+    # crate is already required to reach `no-compile` at all, so a dependency cannot get here.
+    #
+    # If a future rustc rewords any of the three, rows go INCONCL and the gate reds. That is the
+    # right direction for a wording dependency to fail, and it is why this is three tests rather
+    # than one loose one.
+    head_rejected=""
+    if grep -qE "E0034|multiple applicable items in scope" "$WORK/out-head.txt" 2>/dev/null \
+       && grep -qE "multiple \`$name\` found" "$WORK/out-head.txt" 2>/dev/null \
+       && grep -E "candidate #[0-9]+ is defined in an impl of the trait" "$WORK/out-head.txt" \
+            2>/dev/null \
+          | grep -qE "(^|[^A-Za-z0-9_])$owner([^A-Za-z0-9_]|$)"; then
+      head_rejected=yes
+    fi
     if [ -n "$base_unresolved" ] && [ -z "$head_unresolved" ]; then
       case "$h" in
         witness=0*)
-          printf "  new-owner %-40s base=%-12s head=%s   (owner \`%s\` is new)\n" \
-            "$label" "$b" "$h" "$owner"
-          echo "          rustc cannot resolve \`$owner\` on the base ref and can on head, so this"
-          echo "          release introduces the owner as well as the name. There is no consumer"
-          echo "          call site that could predate it and nothing to steal."
-          newowner=$((newowner + 1))
+          if [ -n "$owner_unused" ]; then
+            printf "  INCONCL %-42s base=%-12s head=%s\n" "$label" "$b" "$h"
+            echo "          head reports the import of \`$owner\` UNUSED, so tokora's item on it was"
+            echo "          never a candidate: the call went to an item of this name the SUBJECT"
+            echo "          already carried, which the base ref has too. \`witness=0\` says only that"
+            echo "          the CONSUMER's item did not run, and that is all it says here. Give the"
+            echo "          row a subject carrying no pre-existing item of this name."
+            incon=$((incon + 1))
+            status=2
+          else
+            printf "  new-owner %-40s base=%-12s head=%s   (owner \`%s\` is new)\n" \
+              "$label" "$b" "$h" "$owner"
+            echo "          rustc cannot resolve \`$owner\` on the base ref and can on head, so this"
+            echo "          release introduces the owner as well as the name. There is no consumer"
+            echo "          call site that could predate it and nothing to steal."
+            newowner=$((newowner + 1))
+          fi
           ;;
         witness=*)
-          printf "  INCONCL %-42s base=%-12s head=%s\n" "$label" "$b" "$h"
-          echo "          head completed a run and resolved \`$owner\`, but \`$h\` is"
-          echo "          CONSUMER-CALLS, not existence: a nonzero count means the CONSUMER's"
-          echo "          own item took the call, so tokora's new \`$owner\` item was never a"
-          echo "          candidate this run. This proves the probe compiles, not that a"
-          echo "          collision exists."
-          incon=$((incon + 1))
-          status=2
+          # The consumer's item won the walk. For a PRE-EXISTING owner that is the `ok*` shape
+          # below — agreement, justified in writing by the pick order — and it is the SAME fact
+          # here, stated about one side because a new owner has no second one. It is a claim
+          # about the RECEIVER KINDS these templates declare, not about the name, so it is
+          # justified in the same file and staleness-checked by the same reconciliation.
+          if grep -qxF "$label" "$NOCOLLIDE"; then
+            printf "  new-owner-nc* %-36s base=%-12s head=%s   (earlier pick, justified)\n" \
+              "$label" "$b" "$h"
+            echo "          \`$owner\` is unresolved on base, so no call site predates the name; on"
+            echo "          head the CONSUMER's item claims the call at an EARLIER pick and"
+            echo "          tokora's is never a candidate. No collision is constructed at this"
+            echo "          spelling, and no_collision.txt states the pick order that does it."
+            seen_nocollide="$seen_nocollide $label"
+            newownernc=$((newownernc + 1))
+          else
+            printf "  INCONCL %-42s base=%-12s head=%s\n" "$label" "$b" "$h"
+            echo "          head completed a run and resolved \`$owner\`, but \`$h\` is"
+            echo "          CONSUMER-CALLS, not existence: a nonzero count means the CONSUMER's"
+            echo "          own item took the call, so tokora's new \`$owner\` item was never a"
+            echo "          candidate this run. This proves the probe compiles, not that a"
+            echo "          collision exists. If the receiver kinds make that the only outcome"
+            echo "          this spelling can have, state that pick order in no_collision.txt."
+            incon=$((incon + 1))
+            status=2
+          fi
+          ;;
+        no-compile)
+          if [ -n "$head_rejected" ]; then
+            printf "  new-owner-err %-36s base=%-12s head=%s   (collision rejected)\n" \
+              "$label" "$b" "$h"
+            echo "          rustc cannot resolve \`$owner\` on the base ref, so no consumer call"
+            echo "          site predates the name; on head it names \`$name\` and REFUSES to"
+            echo "          choose between the candidates. The collision is real and reported —"
+            echo "          the disclosed outcome, one side at a time."
+            newownererr=$((newownererr + 1))
+          else
+            printf "  INCONCL %-42s base=%-12s head=%s\n" "$label" "$b" "$h"
+            echo "          the owner \`$owner\` is unresolved on the BASE side and head does not"
+            echo "          repeat that diagnostic — but head failed to build and NO diagnostic"
+            echo "          names \`$name\` ambiguously, so head broke for a reason that is not"
+            echo "          this collision. A broken probe on the side that was supposed to"
+            echo "          prove the owner is new, not a clean result."
+            incon=$((incon + 1))
+            status=2
+          fi
           ;;
         *)
           printf "  INCONCL %-42s base=%-12s head=%s\n" "$label" "$b" "$h"
@@ -629,7 +757,11 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
   fi
 done < "$WORK/plan.tsv"
 
-echo "name-collision: $total probe(s) — $okc justified-no-collision, $loud loud, $silent silent ($newsilent undisclosed), $newowner owner-introduced-here, $incon inconclusive, $unprobed UNPROBED, $fatal FATAL; globs: $globerr rejected, $globok not-rejected"
+# `owner-introduced-here` is the TOTAL of the three shapes a new owner can reach, with the two
+# that are not silent steals named in the parenthetical — the same convention as
+# `silent (N undisclosed)`, where the bracket is a subset and the remainder is the plain case.
+newownerall=$((newowner + newownererr + newownernc))
+echo "name-collision: $total probe(s) — $okc justified-no-collision, $loud loud, $silent silent ($newsilent undisclosed), $newownerall owner-introduced-here ($newownererr rejected, $newownernc earlier-pick), $incon inconclusive, $unprobed UNPROBED, $fatal FATAL; globs: $globerr rejected, $globok not-rejected"
 
 # A baseline entry that no longer reproduces is stale. Left unchecked it becomes a rubber
 # stamp for a probe that stopped running at all — the failure mode of every allowlist.
@@ -710,6 +842,18 @@ elif [ "$newsilent" -eq 0 ] && [ "$unprobed" -eq 0 ]; then
   echo "name-collision:   * a new-owner row says only that no call site could PREDATE the"
   echo "name-collision:     name. A two-sided delta cannot speak about a consumer written"
   echo "name-collision:     after the release, on either side of that line."
+  echo "name-collision:   * new-owner-err says rustc REFUSED this probe's collision, not that"
+  echo "name-collision:     the name cannot be taken silently. The trait spellings declare"
+  echo "name-collision:     \`self\` and \`&self\`, which against a tokora \`&self\` item are the"
+  echo "name-collision:     EARLIER pick and the SAME pick; the \`&mut self\` consumer that"
+  echo "name-collision:     would sit at a LATER one and lose the call quietly is a shape"
+  echo "name-collision:     these templates do not generate. So on such an owner the silent"
+  echo "name-collision:     new-owner verdict is unreachable BY CONSTRUCTION, and a run of"
+  echo "name-collision:     new-owner-err rows is not evidence that no silent shape exists."
+  echo "name-collision:   * new-owner-nc* is a statement about RECEIVER KINDS, not about the"
+  echo "name-collision:     name: the by-value consumer keeps its call. The same names go"
+  echo "name-collision:     loud the moment the consumer writes \`&self\`, which is what the"
+  echo "name-collision:     new-owner-err rows on those same names report."
   echo "name-collision: This is a regression detector, not a proof of absence."
 fi
 exit "$status"
