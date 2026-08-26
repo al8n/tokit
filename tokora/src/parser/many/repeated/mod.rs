@@ -278,10 +278,10 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
       // `many::file_element_failure` says why it belongs here and not out beside `latch`.
       let trips = inp.trip_snapshot();
       match self.f.try_parse_input(inp) {
-        Ok(Accept(item)) => {
-          rh.on_element(num, inp, &anchor)?;
-          push_element(&mut num, &mut full, container, item, inp, &anchor)?;
-        }
+        // One admission, and it settles this element's count bound before the destination is
+        // offered the element — see `many::admit_element` for why that order is the function's
+        // rather than this loop's.
+        Ok(Accept(item)) => admit_element(rh, &mut num, &mut full, container, item, inp, &anchor)?,
         Ok(Decline) => break trips,
         // File the failure as a diagnostic and keep looping — unless it is one of the three the
         // never-recoverable law forbids spending, in which case re-raise it untouched. The gate is

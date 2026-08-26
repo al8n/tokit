@@ -1,4 +1,4 @@
-use crate::{container::Container as ContainerT, emitter::TooManyEmitter, error::syntax::TooMany};
+use crate::{container::Container as ContainerT, emitter::TooManyEmitter};
 
 use super::*;
 
@@ -31,7 +31,7 @@ where
     L: Lexer<'inp>,
     Ctx: ParseContext<'inp, L, Lang>,
   {
-    let max = self.parser.parser.maximum().get();
+    let maximum = self.parser.parser.maximum();
 
     self
       .attempt(|c| {
@@ -41,14 +41,13 @@ where
         DelimitedBy::<_, Delim>::new(parser.parser.parser_mut()).parse_repeated(
           inp,
           container,
-          |nums, inp, span| {
-            if nums > max {
-              inp
-                .emitter()
-                .emit_too_many(TooMany::of(span.clone(), max + 1, max))?;
-            }
-            Ok(())
-          },
+          &maximum,
+          // The maximum is NOT re-checked here. It is settled at the element that broke it, from
+          // inside `many::admit_element` — a construct exceeds `max` iff some element saw the
+          // pre-element count equal to it, so this end callback would only report a second time.
+          // Reading it here was also what put the destination's refusal ahead of the count bound
+          // in this family and left `Fatal`'s public error depending on the builder (#277).
+          |_, _, _| Ok(()),
         )
       })
       .map(|(_, collected)| collected)

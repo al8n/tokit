@@ -16,7 +16,10 @@
 //!
 //! The failure is produced by `at_most(1)` under a fail-fast emitter: element 1 is accepted,
 //! element 2 trips the count bound and the emitter turns that into `Err` — so the first attempt
-//! has genuinely collected something before it fails, which is the whole premise.
+//! has genuinely collected something before it fails, which is the whole premise. The trip lands
+//! at element 2 in every family now (`many::admit_element`), so every failing attempt stops with
+//! its construct still open; `$step_over` is what walks the second attempt past the token the
+//! first one left.
 //!
 //! The panic row is the one that separates "move the storage out **before** the attempt" from
 //! "take it out afterwards on both arms": only the first survives an unwind.
@@ -104,9 +107,10 @@ macro_rules! reuse {
             ": the first attempt must fail after collecting"
           )
         );
-        // The separated families detect a violated maximum at the end of the list, so the
-        // failing attempt stops on the token that ended it; step over that one token so the
-        // second attempt has a list of its own to parse.
+        // Every driver now detects a violated maximum at the element that broke it, so a failing
+        // attempt stops *inside* its construct rather than after it: the separated families stop
+        // on the token that ended the list, and the delimited ones stop before their closer. Step
+        // over that one token so the second attempt has a construct of its own to parse.
         if $step_over {
           inp.next()?;
         }
@@ -144,18 +148,18 @@ reuse!(separated_while, Vec<i64>, "1,2;3+", true, vec![3], c =>
 
 // ── The delimited forms of all four ───────────────────────────────────────────
 
-reuse!(delim_repeated, Vec<i64>, "[1 2][3]", false, vec![3], c =>
+reuse!(delim_repeated, Vec<i64>, "[1 2][3]", true, vec![3], c =>
   try_num.repeated().at_most(1).delimited::<Bracket<(), (), ()>>().collect());
 
-reuse!(delim_repeated_while, Vec<i64>, "[1 2][3]", false, vec![3], c =>
+reuse!(delim_repeated_while, Vec<i64>, "[1 2][3]", true, vec![3], c =>
   parse_num.repeated_while::<_, U1>(decide_num).at_most(1)
     .delimited::<Bracket<(), (), ()>>().collect());
 
-reuse!(delim_separated, Vec<i64>, "[1,2][3]", false, vec![3], c =>
+reuse!(delim_separated, Vec<i64>, "[1,2][3]", true, vec![3], c =>
   try_num.separated_by_comma().at_most(1)
     .delimited::<Bracket<(), (), ()>>().collect());
 
-reuse!(delim_separated_while, Vec<i64>, "[1,2][3]", false, vec![3], c =>
+reuse!(delim_separated_while, Vec<i64>, "[1,2][3]", true, vec![3], c =>
   parse_num.separated_by_comma_while::<_, U1>(decide_num).at_most(1)
     .delimited::<Bracket<(), (), ()>>().collect());
 

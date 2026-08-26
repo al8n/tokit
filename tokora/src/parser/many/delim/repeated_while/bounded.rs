@@ -1,7 +1,7 @@
 use crate::{
   container::Container as ContainerT,
   emitter::{TooFewEmitter, TooManyEmitter},
-  error::syntax::{TooFew, TooMany},
+  error::syntax::TooFew,
 };
 
 use super::*;
@@ -36,7 +36,7 @@ where
     L: Lexer<'inp>,
     Ctx: ParseContext<'inp, L, Lang>,
   {
-    let max = self.parser.parser.maximum().get();
+    let limits = self.parser.parser.to_with();
     let min = self.parser.parser.minimum().get();
 
     self
@@ -47,17 +47,14 @@ where
         DelimitedBy::<_, Delim>::new(parser.parser.parser_mut()).parse_repeated(
           inp,
           container,
+          &limits,
+          // The minimum is end-detected and stays here; the maximum is settled at the element that
+          // broke it, from inside `many::admit_element`. See this file's `at_most` sibling.
           |nums, inp, span| {
             if min > nums {
               inp
                 .emitter()
                 .emit_too_few(TooFew::of(span.clone(), nums, min))?;
-            }
-
-            if nums > max {
-              inp
-                .emitter()
-                .emit_too_many(TooMany::of(span.clone(), max + 1, max))?;
             }
             Ok(())
           },

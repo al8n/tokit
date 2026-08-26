@@ -2312,6 +2312,66 @@ and will red until they do.
 
   Also corrected: `increase_both`'s doc claimed it checked limits (it does not) and
   `increase_both_and_check`'s claimed it decreased recursion (it increases both).
+- **An element refused by both its count maximum and its destination reports the maximum first, in
+  every repetition driver** (#277). `at_most(1)` over a capacity-one container and two parsed
+  elements recorded `[TooMany, FullContainer]` under `repeated`/`repeated_while` and
+  `[FullContainer, TooMany]` under the other six builders — and under `Fatal`, which stops at the
+  first diagnostic, the **public parse error changed from `TooMany` to `FullContainer` because the
+  caller picked another builder**. `tests/end_state_parity.rs` states the contrary invariant in one
+  line: the same logical history must produce the same diagnostic vector no matter which builder
+  the user picked.
+
+  **The order was not a free choice between two symmetric candidates.** Three readings pick the
+  same one. *Chronologically*, "this element exceeds the maximum" is settled by the driver's own
+  parsed-element count the moment the element parses, while "the destination refused it" cannot be
+  settled until the driver offers it — strictly later; no history has one element's refusal
+  preceding its own count verdict, so the divergence was a placement accident. *By dependency*, the
+  maximum is decidable without asking anyone, while the refusal is a caller-implemented
+  `Container`'s answer, and the accounting already treats that container as untrusted input rather
+  than a participant. And *by which fact the parse turns on*: a same-element collision can only
+  happen at element `max + 1`, and only if elements `1..=max` were accepted (a destination that
+  refused earlier already spent the construct's one capacity report on that earlier element), so
+  the destination is provably large enough for every element the grammar allows — **enlarging it
+  never clears the parse, while trimming the input to `max` elements clears both**. The maximum is
+  the root; the refusal is a consequence of parsing an element the grammar had already rejected.
+
+  **The repair is one admission, not eight agreements.** `parser::many::push_element` becomes
+  `admit_element`: it takes the collection's cardinality handler, runs that handler's element hook,
+  and *then* offers the element to the destination. All twelve element-admission sites across the
+  eight drivers go through it, so the order is two consecutive lines in one function rather than a
+  convention twelve loop bodies each have to keep. That shape is the point — #259 will rewrite this
+  subtree into shared engines, and an ordering held by convention is one a rewrite inherits by
+  luck. `ELEMENT_ADMISSION_CENSUS` pins it structurally: no driver spells `container.push` or the
+  element hook itself, the admissions are counted per driver, and inside the chokepoint the hook is
+  proven to precede the push. `tests/repetition_diagnostic_order.rs` proves it at runtime over a
+  declared table — all eight builder families crossed with `at_most` and `bounded`, and all nine
+  separator policies including the four nested ones — asserting the `Verbose` vector and the
+  `Fatal` result once over the list rather than once per row. Twenty-one of its twenty-five
+  collision rows were red before this change.
+
+  **The maximum stops being an end-of-construct fact.** `Maximum::check` and
+  `With<Minimum, Maximum>::check` no longer emit, and neither do the four delimited-repeated
+  `on_stop` closures; `emit_too_many` now has exactly two call sites in the crate, both element
+  hooks, and the six sources that lost theirs are still scanned so one cannot come back. Four
+  consequences reach consumers of the six affected builders, all of them the fail-fast properties
+  the capacity report already had:
+
+  - a rejecting emitter now stops **at the element that broke the limit** rather than after the
+    whole construct, so `at_most(1)` over a thousand elements no longer parses all thousand first,
+    and a failed attempt leaves the input inside its construct rather than past it;
+  - a later `Err` exit — a lexer error, a delimiter miss, an element failure — no longer propagates
+    over a `TooMany` that was already witnessed and discards it;
+  - the `TooMany` span now ends at the offending element instead of at the end of the construct
+    (the payload, `limit + 1`, is unchanged, and was already uniform);
+  - where both fire, `TooMany` now precedes a trailing-separator diagnostic and a `TooFew`, which
+    is what the two plain builders already did.
+
+  Cross-element order is untouched: a destination that fills at element 3 while the maximum is
+  first exceeded at element 5 still records `[FullContainer, TooMany]`, under every driver, because
+  those are two elements and the refusal really did happen first. That control history runs beside
+  the collision rows, and it is what separates fixing the collision from flipping the order
+  globally.
+
 
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
 

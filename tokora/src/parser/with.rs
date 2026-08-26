@@ -2,8 +2,8 @@
 // three `check` helpers are called only by its drivers. `With` itself is substrate.
 #[cfg(feature = "many")]
 use crate::{
-  emitter::{SeparatedEmitter, TooFewEmitter, TooManyEmitter},
-  error::syntax::{TooFew, TooMany},
+  emitter::{SeparatedEmitter, TooFewEmitter},
+  error::syntax::TooFew,
   input::Cursor,
 };
 
@@ -92,6 +92,12 @@ impl<P, S, Cmpl> With<P, S, Cmpl> {
 
 #[cfg(feature = "many")]
 impl With<Minimum, Maximum> {
+  /// The end-of-construct half of a `bounded` collection: the **minimum only**.
+  ///
+  /// The maximum is not re-checked here. It is settled at the element that broke it, inside
+  /// `parser::many::admit_element`, which runs the count verdict before offering the element to
+  /// the destination — see [`Maximum::check`] for the whole argument and
+  /// `parser::many`'s `ELEMENT_ADMISSION_CENSUS` for what keeps it true.
   #[inline(always)]
   pub(crate) fn check<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>(
     &self,
@@ -102,24 +108,16 @@ impl With<Minimum, Maximum> {
   where
     L: Lexer<'inp>,
     Ctx: ParseContext<'inp, L, Lang>,
-    Ctx::Emitter: SeparatedEmitter<'inp, L, Lang>
-      + TooFewEmitter<'inp, L, Lang>
-      + TooManyEmitter<'inp, L, Lang>,
+    Ctx::Emitter: SeparatedEmitter<'inp, L, Lang> + TooFewEmitter<'inp, L, Lang>,
   {
     let full_span = inp.span_since(anchor);
     let minimum = self.primary().get();
-    let maximum = self.secondary().get();
     if num_elems < minimum {
       inp
         .emitter()
         .emit_too_few(TooFew::of(full_span.clone(), num_elems, minimum))?;
     }
 
-    if num_elems > maximum {
-      inp
-        .emitter()
-        .emit_too_many(TooMany::of(full_span.clone(), maximum + 1, maximum))?;
-    }
     Ok(full_span)
   }
 }
@@ -151,25 +149,45 @@ impl Minimum {
 
 #[cfg(feature = "many")]
 impl Maximum {
+  /// The end-of-construct pass for an `at_most` collection: **nothing but the construct's span**.
+  ///
+  /// # Why a maximum is not an end-of-construct fact
+  ///
+  /// It used to be checked here, and that is where the separated drivers got the wrong answer to
+  /// [#277](https://github.com/al8n/tokora/issues/277). A maximum is decided by the driver's own
+  /// parsed-element count, so it is settled the moment the offending element parses — one whole
+  /// construct before this pass runs. Reading it here cost three things:
+  ///
+  /// * an element that both exceeded the maximum and was refused by the destination reported the
+  ///   **refusal first**, because the destination is offered the element mid-loop while this pass
+  ///   waits for the end. Under [`Fatal`](crate::emitter::Fatal) that made the public error depend
+  ///   on which repetition builder the caller picked, which
+  ///   `tokora/tests/end_state_parity.rs`'s INVARIANT E forbids in one sentence;
+  /// * a rejecting emitter did not stop at the element that broke the limit, so `at_most(1)` over
+  ///   a thousand elements parsed all thousand before saying so;
+  /// * any later `Err` exit — a lexer error, a delimiter miss, an element failure — propagated
+  ///   past a violation that had already been witnessed and never reported it.
+  ///
+  /// So the check moved to [`ElementCountHandler::on_element`](crate::parser::many), which
+  /// `parser::many::admit_element` runs immediately before the push. It fires exactly once per
+  /// construct — a construct exceeds `max` iff some element saw the pre-element count equal to it
+  /// — so nothing is lost by this pass staying silent, and `ELEMENT_ADMISSION_CENSUS` fails if a
+  /// second `TooMany` site appears anywhere in the tree.
+  ///
+  /// The function stays because eighteen `EndStateHandler` impls call it and because this is the
+  /// one place a reader looking for the maximum's end check will look.
   #[inline(always)]
   pub(crate) fn check<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>(
     &self,
     inp: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
     anchor: &Cursor<'inp, 'closure, L>,
-    num_elems: usize,
+    _num_elems: usize,
   ) -> Result<L::Span, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
     L: Lexer<'inp>,
     Ctx: ParseContext<'inp, L, Lang>,
-    Ctx::Emitter: SeparatedEmitter<'inp, L, Lang> + TooManyEmitter<'inp, L, Lang>,
+    Ctx::Emitter: SeparatedEmitter<'inp, L, Lang>,
   {
-    let full_span = inp.span_since(anchor);
-    let maximum = self.get();
-    if num_elems > maximum {
-      inp
-        .emitter()
-        .emit_too_many(TooMany::of(full_span.clone(), maximum + 1, maximum))?;
-    }
-    Ok(full_span)
+    Ok(inp.span_since(anchor))
   }
 }

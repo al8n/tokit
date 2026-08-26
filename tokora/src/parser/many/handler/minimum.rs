@@ -134,13 +134,14 @@ where
   }
 }
 
-impl<'inp, 'closure, O, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>
-  RepeatedHandler<'inp, 'closure, O, L, Ctx, Lang, Cmpl> for Minimum
+impl<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>
+  ElementCountHandler<'inp, 'closure, L, Ctx, Lang, Cmpl> for Minimum
 where
   L: Lexer<'inp>,
   Ctx: ParseContext<'inp, L, Lang>,
-  Ctx::Emitter: TooFewEmitter<'inp, L, Lang>,
 {
+  // A minimum is an end-of-construct fact — no element in the middle of a construct can settle
+  // it — so the element hook is a no-op here and `on_stop` below carries the whole check.
   #[inline(always)]
   fn on_element(
     &self,
@@ -154,7 +155,15 @@ where
   {
     Ok(())
   }
+}
 
+impl<'inp, 'closure, O, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>
+  RepeatedHandler<'inp, 'closure, O, L, Ctx, Lang, Cmpl> for Minimum
+where
+  L: Lexer<'inp>,
+  Ctx: ParseContext<'inp, L, Lang>,
+  Ctx::Emitter: TooFewEmitter<'inp, L, Lang>,
+{
   #[inline(always)]
   fn on_stop(
     &self,

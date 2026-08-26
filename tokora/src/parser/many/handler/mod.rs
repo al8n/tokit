@@ -564,7 +564,7 @@ pub(super) trait ContinueStateHandler<
   Ctx,
   Lang: ?Sized,
   Cmpl: crate::input::Completeness = crate::input::Complete,
->
+>: ElementCountHandler<'inp, 'closure, L, Ctx, Lang, Cmpl>
 {
   fn handle_start_state(
     &self,
@@ -597,10 +597,36 @@ pub(super) trait SeparatorStateHandler<
     Ctx: ParseContext<'inp, L, Lang>;
 }
 
-pub(super) trait RepeatedHandler<
+/// The count-bound verdict on **one parsed element**, run before that element is offered to the
+/// destination.
+///
+/// # Why this is its own trait, and why it names no `Sep` or `O`
+///
+/// It is the half of a cardinality handler that [`admit_element`](super::admit_element) needs, and
+/// `admit_element` is reached from every repetition driver — the two plain ones through
+/// [`RepeatedHandler`], the four separated ones through [`ContinueStateHandler`], and the two
+/// delimited-repeated engines through neither, since those carry their end pass in a closure. One
+/// trait naming only what the hook itself uses is what lets all three routes hand the same value
+/// to the same chokepoint.
+///
+/// It is a **supertrait** of the other two rather than a fourth handler threaded beside them, so a
+/// driver already generic over `RepeatedHandler` or `ContinueStateHandler` gains the hook without a
+/// new where-clause and no `ParseInput` impl in `many/macros.rs` changes.
+///
+/// # The law it exists to keep
+///
+/// A construct exceeds its maximum **iff** some element saw the pre-element count equal to it, so
+/// reporting at that element reports the violation exactly once — and reports it *before* the
+/// element reaches the container, which is what fixes the order of the two refusals one element
+/// can collect. [`admit_element`](super::admit_element) carries the argument;
+/// `tokora/tests/repetition_diagnostic_order.rs` is the runtime pin and `ELEMENT_ADMISSION_CENSUS`
+/// the structural one.
+// `pub(in crate::parser)` rather than the `pub(super)` its two subtraits carry: it appears in
+// `many::admit_element`'s signature, which the drivers reach at that visibility, and a supertrait
+// narrower than the function naming it is a `private_interfaces` error.
+pub(in crate::parser) trait ElementCountHandler<
   'inp,
   'closure,
-  O,
   L,
   Ctx,
   Lang: ?Sized,
@@ -616,7 +642,52 @@ pub(super) trait RepeatedHandler<
   where
     L: Lexer<'inp>,
     Ctx: ParseContext<'inp, L, Lang>;
+}
 
+/// Forwards the element hook through a separator-policy wrapper.
+///
+/// The policy newtypes nest — `AllowSurrounded` *is* `AllowLeading<AllowTrailing<_>>`, and the two
+/// combined policies are the same shape — so four blanket forwards cover all thirty-two
+/// policy-by-cardinality end-state handlers. Written per handler file instead, thirty-two of them
+/// would each be a place to forget the hook; here a wrapper that does not forward does not compile.
+macro_rules! forward_element_count {
+  ($($policy:ident),* $(,)?) => {$(
+    impl<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness, P>
+      ElementCountHandler<'inp, 'closure, L, Ctx, Lang, Cmpl> for crate::parser::$policy<P>
+    where
+      L: Lexer<'inp>,
+      Ctx: ParseContext<'inp, L, Lang>,
+      P: ElementCountHandler<'inp, 'closure, L, Ctx, Lang, Cmpl>,
+    {
+      #[inline(always)]
+      fn on_element(
+        &self,
+        num_elems: usize,
+        inp: &mut InputRef<'inp, 'closure, L, Ctx, Lang, Cmpl>,
+        anchor: &Cursor<'inp, 'closure, L>,
+      ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+      where
+        L: Lexer<'inp>,
+        Ctx: ParseContext<'inp, L, Lang>,
+      {
+        self.parser.on_element(num_elems, inp, anchor)
+      }
+    }
+  )*};
+}
+
+forward_element_count!(AllowLeading, AllowTrailing, RequireLeading, RequireTrailing);
+
+pub(super) trait RepeatedHandler<
+  'inp,
+  'closure,
+  O,
+  L,
+  Ctx,
+  Lang: ?Sized,
+  Cmpl: crate::input::Completeness = crate::input::Complete,
+>: ElementCountHandler<'inp, 'closure, L, Ctx, Lang, Cmpl>
+{
   fn on_stop(
     &self,
     num_elems: usize,

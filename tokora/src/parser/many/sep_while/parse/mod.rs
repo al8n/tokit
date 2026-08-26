@@ -253,19 +253,24 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
     Container: ContainerT<O> + SeparatorHandler<'inp, L>,
     Handler: ContinueStateHandler<'inp, 'closure, Sep, O, L, Ctx, Lang>,
   {
+    // Every arm below admits the element through `many::admit_element`, which settles the count
+    // bound before the destination is offered the element. The call sits INSIDE each arm rather
+    // than ahead of the match for two reasons: the element does not exist yet at the top (this
+    // family parses it per arm), and a diagnostic about the *separator slot* preceding it must
+    // still be reported first, since that fact became true earlier in the input.
     match state {
       // happy path, we found a separator before an element
       State::Separator(_) => {
         // parse the next element
         let element = self.f.parse_input(inp)?;
-        push_element(num_elems, full, container, element, inp, anchor)?;
+        admit_element(handler, num_elems, full, container, element, inp, anchor)?;
         state = State::Element;
       }
       // we are in leading state,
       State::Leading(_) => {
         // parse the first element
         let element = self.f.parse_input(inp)?;
-        push_element(num_elems, full, container, element, inp, anchor)?;
+        admit_element(handler, num_elems, full, container, element, inp, anchor)?;
         state = State::Element;
       }
       // nothing before element, parse the first element
@@ -275,7 +280,7 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
 
         // parse the first element
         let element = self.f.parse_input(inp)?;
-        push_element(num_elems, full, container, element, inp, anchor)?;
+        admit_element(handler, num_elems, full, container, element, inp, anchor)?;
         state = State::Element;
       }
       // we are in element state, so the next token should be a separator,
@@ -289,7 +294,7 @@ impl<'c, 'inp, F, Sep, Condition, O, W, L, Ctx, Lang: ?Sized>
 
         // parse the next element
         let element = self.f.parse_input(inp)?;
-        push_element(num_elems, full, container, element, inp, anchor)?;
+        admit_element(handler, num_elems, full, container, element, inp, anchor)?;
         state = State::Element;
       }
     }

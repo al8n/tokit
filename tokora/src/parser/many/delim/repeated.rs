@@ -17,10 +17,16 @@ mod unbounded;
 impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
   DelimitedBy<&mut Repeated<P, O, L, Ctx, Lang, Cmpl>, Delim>
 {
-  fn parse_repeated<Container>(
+  fn parse_repeated<'c, Container, EC>(
     &mut self,
-    inp: &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
+    inp: &mut InputRef<'inp, 'c, L, Ctx, Lang, Cmpl>,
     container: &mut Container,
+    // The element's count verdict. This engine has no mid-loop hook of its own — the maximum used
+    // to be read from `on_stop` below, one whole construct after the element that broke it — so
+    // the cardinality wrapper hands it down here and `many::admit_element` runs it in front of the
+    // push. See that function for why the order is a property of the admission and not of a
+    // convention this file could keep on its own.
+    counts: &EC,
     on_stop: impl FnOnce(
       usize,
       &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
@@ -39,6 +45,7 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     Ctx::Emitter: FullContainerEmitter<'inp, L, Lang> + UnclosedEmitter<'inp, L, Lang>,
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
     Container: ContainerT<O> + DelimiterHandler<'inp, L>,
+    EC: ElementCountHandler<'inp, 'c, L, Ctx, Lang, Cmpl>,
   {
     // Sync the input to the next token boundary, any lexer errors will be emitted during this process.
     let anchor = inp.cursor().clone();
@@ -135,7 +142,9 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
         // witnesses and for why `trips` is taken per ELEMENT rather than per collection.
         Err(err) => file_element_failure(inp, err, &elem_cur, scans, trips)?,
         // TODO(al8n): tracing dropped element
-        Ok(Accept(nxt)) => push_element(&mut nums, &mut full, container, nxt, inp, &anchor)?,
+        Ok(Accept(nxt)) => {
+          admit_element(counts, &mut nums, &mut full, container, nxt, inp, &anchor)?
+        }
         // no more elemnts.
         Ok(Decline) => {
           // Classify the close position with the four-way probe so a terminal scanner

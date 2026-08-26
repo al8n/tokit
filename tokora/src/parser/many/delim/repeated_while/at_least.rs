@@ -36,7 +36,8 @@ where
     L: Lexer<'inp>,
     Ctx: ParseContext<'inp, L, Lang>,
   {
-    let min = self.parser.parser.minimum().get();
+    let minimum = self.parser.parser.minimum();
+    let min = minimum.get();
 
     self
       .attempt(|c| {
@@ -46,6 +47,10 @@ where
         DelimitedBy::<_, Delim>::new(parser.parser.parser_mut()).parse_repeated(
           inp,
           container,
+          // A minimum is an end-of-construct fact, so this hook is a no-op and the check below
+          // carries it. The handler is threaded anyway: `many::admit_element` takes the
+          // cardinality this collection actually has, not a stand-in for it.
+          &minimum,
           |nums, inp, span| {
             if min > nums {
               inp

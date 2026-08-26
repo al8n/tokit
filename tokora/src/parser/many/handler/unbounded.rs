@@ -129,8 +129,8 @@ where
   }
 }
 
-impl<'inp, 'closure, O, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>
-  RepeatedHandler<'inp, 'closure, O, L, Ctx, Lang, Cmpl> for Unbounded
+impl<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>
+  ElementCountHandler<'inp, 'closure, L, Ctx, Lang, Cmpl> for Unbounded
 where
   L: Lexer<'inp>,
   Ctx: ParseContext<'inp, L, Lang>,
@@ -148,7 +148,14 @@ where
   {
     Ok(())
   }
+}
 
+impl<'inp, 'closure, O, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>
+  RepeatedHandler<'inp, 'closure, O, L, Ctx, Lang, Cmpl> for Unbounded
+where
+  L: Lexer<'inp>,
+  Ctx: ParseContext<'inp, L, Lang>,
+{
   #[inline(always)]
   fn on_stop(
     &self,

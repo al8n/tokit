@@ -133,8 +133,8 @@ where
   }
 }
 
-impl<'inp, 'closure, O, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>
-  RepeatedHandler<'inp, 'closure, O, L, Ctx, Lang, Cmpl> for Maximum
+impl<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>
+  ElementCountHandler<'inp, 'closure, L, Ctx, Lang, Cmpl> for Maximum
 where
   L: Lexer<'inp>,
   Ctx: ParseContext<'inp, L, Lang>,
@@ -166,7 +166,15 @@ where
 
     Ok(())
   }
+}
 
+impl<'inp, 'closure, O, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>
+  RepeatedHandler<'inp, 'closure, O, L, Ctx, Lang, Cmpl> for Maximum
+where
+  L: Lexer<'inp>,
+  Ctx: ParseContext<'inp, L, Lang>,
+  Ctx::Emitter: TooManyEmitter<'inp, L, Lang>,
+{
   #[inline(always)]
   fn on_stop(
     &self,
@@ -178,10 +186,10 @@ where
     L: Lexer<'inp>,
     Ctx: ParseContext<'inp, L, Lang>,
   {
-    // No max check here: every `RepeatedHandler` consumer calls `on_element` for EVERY element
-    // (pinned by `MID_LOOP_PAIRING_CENSUS`), and a construct exceeds `max` iff some element saw
-    // `nums == max`, so the mid-loop hook has already reported it exactly once. Delegating here
-    // was the duplicate.
+    // No max check here: every element is admitted through `many::admit_element`, which runs
+    // `on_element` above in front of the push (pinned by `ELEMENT_ADMISSION_CENSUS`), and a
+    // construct exceeds `max` iff some element saw `nums == max`. The hook has therefore already
+    // reported it exactly once by the time any end pass runs; delegating here was the duplicate.
     Ok(inp.span_since(anchor))
   }
 }
