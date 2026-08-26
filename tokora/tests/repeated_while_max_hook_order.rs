@@ -19,37 +19,38 @@
 //!
 //! # Driver enumeration
 //!
-//! `RepeatedHandler::on_element` (the hook with the defect) is consumed by exactly two sources,
-//! pinned by `many/mod.rs`'s `MID_LOOP_PAIRING_CENSUS`: `many/repeated/mod.rs` (already correct —
-//! parses first, since `try_parse_input`'s `Ok(Accept(item))` arm only matches a completed parse)
-//! and `many/repeated_while/mod.rs` (the defect fixed here). No other driver calls
-//! `RepeatedHandler::on_element` at all:
+//! Every repetition driver now admits an element through `many::admit_element`, which runs the
+//! count handler's `on_element` hook and *then* offers the element to the destination. So the
+//! hook's placement is one function's, not each driver's, and there are exactly twelve admission
+//! sites across the eight collection drivers — `many/mod.rs`'s `ELEMENT_ADMISSION_CENSUS` counts
+//! them and pins that no driver spells `on_element` or `container.push` itself.
 //!
-//! - The delimited wrappers (`many/delim/repeated.rs`, `many/delim/repeated_while.rs`) have no
-//!   mid-loop maximum hook whatsoever — their `on_stop` closures (`delim/repeated{,_while}/{at_most,
-//!   bounded}.rs`) check `nums > max` exactly once, from the `FnOnce` closure invoked only at the
-//!   driver's genuine end states (a found closer, a `Stop` decision with no closer, or the
-//!   no-progress stall's close probe). A failed element parse propagates its `Err` immediately
-//!   through `?` and never reaches that closure, so no premature `TooMany` is possible. This file's
-//!   `delimited_at_most_boundary_continue_then_element_error_records_no_too_many` test exercises
-//!   this directly.
-//! - The separated drivers (`many/sep/parse/mod.rs`, `many/sep/delim/mod.rs`,
-//!   `many/sep_while/parse/mod.rs`, `many/sep_while/delim/mod.rs`) enforce the maximum through
-//!   `EndStateHandler` (`Maximum`/`Bounded`'s `handle_*_state`, which delegate to `Maximum::check`
-//!   / `With<Minimum, Maximum>::check` in `parser/with.rs`), invoked only via each driver's
-//!   `handle_end`/`parser.handle_end`, and only from genuine end states — never speculatively ahead
-//!   of an unattempted element. `ContinueStateHandler::handle_start_state` (called before the
-//!   element parse in `sep_while`'s `State::Start` arm) is a hard-coded no-op for both `Maximum`
-//!   and `Bounded`, so even though its *call site* sits ahead of the parse, it can never emit
-//!   `TooMany`; the maximum enforcement lives entirely in the end-state check.
-//! - The `fold` family has no maximum/bounds concept at all (no `TooMany`, no `RepeatedHandler`,
-//!   no `EndStateHandler`), so it is not applicable.
+//! That is what makes the defect fixed here unrepeatable rather than merely fixed: the hook can
+//! no longer run for an element that was not parsed, because the only thing that runs it is the
+//! admission of a parsed element. In this file's terms —
 //!
-//! An exhaustive `grep` for every `emit_too_many(TooMany::of(` call site in the crate turns up
-//! exactly the eight sites `many/mod.rs`'s own `every_too_many_payload_exceeds_its_limit` census
-//! names: the two end checks in `with.rs`, the two mid-loop `on_element` hooks (`maximum.rs`,
-//! `bounded.rs`), and the four delimited `on_stop` closures — confirming there is no ninth,
-//! unaccounted-for site.
+//! - `many/repeated/mod.rs` reaches the admission from `try_parse_input`'s `Ok(Accept(item))`
+//!   arm, which only matches a completed parse;
+//! - `many/repeated_while/mod.rs` reaches it after `self.f.parse_input(inp)?`, which is the fix
+//!   this file covers;
+//! - the two delimited-repeated engines reach it from the same two shapes, and their cardinality
+//!   wrappers hand the count handler down instead of re-checking `nums > max` from an end
+//!   closure (that end check is what made this family's diagnostic order differ, #277). A failed
+//!   element parse propagates its `Err` through `?` and never reaches the admission, so no
+//!   premature `TooMany` is possible. This file's
+//!   `delimited_at_most_boundary_continue_then_element_error_records_no_too_many` exercises that
+//!   directly;
+//! - the four separated drivers reach it from the two `handle_continue` bodies, in every state
+//!   arm, always after the element exists. `ContinueStateHandler::handle_start_state` (called
+//!   before the element parse in `sep_while`'s `State::Start` arm) is a hard-coded no-op for
+//!   every cardinality, so even though its *call site* sits ahead of the parse it can never emit;
+//! - the `fold` family has no cardinality concept at all (no `TooMany`, no container), so it is
+//!   not applicable.
+//!
+//! `emit_too_many(TooMany::of(` now has exactly **two** call sites in the crate, both
+//! `ElementCountHandler::on_element` (`handler/maximum.rs`, `handler/bounded.rs`);
+//! `every_too_many_payload_exceeds_its_limit` pins that count and scans the six sources that used
+//! to hold the others to prove none came back.
 
 mod common;
 
@@ -416,10 +417,12 @@ fn bounded_genuine_overflow_still_reports_too_many_once() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Sibling confirmation — the delimited `repeated_while` named alongside the defect. It has no
-// mid-loop maximum hook at all (its `on_stop` closure runs only at a genuine end state), so this
-// is not a RED/GREEN pair: it must already pass, both before and after the fix, and stays here as
-// executable proof rather than a claim resting on code reading alone.
+// Sibling confirmation — the delimited `repeated_while` named alongside the defect. Its maximum
+// is reached only through `many::admit_element`, which an element that failed to parse never
+// reaches, so this is not a RED/GREEN pair: it must pass before the fix and after it, and stays
+// here as executable proof rather than a claim resting on code reading alone. (It held for a
+// different reason before #277 — the family had no per-element hook at all and checked `nums >
+// max` from an end closure — so the row is load-bearing across both designs.)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
@@ -447,7 +450,8 @@ fn delimited_at_most_boundary_continue_then_element_error_records_no_too_many() 
       .collect();
     assert!(
       !recorded.iter().any(|d| matches!(d, Diag::TooMany(..))),
-      "the delimited driver has no mid-loop hook to misfire; unexpected TooMany: {recorded:?}"
+      "an element that never parsed is never admitted, so its count verdict never runs; \
+       unexpected TooMany: {recorded:?}"
     );
     Ok(())
   }

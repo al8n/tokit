@@ -71,12 +71,13 @@ impl<S, Lang: ?Sized> TooMany<S, Lang> {
   /// Returns the number of elements found: the **first count that exceeds
   /// [`limit()`](Self::limit)**, i.e. `limit() + 1`.
   ///
-  /// It is not the construct's final element count. Every driver detects the violation at its
-  /// own point — some mid-loop, some at the end — so `limit() + 1` is the only value all of
-  /// them can report, and it is what makes one input history yield one diagnostic whichever
-  /// builder produced it. Under a fail-fast emitter the true final count is unknowable in
-  /// principle, since the parse aborts at the first violation; the construct's own output and
-  /// returned span carry it when it is wanted.
+  /// It is not the construct's final element count. Every driver detects the violation at the
+  /// same point — the element that first pushes the count past the limit, reported from the
+  /// element-count hook `parser::many`'s admission runs — so `limit() + 1` is the value all of
+  /// them report, and it is what makes one input history yield one diagnostic whichever builder
+  /// produced it. Under a fail-fast emitter the true final count is unknowable in principle,
+  /// since the parse aborts at the first violation; the construct's own output and returned span
+  /// carry it when it is wanted.
   #[inline]
   pub const fn nums(&self) -> usize {
     self.nums

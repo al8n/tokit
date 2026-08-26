@@ -15,10 +15,14 @@ mod unbounded;
 impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
   DelimitedBy<&mut RepeatedWhile<P, Condition, O, W, L, Ctx, Lang>, Delim>
 {
-  fn parse_repeated<Container>(
+  fn parse_repeated<'c, Container, EC>(
     &mut self,
-    inp: &mut InputRef<'inp, '_, L, Ctx, Lang>,
+    inp: &mut InputRef<'inp, 'c, L, Ctx, Lang>,
     container: &mut Container,
+    // The element's count verdict — see `delim/repeated.rs`'s twin of this parameter, and
+    // `many::admit_element` for why the maximum is settled at the element rather than from
+    // `on_stop` below.
+    counts: &EC,
     on_stop: impl FnOnce(
       usize,
       &mut InputRef<'inp, '_, L, Ctx, Lang>,
@@ -37,6 +41,7 @@ impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
     Ctx::Emitter: FullContainerEmitter<'inp, L, Lang> + UnclosedEmitter<'inp, L, Lang>,
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
     Container: ContainerT<O> + DelimiterHandler<'inp, L>,
+    EC: ElementCountHandler<'inp, 'c, L, Ctx, Lang>,
   {
     // Sync the input to the next token boundary, any lexer errors will be emitted during this process.
     let anchor = inp.cursor().clone();
@@ -224,7 +229,7 @@ impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
             Action::Continue => {
               // TODO(al8n): tracing dropped element
               let item = self.parser.f.parse_input(inp)?;
-              push_element(&mut nums, &mut full, container, item, inp, &anchor)?;
+              admit_element(counts, &mut nums, &mut full, container, item, inp, &anchor)?;
             }
           }
         }

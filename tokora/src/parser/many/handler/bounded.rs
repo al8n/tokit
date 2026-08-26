@@ -140,12 +140,12 @@ where
   }
 }
 
-impl<'inp, 'closure, O, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>
-  RepeatedHandler<'inp, 'closure, O, L, Ctx, Lang, Cmpl> for With<Minimum, Maximum>
+impl<'inp, 'closure, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>
+  ElementCountHandler<'inp, 'closure, L, Ctx, Lang, Cmpl> for With<Minimum, Maximum>
 where
   L: Lexer<'inp>,
   Ctx: ParseContext<'inp, L, Lang>,
-  Ctx::Emitter: TooManyEmitter<'inp, L, Lang> + TooFewEmitter<'inp, L, Lang>,
+  Ctx::Emitter: TooManyEmitter<'inp, L, Lang>,
 {
   #[inline(always)]
   fn on_element(
@@ -170,7 +170,15 @@ where
     }
     Ok(())
   }
+}
 
+impl<'inp, 'closure, O, L, Ctx, Lang: ?Sized, Cmpl: crate::input::Completeness>
+  RepeatedHandler<'inp, 'closure, O, L, Ctx, Lang, Cmpl> for With<Minimum, Maximum>
+where
+  L: Lexer<'inp>,
+  Ctx: ParseContext<'inp, L, Lang>,
+  Ctx::Emitter: TooManyEmitter<'inp, L, Lang> + TooFewEmitter<'inp, L, Lang>,
+{
   #[inline(always)]
   fn on_stop(
     &self,
@@ -190,7 +198,8 @@ where
     }
 
     // The minimum is end-detected and stays here; the maximum is not re-checked, because the
-    // mid-loop `on_element` hook has already reported it exactly once.
+    // `on_element` hook above — run by `many::admit_element`, in front of the push — has already
+    // reported it exactly once.
     Ok(inp.span_since(anchor))
   }
 }

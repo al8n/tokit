@@ -181,11 +181,14 @@ mod options;
 mod sep;
 mod sep_while;
 
-/// Pushes one parsed element and reports a refused push exactly once per construct, **at the
-/// refusal**.
+/// Admits one parsed element: settles its **count bound**, then offers it to the destination and
+/// reports a refused push exactly once per construct, **at the refusal**.
 ///
 /// The single chokepoint for both container-accounting laws; it replaced twelve separate
-/// emission sites that had grown three different conventions between them.
+/// emission sites that had grown three different conventions between them. The count verdict was
+/// folded in afterwards, for the reason under "Why the maximum is settled HERE" below — the two
+/// steps are one function because their **order** is the property, and an order kept by a
+/// convention at N call sites is a property that a rewrite of those sites does not inherit.
 ///
 /// # Every number here is the driver's own
 ///
@@ -228,18 +231,14 @@ mod sep_while;
 ///
 /// `TooMany` and `TooFew` say the *input* disagrees with the grammar. `FullContainer` says the
 /// *caller's destination* was too small for an input that may be perfectly well formed. Those
-/// are not peers, and it is tempting to make the second one land after the first: the eight
-/// drivers detect a violated maximum at three different moments — mid-loop in the two plain
-/// families, from an end callback in the four delimited ones, from the end-state pass in the
-/// four separated ones — so an element that both passes `at_most` and fills the destination
-/// produces `[TooMany, FullContainer]` under two builders and `[FullContainer, TooMany]` under
-/// the other six.
+/// are not peers, and it is tempting to make the second one land after the first, from each
+/// driver's end pass.
 ///
-/// **Withholding the report until the construct's end is what buys that order, and it is not
-/// payable.** In this driver the emitter is not a log — it is the thing that decides whether the
-/// parse continues. `Ok(())` means *recovered, keep going*; `Err` means *stop now*. So moving
-/// **when** a diagnostic is emitted moves **when** the parse stops, and a report withheld to the
-/// end costs three things at once:
+/// **Withholding the report until the construct's end is what buys that, and it is not payable.**
+/// In this driver the emitter is not a log — it is the thing that decides whether the parse
+/// continues. `Ok(())` means *recovered, keep going*; `Err` means *stop now*. So moving **when** a
+/// diagnostic is emitted moves **when** the parse stops, and a report withheld to the end costs
+/// three things at once:
 ///
 /// * a rejecting emitter — [`Fatal`](crate::emitter::Fatal), documented to stop at the first
 ///   error — does not stop at the refusal, because nothing has asked it yet;
@@ -260,17 +259,69 @@ mod sep_while;
 /// `Emitter`'s policy"). The only signal is the `Result` this call returns, and reading it means
 /// having made the call.
 ///
-/// So the rule is applied in the direction that fails safe. Emitting at the refusal costs a
-/// **recovering** emitter one thing — a capacity report that lands before a count bound in six of
-/// the eight drivers, in the one history where both fire — and costs a **rejecting** emitter
-/// nothing. Withholding it costs a rejecting emitter its documented contract, a witnessed
-/// diagnostic and a bounded amount of work. The ordering is therefore not achievable for the
-/// fail-fast class, and is not taken from it to give to the other one.
+/// So the capacity report stays at the refusal, and `capacity_report_timing.rs` holds the three
+/// cells that were red while it did not.
 ///
-/// The latch is read only on the refusal arm, so the success path is exactly the pre-existing
-/// `push` plus the increment.
+/// # Why the maximum is settled HERE, one line earlier
+///
+/// Fixing the capacity report at the refusal leaves the *relative* order of the two refusals one
+/// element can collect still to be decided, and for a while each driver decided it differently:
+/// the maximum was detected mid-loop in the two plain families, from an end callback in the four
+/// delimited ones, and from the end-state pass in the four separated ones. So `at_most(1)` with a
+/// capacity-one destination and two parsed elements recorded `[TooMany, FullContainer]` under two
+/// builders and `[FullContainer, TooMany]` under the other six — and under `Fatal`, which stops at
+/// the first diagnostic, the **public error changed with the builder** (#277). `end_state_parity`
+/// states the contrary invariant in one line: the same logical history must produce the same
+/// diagnostic vector no matter which builder the user picked.
+///
+/// The two candidate orders are not symmetric, and three independent readings pick the same one:
+///
+/// * **Chronology.** "This element exceeds the maximum" is settled by the driver's own
+///   parsed-element count the moment the element parses. "The destination refused it" cannot be
+///   settled until the driver *offers* it, which is strictly later. There is no history in which
+///   one element's refusal precedes its own count verdict, so the divergence was a placement
+///   accident rather than a genuine tie.
+/// * **Dependency.** The maximum is decidable without asking anyone. The refusal is a
+///   caller-implemented [`Container`](crate::container::Container)'s answer, and the section
+///   above holds that container to be untrusted input to this accounting rather than a
+///   participant in it. Reporting the untrusted party's verdict first inverts that exactly where
+///   it is most visible.
+/// * **Which fact the parse turns on.** A same-element collision can only happen at element
+///   `max + 1`, and only if elements `1..=max` were *accepted* — a destination that refused
+///   earlier already spent this construct's one capacity report on that earlier element. So the
+///   destination is provably large enough for every element the grammar allows: **enlarging it
+///   never clears the parse**, while **trimming the input to `max` elements clears both**. The
+///   maximum is the root and the refusal is a consequence of parsing an element the grammar had
+///   already rejected.
+///
+/// Hence the count handler runs first, from inside this function rather than beside its call. The
+/// hook is [`ElementCountHandler::on_element`], whose contract is that a construct exceeds its
+/// maximum **iff** some element saw the pre-element count equal to it — so a maximum reported here
+/// is reported exactly once, and the end passes stop re-checking it
+/// ([`Maximum::check`](crate::parser::Maximum), [`RepeatedHandler::on_stop`], and the four
+/// delimited-repeated `on_stop` closures all say so at their own sites).
+///
+/// **The order is a property of one function, not of twelve call sites.** That is the whole point
+/// of folding the hook in here: [#259](https://github.com/al8n/tokora/issues/259) will rewrite
+/// this subtree into shared engines, and an ordering convention spread over twelve loop bodies is
+/// exactly the kind of property a rewrite re-establishes by accident or not at all. There is now
+/// one admission, it settles the count first, and `ELEMENT_ADMISSION_CENSUS` pins that no driver
+/// reaches a container any other way. The rule a rewrite can check itself against is that
+/// sentence.
+///
+/// # Cross-element order is untouched
+///
+/// The law is about **one** element. A destination that fills at element 3 while the maximum is
+/// first exceeded at element 5 still records `[FullContainer, TooMany]`, under every driver,
+/// because those are two elements and the refusal really did happen first.
+/// `repetition_diagnostic_order.rs` carries that control beside the collision rows.
+///
+/// The latch is read only on the refusal arm, so the success path is the count hook — a
+/// monomorphized no-op for `Unbounded` and for a minimum-only bound — plus the pre-existing `push`
+/// and increment.
 #[inline(always)]
-pub(super) fn push_element<'inp, 'closure, C, O, L, Ctx, Lang: ?Sized, Cmpl>(
+pub(super) fn admit_element<'inp, 'closure, C, O, L, Ctx, Lang: ?Sized, Cmpl, EC>(
+  counts: &EC,
   nums: &mut usize,
   full: &mut bool,
   container: &mut C,
@@ -284,7 +335,12 @@ where
   Cmpl: crate::input::Completeness,
   Ctx::Emitter: FullContainerEmitter<'inp, L, Lang>,
   C: ContainerT<O>,
+  EC: ElementCountHandler<'inp, 'closure, L, Ctx, Lang, Cmpl>,
 {
+  // `*nums` is the count BEFORE this element, which is what makes `== max` fire exactly once per
+  // construct. It has to be read here, ahead of the push that increments it.
+  counts.on_element(*nums, inp, anchor)?;
+
   if container.push(item).is_err() && !*full {
     *full = true;
     let span = inp.span_since(anchor);
@@ -2135,7 +2191,7 @@ pub(super) mod end_state_census {
   }
 
   /// CAPACITY_REPORT_CENSUS — the destination's capacity report is emitted **at the refusal**,
-  /// inside [`push_element`](super::push_element)'s refusal arm, and nowhere else.
+  /// inside [`admit_element`](super::admit_element)'s refusal arm, and nowhere else.
   ///
   /// This is the *timing* law, made countable — and the countable thing is a **region**, not a
   /// tally, because the defect this replaced was an emission that moved rather than one that
@@ -2144,10 +2200,10 @@ pub(super) mod end_state_census {
   /// consulted*, and in this driver the emitter is what decides whether the parse continues. A
   /// rejecting emitter stopped one whole construct late, every later `Err` exit discarded the
   /// withheld report, and an O(1)-prefix refusal became O(n) over the rest of the input.
-  /// [`push_element`](super::push_element) states why the ordering cannot be bought back.
+  /// [`admit_element`](super::admit_element) states why the ordering cannot be bought back.
   ///
-  /// So the pin is: exactly one `emit_full_container` in the tree, it is in `push_element`, and it
-  /// is **ahead of the `*nums += 1` that ends the refusal arm** — a call relocated to any exit,
+  /// So the pin is: exactly one `emit_full_container` in the tree, it is in `admit_element`, and
+  /// it is **ahead of the `*nums += 1` that ends the refusal arm** — a call relocated to any exit,
   /// or to any code that runs after the element is counted, moves out of that region and fails.
   /// The `code_find`s panic rather than pass when their anchor is gone, so a gutted or renamed
   /// chokepoint reports that instead of quietly finding nothing to check.
@@ -2159,25 +2215,21 @@ pub(super) mod end_state_census {
       let direct = code_matches(src, "emit_full_container(");
       assert_eq!(
         direct, 0,
-        "{name}: drivers report through `push_element`, never `emit_full_container` directly — a \
+        "{name}: drivers report through `admit_element`, never `emit_full_container` directly — a \
          driver-side call is one the once-per-construct latch does not cover"
       );
       total_emissions += direct;
     }
     assert_eq!(
       total_emissions, 1,
-      "`emit_full_container(` is called once in the whole `many` tree, inside `push_element`"
+      "`emit_full_container(` is called once in the whole `many` tree, inside `admit_element`"
     );
 
-    let def_at = code_find(prod, "fn push_element").unwrap_or_else(|| {
-      panic!(
-        "`many/mod.rs`: `fn push_element` is gone. The capacity chokepoint has been renamed or \
-         removed; re-cut this census against whatever replaced it before trusting a green run"
-      )
-    });
-    let body = &prod[def_at..];
+    let body = &prod[admit_element_body(prod)..];
     let counted_at = code_find(body, "*nums += 1;").unwrap_or_else(|| {
-      panic!("`many/mod.rs`: `push_element` no longer ends its refusal arm by counting the element")
+      panic!(
+        "`many/mod.rs`: `admit_element` no longer ends its refusal arm by counting the element"
+      )
     });
     assert_eq!(
       code_matches(&body[..counted_at], "emit_full_container("),
@@ -2189,8 +2241,118 @@ pub(super) mod end_state_census {
     );
   }
 
+  /// The byte offset at which [`admit_element`](super::admit_element)'s definition starts, or a
+  /// panic naming what went missing.
+  ///
+  /// Shared by the two censuses that measure *regions* of that body rather than tallies over it.
+  /// A `code_find` that quietly returned `None` would make both of them pass by looking at
+  /// nothing, which is the failure mode a renamed or gutted chokepoint takes.
+  fn admit_element_body(prod: &str) -> usize {
+    code_find(prod, "fn admit_element").unwrap_or_else(|| {
+      panic!(
+        "`many/mod.rs`: `fn admit_element` is gone. The element-admission chokepoint has been \
+         renamed or removed; re-cut this census against whatever replaced it before trusting a \
+         green run"
+      )
+    })
+  }
+
+  /// ELEMENT_ADMISSION_CENSUS — **one admission, and it settles the count bound before the
+  /// destination is offered the element.**
+  ///
+  /// This is the structural half of the repair for
+  /// [#277](https://github.com/al8n/tokora/issues/277), and it is the form the law has to take
+  /// because [#259](https://github.com/al8n/tokora/issues/259) will rewrite this subtree into
+  /// shared engines. An ordering kept by convention at twelve loop bodies is a property a rewrite
+  /// of those bodies inherits by luck; an ordering that is one function's two consecutive lines,
+  /// with every driver forced through it, is a property a rewrite has to actively destroy.
+  ///
+  /// Four things are pinned, and each one is a way the divergence could come back:
+  ///
+  /// 1. **No driver touches a container itself.** `container.push(` appears nowhere in the eight
+  ///    driver sources — a direct push is an element admitted without a count verdict.
+  /// 2. **No driver runs the count hook itself.** `on_element(` appears nowhere in them either. A
+  ///    driver-side call would either double-report a maximum or place it back on the wrong side
+  ///    of the push, which is exactly what #277 was.
+  /// 3. **The admission sites are counted, per driver.** A new driver reaching a container moves
+  ///    a number here, and the failure message sends whoever moved it to
+  ///    `tokora/tests/repetition_diagnostic_order.rs` to declare its row.
+  /// 4. **Inside the chokepoint, the hook precedes the push.** Swapping the two lines is the
+  ///    one-line regression this whole census exists for, and it is the only one a tally cannot
+  ///    see — so it is measured as a region, like the capacity report above.
+  ///
+  /// The two zero-count sources are not exemptions: `sep/delim` and `sep_while/delim` reach a
+  /// container through the `handle_continue` of their non-delimited twin, which is where their
+  /// four admissions are already counted. Wiring either of them to a container directly would
+  /// raise its count off zero and fail here.
+  #[test]
+  fn every_driver_admits_its_elements_through_the_one_chokepoint() {
+    /// Admissions per driver source. The four separated engines are two `handle_continue`
+    /// bodies of four state arms each, shared with their delimited twins.
+    const ADMISSIONS: &[(&str, usize)] = &[
+      ("many/repeated/mod.rs", 1),
+      ("many/repeated_while/mod.rs", 1),
+      ("many/delim/repeated.rs", 1),
+      ("many/delim/repeated_while.rs", 1),
+      ("many/sep/parse/mod.rs", 4),
+      ("many/sep/delim/mod.rs", 0),
+      ("many/sep_while/parse/mod.rs", 4),
+      ("many/sep_while/delim/mod.rs", 0),
+    ];
+
+    let mut total = 0;
+    for (name, src, ..) in SITES {
+      assert_eq!(
+        code_matches(src, "container.push("),
+        0,
+        "{name}: a driver never pushes into the destination itself — `many::admit_element` is the \
+         one admission, and it settles the element's count bound first"
+      );
+      assert_eq!(
+        code_matches(src, "on_element("),
+        0,
+        "{name}: a driver never runs the count hook itself — `many::admit_element` runs it, in \
+         front of the push, so that one element's maximum is reported before its refusal (#277)"
+      );
+
+      let want = ADMISSIONS
+        .iter()
+        .find(|(n, _)| n == name)
+        .unwrap_or_else(|| panic!("{name}: not listed in ADMISSIONS"))
+        .1;
+      let got = code_matches(src, "admit_element(");
+      assert_eq!(
+        got, want,
+        "{name}: expected {want} element admission(s), found {got}. A driver that gained or lost \
+         one needs its row in `tokora/tests/repetition_diagnostic_order.rs` reviewed — that file \
+         is what proves the order this census only makes structural"
+      );
+      total += got;
+    }
+    assert_eq!(
+      total, 12,
+      "twelve element admissions across the eight drivers; `sep{{,_while}}/delim` reach a \
+       container through their non-delimited twin's `handle_continue`"
+    );
+
+    // The order, as a region: the count hook is called before the container is asked.
+    let prod = many_mod_production();
+    let body = &prod[admit_element_body(prod)..];
+    let pushed_at = code_find(body, "container.push(").unwrap_or_else(|| {
+      panic!("`many/mod.rs`: `admit_element` no longer offers the element to the destination")
+    });
+    assert_eq!(
+      code_matches(&body[..pushed_at], "on_element("),
+      1,
+      "`many/mod.rs`: `admit_element` settles the element's count bound BEFORE offering it to the \
+       destination. Reversed, an element that both exceeds its maximum and is refused reports the \
+       refusal first, and under `Fatal` the public error goes back to depending on which \
+       repetition builder the caller picked (#277)"
+    );
+  }
+
   /// LIMIT_PAYLOAD_CENSUS 2a — `FullContainer` has exactly one emission site in the whole
-  /// `many` tree: the `push_element` chokepoint. Twelve separate sites is how three different
+  /// `many` tree: the `admit_element` chokepoint. Twelve separate sites is how three different
   /// counting conventions grew between them, and how the once-per-construct latch was lost.
   #[test]
   fn full_container_has_one_emission_site() {
@@ -2199,31 +2361,40 @@ pub(super) mod end_state_census {
       let n = code_matches(src, "FullContainer::of(");
       assert_eq!(
         n, 0,
-        "{name}: drivers must push through `push_element`, never emit `FullContainer` directly"
+        "{name}: drivers must admit through `admit_element`, never emit `FullContainer` directly"
       );
       total += n;
     }
     assert_eq!(
       total, 1,
-      "`FullContainer::of(` is constructed once, inside `push_element`"
+      "`FullContainer::of(` is constructed once, inside `admit_element`"
     );
   }
 
-  /// LIMIT_PAYLOAD_CENSUS 2b — every `TooMany` names a count that actually exceeds its limit.
+  /// LIMIT_PAYLOAD_CENSUS 2b — every `TooMany` names a count that actually exceeds its limit, and
+  /// there are exactly **two** places that can name one.
   ///
   /// `TooMany` renders as "found {nums}, but maximum is {limit}", so a `nums` equal to the limit
   /// renders a self-contradicting sentence. Each emission site therefore passes `limit + 1`,
-  /// which is also the smallest count every one of the eight drivers can produce at its own
-  /// detection point — the only value that makes one history yield one payload whichever builder
-  /// produced it.
+  /// which is also the smallest count every driver can produce at the element that broke the
+  /// limit — the only value that makes one history yield one payload whichever builder produced
+  /// it.
+  ///
+  /// The count is two, not eight, and the five sources that lost theirs stay in the list on
+  /// purpose. A maximum is settled at the element that broke it, from the two
+  /// `ElementCountHandler::on_element` hooks that `admit_element` runs; the two end checks in
+  /// `with.rs` and the four delimited-repeated `on_stop` closures used to re-decide it one whole
+  /// construct later, which is where the builder-dependent diagnostic order in #277 came from.
+  /// Scanning them and finding nothing is the assertion: a `TooMany` that reappears in an end pass
+  /// fails here even though the total on its own would still look plausible.
   ///
   /// The requirement is `TooMany`'s alone. `FullContainer` once shared the "found … exceeds …"
   /// wording and so looked like it shared the law; it does not, because its two numbers describe
   /// different things — one construct's parsed elements against a destination's total capacity —
   /// and it states a refusal rather than an exceedance.
   ///
-  /// The per-line conjunction assumes the site fits on one line, which all eight do at the
-  /// current rustfmt width; a future wrap would need the needle re-cut rather than dropped.
+  /// The per-line conjunction assumes the site fits on one line, which both do at the current
+  /// rustfmt width; a future wrap would need the needle re-cut rather than dropped.
   #[test]
   #[cfg_attr(
     miri,
@@ -2257,8 +2428,13 @@ pub(super) mod end_state_census {
         include_str!("delim/repeated_while/bounded.rs"),
       ),
     ];
+    // The two sources allowed to name a `TooMany`: the element hooks, which run inside
+    // `admit_element` in front of the push. Every other entry above must be silent.
+    const HOOKS: [&str; 2] = ["many/handler/maximum.rs", "many/handler/bounded.rs"];
+
     let mut total = 0;
     for (name, src) in sites {
+      let mut here = 0;
       for line in src
         .lines()
         .filter(|l| !l.trim_start().starts_with("//") && l.contains("TooMany::of("))
@@ -2268,49 +2444,74 @@ pub(super) mod end_state_census {
           "{name}: `TooMany`'s count must exceed the limit it names (`limit + 1`): {}",
           line.trim()
         );
-        total += 1;
+        here += 1;
       }
+      assert_eq!(
+        here,
+        usize::from(HOOKS.contains(&name)),
+        "{name}: a maximum is reported once, at the element that broke it, from \
+         `ElementCountHandler::on_element`. An end pass that reports one again re-decides a fact \
+         a whole construct later, which is how the diagnostic order came to depend on the \
+         builder (#277)"
+      );
+      total += here;
     }
     assert_eq!(
-      total, 8,
-      "the eight `TooMany` emission sites: two end checks in `with.rs`, the two mid-loop \
-       `on_element` hooks, and the four delimited-repeated `on_stop` closures"
+      total, 2,
+      "the two `TooMany` emission sites, both `ElementCountHandler::on_element`: `Maximum`'s and \
+       `With<Minimum, Maximum>`'s"
     );
   }
 
-  /// MID_LOOP_PAIRING_CENSUS — `RepeatedHandler::on_stop` deliberately no longer re-checks the
-  /// maximum, which is sound *only* because every consumer calls `on_element` for every
-  /// element: a construct exceeds `max` iff some element saw the pre-count equal to it, so the
-  /// mid-loop hook has already reported the violation exactly once. This pins both halves of
-  /// that pairing, and pins that no third consumer can land without them.
+  /// MID_LOOP_PAIRING_CENSUS — no end pass re-checks the maximum, which is sound *only* because
+  /// every element goes through an admission that checks it: a construct exceeds `max` iff some
+  /// element saw the pre-element count equal to it, so the hook has already reported the
+  /// violation exactly once by the time any end pass runs.
+  ///
+  /// The pairing used to be stated per driver — "a `RepeatedHandler` consumer must call
+  /// `on_element` for every element" — and it held, for the two consumers it could see, while the
+  /// other six drivers went on deciding their maximum from an end pass. That is the divergence
+  /// #277 reports, and it is why a per-consumer pairing is the wrong shape for this law: it is
+  /// satisfiable by the drivers that already agree. The pairing is now
+  /// [`admit_element`](super::admit_element)'s, pinned structurally by
+  /// `every_driver_admits_its_elements_through_the_one_chokepoint`, so what is left here is the
+  /// **other** half — that the end passes stay silent about the maximum.
   #[test]
-  fn every_repeated_handler_consumer_calls_the_mid_loop_hook() {
-    // No `Vec` here: this module is compiled under `--no-default-features` too.
-    let mut consumers = [""; 2];
-    let mut found = 0;
-    for (name, src) in super::gate_census::progress_guard_sites() {
-      if code_matches(src, "rh.on_stop(") == 0 {
-        continue;
-      }
-      assert!(
-        code_matches(src, "rh.on_element(") > 0,
-        "{name}: a `RepeatedHandler` consumer must call `on_element` for every element — \
-         `on_stop` does not re-check the maximum"
+  fn no_end_pass_re_checks_the_maximum() {
+    for (name, src) in [
+      (
+        "many/handler/maximum.rs",
+        include_str!("handler/maximum.rs"),
+      ),
+      (
+        "many/handler/bounded.rs",
+        include_str!("handler/bounded.rs"),
+      ),
+    ] {
+      let def_at = code_find(src, "fn on_stop(").unwrap_or_else(|| {
+        panic!(
+          "{name}: `RepeatedHandler::on_stop` is gone; re-cut this census against its replacement"
+        )
+      });
+      assert_eq!(
+        code_matches(&src[def_at..], "emit_too_many("),
+        0,
+        "{name}: `on_stop` must not re-check the maximum — the admission has already reported it, \
+         at the element that broke it and ahead of that element's push (#277)"
       );
-      assert!(
-        found < consumers.len(),
-        "{name}: a third `RepeatedHandler` consumer has landed; extend this census and check \
-         that it pairs the mid-loop hook with the end pass"
-      );
-      consumers[found] = name;
-      found += 1;
     }
-    assert_eq!(
-      consumers,
-      ["many/repeated/mod.rs", "many/repeated_while/mod.rs"],
-      "exactly two sources consume `RepeatedHandler`; a third must pair the mid-loop hook \
-       with the end pass before it lands"
-    );
+
+    // `progress_guard_sites` covers all twelve guard-bearing sources; none may report a maximum
+    // itself. `ELEMENT_ADMISSION_CENSUS` says as much of the eight collection drivers, and this
+    // widens it to the four fold sources, which carry no cardinality concept at all.
+    for (name, src) in super::gate_census::progress_guard_sites() {
+      assert_eq!(
+        code_matches(src, "emit_too_many("),
+        0,
+        "{name}: a driver never reports a maximum itself; the count handler does, from inside \
+         `admit_element`"
+      );
+    }
   }
 
   /// SEPARATOR_DELIVERY_CENSUS — every separator a driver consumes goes through

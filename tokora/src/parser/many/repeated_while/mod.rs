@@ -351,17 +351,15 @@ impl<'inp, 'c, L, F, Condition, O, Ctx, Lang: ?Sized, W>
           return Ok(span);
         }
         Action::Continue => {
-          // The maximum hook runs only once the element has actually, successfully parsed —
-          // matching the try-driven `Repeated::parse`, which never sees `Ok(Accept(item))` (and
-          // so never calls `rh.on_element`) for an element that failed. Checking `nums == max`
-          // ahead of `parse_input` fired the hook for an element that was merely *about to be
-          // attempted*: a `Continue` decision at the boundary paired with a failing parse then
-          // reported `TooMany` (or masked the real error under a fail-fast emitter) for an
-          // element that was never parsed, contradicting the parsed-element accounting
-          // convention `push_element` establishes below.
+          // The admission runs only once the element has actually, successfully parsed —
+          // matching the try-driven `Repeated::parse`, which never sees `Ok(Accept(item))` for an
+          // element that failed. Checking `nums == max` ahead of `parse_input` fired the maximum
+          // hook for an element that was merely *about to be attempted*: a `Continue` decision at
+          // the boundary paired with a failing parse then reported `TooMany` (or masked the real
+          // error under a fail-fast emitter) for an element that was never parsed, contradicting
+          // the parsed-element accounting convention `admit_element` establishes.
           let item = self.f.parse_input(inp)?;
-          rh.on_element(nums, inp, &anchor)?;
-          push_element(&mut nums, &mut full, container, item, inp, &anchor)?;
+          admit_element(rh, &mut nums, &mut full, container, item, inp, &anchor)?;
         }
       }
 

@@ -244,15 +244,20 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
     Container: ContainerT<O> + SeparatorHandler<'inp, L>,
     Handler: ContinueStateHandler<'inp, 'closure, Sep, O, L, Ctx, Lang, Cmpl>,
   {
+    // Every arm below admits the element through `many::admit_element`, which settles the count
+    // bound before the destination is offered the element. The call sits INSIDE each arm rather
+    // than ahead of the match so that a diagnostic about the *separator slot* preceding this
+    // element — a missing separator, a leading-separator policy — is still reported first: that
+    // fact became true earlier in the input than this element's own count verdict did.
     match state {
       // happy path, we found a separator before an element
       State::Separator(_) => {
-        push_element(num_elems, full, container, element, inp, anchor)?;
+        admit_element(handler, num_elems, full, container, element, inp, anchor)?;
         state = State::Element;
       }
       // we are in leading state,
       State::Leading(_) => {
-        push_element(num_elems, full, container, element, inp, anchor)?;
+        admit_element(handler, num_elems, full, container, element, inp, anchor)?;
         state = State::Element;
       }
       // nothing before element, parse the first element
@@ -260,7 +265,7 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
         // let the passing handler deal with the start state
         handler.handle_start_state(inp, peek_span.start())?;
 
-        push_element(num_elems, full, container, element, inp, anchor)?;
+        admit_element(handler, num_elems, full, container, element, inp, anchor)?;
 
         state = State::Element;
       }
@@ -274,7 +279,7 @@ impl<'inp, F, Sep, O, L, Ctx, Lang: ?Sized, Cmpl> Separated<&mut F, Sep, O, L, C
           .emit_missing_separator(Sep::name(), MissingTokenOf::<'_, L, Lang>::of(off))?;
 
         // parse the next element
-        push_element(num_elems, full, container, element, inp, anchor)?;
+        admit_element(handler, num_elems, full, container, element, inp, anchor)?;
         state = State::Element;
       }
     }

@@ -19,8 +19,10 @@
 //!    over trailing input the caller does not choose — 4099 element attempts against 4096
 //!    trailing elements, versus 3 with none.
 //!
-//! `many::push_element` states why the ordering the deferral bought cannot be bought back, and
-//! `end_state_parity.rs`'s case H records what a recovering emitter sees instead.
+//! `many::admit_element` states why the ordering the deferral bought cannot be bought back — and
+//! how the ordering was reached instead, by settling the element's count bound one line ahead of
+//! the push rather than by moving the capacity report. `end_state_parity.rs`'s case H and
+//! `repetition_diagnostic_order.rs` record what both emitter classes see now.
 
 mod common;
 
