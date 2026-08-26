@@ -16,3 +16,25 @@ pub trait PrattToken<'a, Expr: ?Sized, Power = i64>: Token<'a> {
   /// `None` is the spelling to prefer, since it is the one the signature already offers.
   fn try_pratt_rhs(&self) -> Option<PrattRHS<(), (), (), (), Power>>;
 }
+
+/// Pratt classification forwards across the borrow, like every other token capability.
+///
+/// Generic in `Expr` and `Power`, not pinned to the `i64` default: a token type is free to
+/// implement `PrattToken` once per expression family it classifies for, and a forwarding impl
+/// that fixed either parameter would carry only one of those implementations across the
+/// borrow while the base [`Token`] impl carried the whole token.
+impl<'a, T, Expr, Power> PrattToken<'a, Expr, Power> for &'a T
+where
+  T: PrattToken<'a, Expr, Power>,
+  Expr: ?Sized,
+{
+  #[inline(always)]
+  fn try_pratt_lhs(&self) -> Option<PrattLHS<(), (), Power>> {
+    <T as PrattToken<'a, Expr, Power>>::try_pratt_lhs(self)
+  }
+
+  #[inline(always)]
+  fn try_pratt_rhs(&self) -> Option<PrattRHS<(), (), (), (), Power>> {
+    <T as PrattToken<'a, Expr, Power>>::try_pratt_rhs(self)
+  }
+}
