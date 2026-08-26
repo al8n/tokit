@@ -76,15 +76,41 @@ impl Status {
 /// naming both candidates and picks with `RecoveryState::is_valid(&x)` or their own equivalent; a
 /// consumer who imports neither, or only their own, keeps exactly the behaviour they had.
 ///
-/// # `status` is inherent, and that is deliberate
+/// # `status` is on this trait too, and nowhere else
 ///
-/// A trait method cannot be `const fn`, so the three questions above are not usable in a const
-/// context. Each carrier therefore keeps a `const fn status(&self)` of its own, and
-/// `x.status().is_valid()` is const all the way down.
+/// It was briefly an inherent `const fn` on each carrier, on the reasoning that a *return* type
+/// which did not exist before could not be displaced silently: a consumer whose own `status()`
+/// returned something else would get a type error. **That reasoning is wrong**, and the
+/// counterexample is one line:
 ///
-/// That name is inherent, so it *can* win a pick — but it cannot do so silently: it returns
-/// [`Status`], a type that did not exist before tokora#320, so a consumer whose own `status()`
-/// returned something else gets a type error rather than a different answer.
+/// ```rust,ignore
+/// literal.status().is_valid()
+/// ```
+///
+/// A differing return type is only loud if the caller *stores* the value. When the next step is a
+/// method both types offer — and [`Status`] offers exactly the names a consumer's semantic status
+/// is most likely to carry — the whole chain still typechecks and the meaning changes underneath
+/// it. Since `new` marks any caller-supplied payload [`Status::Valid`], a literal their own check
+/// would have rejected then passes.
+///
+/// So the test a name has to survive is not *does the signature differ* but **does the whole call
+/// chain still typecheck with a different meaning**, and an inherent accessor of any name fails
+/// it whenever the returned types share a method. There is no inherent reader left to displace
+/// anything: `x.status()` and `Carrier::status(&x)` both resolve here.
+///
+/// # What that costs
+///
+/// A trait method cannot be `const fn`, so the recovery state is **not readable in a const
+/// context** by any spelling. Nothing in this crate read it in one, and the state is a parse
+/// result, which is not const-constructible in practice.
+///
+/// Two ways to keep const were available and both are worse. A `pub` field is reachable by
+/// nothing method-call syntax can displace — but a public field is a public *setter*, and
+/// `x.status = Status::Valid` would launder a recovery placeholder into valid syntax by
+/// assignment, which is the whole defect this type exists to close. A receiver-less associated
+/// function is unreachable by method syntax, but `Carrier::status(&x)` in path position displaces
+/// a consumer's trait item the same way, so it trades a certainty for an improbability — and the
+/// reasoning it would rest on is the reasoning that was just wrong.
 pub trait RecoveryState {
   /// The recovery state this value is in.
   fn status(&self) -> Status;

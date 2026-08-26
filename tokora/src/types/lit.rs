@@ -89,8 +89,9 @@
 //! assert!(missing_lit.is_missing());
 //! ```
 //!
-//! Which of the three states a literal is in is read from the `RecoveryState` trait — which must
-//! be in scope — or from the inherent `status` accessor in a const context, never from the data. A placeholder's data is whatever `D::error` /
+//! Which of the three states a literal is in is read through the `RecoveryState` trait, which
+//! must be in scope, and never from the data. There is no inherent accessor: see the trait for
+//! why an inherent one cannot fail loudly. A placeholder's data is whatever `D::error` /
 //! `D::missing` produced — for `&str` the literal `"<error>"`, a value a caller can also spell
 //! by hand — and it is mutable through `data_mut`, so it reports what the node says rather
 //! than whether the parser found one.
@@ -314,19 +315,6 @@ macro_rules! define_literal {
         &self.data
       }
 
-      /// Returns the recovery state of this literal.
-      ///
-      /// The three questions — valid, error, missing — are asked through `RecoveryState`, which
-      /// has to be in scope. They are not inherent methods because those names are ones a
-      /// consumer may already have on an extension trait of their own, and an inherent method
-      /// wins that pick silently; see the trait for the argument.
-      ///
-      /// This accessor is inherent so that the state stays readable in a const context, which a
-      /// trait method cannot be: `x.status().is_valid()` is `const` all the way down.
-      #[inline(always)]
-      pub const fn status(&self) -> Status {
-        self.status
-      }
     }
 
     impl<D, Span, Lang: ?::core::marker::Sized> $name<D, Span, Lang> {

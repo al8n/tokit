@@ -66,9 +66,9 @@
 //! assert!(missing_ident.is_missing());
 //! ```
 //!
-//! Which of the three states a keyword is in is read from [`RecoveryState`](super::RecoveryState)
-//! — which must be in scope — or from [`Keyword::status`] in a const context, never from the
-//! payload. The payload of a placeholder
+//! Which of the three states a keyword is in is read through
+//! [`RecoveryState`](super::RecoveryState), which must be in scope, and never from the payload.
+//! There is no inherent accessor: see the trait for why an inherent one cannot fail loudly. The payload of a placeholder
 //! is whatever `S::error` / `S::missing` produced — for `&str` the literal `"<error>"`, a
 //! value a caller can also spell by hand — and it is mutable through
 //! [`source_mut`](Keyword::source_mut), so it reports what the node says rather than whether
@@ -474,20 +474,6 @@ impl<S: ?Sized, Span, Lang: ?Sized> Keyword<S, Span, Lang> {
   #[inline(always)]
   pub const fn source_ref(&self) -> &S {
     &self.ident
-  }
-
-  /// Returns the recovery state of this keyword.
-  ///
-  /// The three questions — valid, error, missing — are asked through
-  /// [`RecoveryState`](super::RecoveryState), which has to be in scope. They are not inherent
-  /// methods because those names are ones a consumer may already have on an extension trait of
-  /// their own, and an inherent method wins that pick silently; see the trait for the argument.
-  ///
-  /// This accessor is inherent so that the state stays readable in a const context, which a
-  /// trait method cannot be: `x.status().is_valid()` is `const` all the way down.
-  #[inline(always)]
-  pub const fn status(&self) -> Status {
-    self.status
   }
 }
 

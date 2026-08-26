@@ -1062,6 +1062,93 @@ mod consumer_scope {
     assert!(tokora_status(&real).is_valid());
   }
 
+  /// A consumer's **semantic** status: their own type, with the method names such a type most
+  /// naturally carries.
+  #[derive(Debug, PartialEq)]
+  enum SemanticStatus {
+    Ok,
+    Overflows,
+  }
+
+  impl SemanticStatus {
+    fn is_valid(&self) -> bool {
+      matches!(self, Self::Ok)
+    }
+  }
+
+  /// The extension trait that the round-4 reasoning said could not be displaced silently.
+  trait ConsumerStatus {
+    fn status(&self) -> SemanticStatus;
+  }
+
+  impl ConsumerStatus for LitDecimal<&str> {
+    /// Rejects a literal that would not fit, whatever its recovery state is.
+    fn status(&self) -> SemanticStatus {
+      match self.data_ref().parse::<u8>() {
+        Ok(_) => SemanticStatus::Ok,
+        Err(_) => SemanticStatus::Overflows,
+      }
+    }
+  }
+
+  /// **The cell that refutes the round-4 argument, and pins the repair.**
+  ///
+  /// `status` was briefly inherent on all nineteen carriers, kept there to stay `const`, on the
+  /// reasoning that a *return* type which did not exist before could not be displaced silently: a
+  /// consumer whose `status()` returned something else would get a type error.
+  ///
+  /// A differing return type is only loud **if the caller stores the value**. The chain below
+  /// stores nothing, and [`Status`](crate::types::Status) offers `is_valid` too, so with an
+  /// inherent `status` in place `literal.status().is_valid()` keeps compiling and silently stops
+  /// asking the consumer's question. `new` marks any caller-supplied payload `Status::Valid`, so
+  /// `"999"` — which does not fit the consumer's `u8` — passes.
+  ///
+  /// So the test a name must survive is not *does the signature differ* but **does the whole call
+  /// chain still typecheck with a different meaning**. There is no inherent reader any more:
+  /// `status` is reached through `RecoveryState`, so this chain reaches the consumer's method,
+  /// and a consumer who imports the trait as well gets `error[E0034]` instead.
+  /// Every assertion below is a `bool`-valued **chain**, and that is the point: naming
+  /// `SemanticStatus` anywhere in this function would make the plant fail as `error[E0308]` on
+  /// the stored value instead — the shape that was always loud — and the silent one would never
+  /// get to run. An instrument that catches the defect by the wrong mechanism proves nothing
+  /// about the right one.
+  #[test]
+  fn a_chained_call_still_reaches_the_consumers_status() {
+    let span = SimpleSpan::new(0, 3);
+
+    // Fits a `u8`, and was spelled out in the source: both sides say valid, for different reasons.
+    let small = LitDecimal::<&str>::new(span, "42");
+    assert!(
+      small.status().is_valid(),
+      "the consumer's chain owns the unqualified call"
+    );
+    assert!(tokora_status(&small).is_valid());
+
+    // The pair that reverses under the plant: the consumer's check rejects an overflowing
+    // literal, while tokora's recovery status calls it valid because `new` said so.
+    let overflowing = LitDecimal::<&str>::new(span, "999");
+    assert!(
+      !overflowing.status().is_valid(),
+      "the consumer's semantic check rejects an overflowing literal",
+    );
+    assert!(
+      tokora_status(&overflowing).is_valid(),
+      "tokora's recovery status says valid, which is the answer that must not win here",
+    );
+  }
+
+  /// The other half of the contrast: a consumer who **stores** the value does get a type error if
+  /// an inherent `status` displaces theirs. That shape was never the problem, and recording it
+  /// here is what keeps the cell above honest about which shape is.
+  #[test]
+  fn a_stored_status_names_the_consumers_own_type() {
+    let span = SimpleSpan::new(0, 3);
+    let overflowing = LitDecimal::<&str>::new(span, "999");
+
+    let semantic: SemanticStatus = overflowing.status();
+    assert_eq!(semantic, SemanticStatus::Overflows);
+  }
+
   /// A consumer constructor with the same name and arity as the new inherent `with_status`.
   trait ConsumerCtor {
     fn with_status(span: SimpleSpan, data: &'static str, ok: bool) -> Self;

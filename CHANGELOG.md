@@ -112,11 +112,25 @@ and will red until they do.
   was justified below by exactly this standard — that a change of meaning must not be silent —
   and these methods are the case it would otherwise have excluded.
 
-  `status` stays **inherent** because a trait method cannot be `const fn`:
-  `x.status().is_valid()` is const all the way down, which `x.is_valid()` through a trait can
-  never be. It can win a pick, but not silently — it returns `Status`, a type that did not exist
-  before, so displacing a consumer's own `status()` is a type error rather than a different
-  answer.
+  **`status` is on the trait too, and there is no inherent accessor of any name.** It was briefly
+  inherent, kept there to stay `const fn`, on the reasoning that a return type which did not exist
+  before could not be displaced silently. That reasoning is wrong, and the counterexample is one
+  line: `literal.status().is_valid()` typechecks either way, because `Status` offers `is_valid`
+  too — a differing return type is only loud if the caller *stores* the value. Since `new` marks
+  any caller-supplied payload `Valid`, a literal the consumer's own check would have rejected then
+  passes.
+
+  So the test a name has to survive is not *does the signature differ* but **does the whole call
+  chain still typecheck with a different meaning**, and an inherent accessor of any name fails it
+  whenever the two returned types share a method.
+
+  **The cost is that the recovery state is not readable in a const context**, by any spelling,
+  because a trait method cannot be `const`. Nothing in this crate read it in one, and a parse
+  result is not const-constructible in practice. Two ways to keep it were available and both are
+  worse: a `pub` field is a public *setter*, and `x.status = Status::Valid` would launder a
+  placeholder into valid syntax by assignment — the whole defect this type closes; a receiver-less
+  associated function escapes method syntax but is still displaced in path position, trading a
+  certainty for an improbability, and resting on the class of reasoning that was just wrong.
 
 - **`cst::TreeCheckpoint` — the builder's own checkpoint, carrying the one number `rowan`'s does
   not** (#316). Returned by `SyntaxTreeBuilder::checkpoint` and spent by `start_node_at`; it wraps
@@ -2459,22 +2473,26 @@ and will red until they do.
 
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
 
-**`status` and `with_status` are new inherent names on all nineteen recovery carriers, and
-`Status` and `RecoveryState` are new public names in `tokora::types`** (#320). Both methods can
-win the pick over a consumer's extension item, and **neither can do so silently**: each mentions
-`Status` in its signature — as the return type and as the third parameter — and that type did not
-exist before this release, so no item a consumer already wrote can have the same one. Displacing
-either is a type error at the call site, not a different answer. The fix is UFCS,
-`MyExt::status(&kw)`. The two new type names are a glob exposure: a consumer with
+**`with_status` is a new inherent associated function on all nineteen recovery carriers, and
+`Status` and `RecoveryState` are new public names in `tokora::types`** (#320). `with_status` can
+win the pick over a consumer's extension item and **cannot do so silently** — not because its
+signature differs, which is not sufficient, but because its third parameter is a `Status`, a type
+no code written before this release can produce a value of. Arguments are checked at the call
+rather than chained past, so displacing a consumer's `with_status` is `error[E0308]` there. It is
+also unreachable by method-call syntax, taking no `self`. The fix is UFCS,
+`MyExt::with_status(..)`. The two new type names are a glob exposure: a consumer with
 `use tokora::types::*;` and a `Status` or `RecoveryState` of their own gets an ambiguity at the
 name, resolved by an explicit import or an `as` alias.
 
-*An earlier draft of this release listed `is_valid`, `is_error` and `is_missing` here as new
-inherent methods on `Keyword` and the seventeen `Lit*` types, with UFCS offered as the fix. That
-entry is withdrawn: those three are on `RecoveryState` and were never shipped inherent. A note in
-this section is the right home for a name that fails loudly and the wrong one for a name that
-rebinds in silence, which is what a `&self` predicate returning `bool` does — the review of #320
-made that argument and it is correct.*
+*Two earlier drafts of this release listed more names here, and both are withdrawn.* The first
+listed `is_valid`, `is_error` and `is_missing` as new inherent methods on `Keyword` and the
+seventeen `Lit*` types, offering UFCS as the fix; they are on `RecoveryState` and were never
+shipped inherent. The second listed `status` beside `with_status` on the argument that a new
+return type makes a clash loud; that argument is false, since `literal.status().is_valid()`
+typechecks whichever `status` wins, and there is now no inherent `status` at all. **A note in this
+section is the right home for a name that fails loudly and the wrong one for a name that rebinds
+in silence** — and the test for which is whether the whole call chain still typechecks with a
+different meaning, not whether the signature differs.
 
 **`InputRef::trip_snapshot` and `InputRef::tripped_during_attempt` are new inherent methods on a
 type that already shipped.** An inherent item wins the pick over an extension trait's, so a
