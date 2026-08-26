@@ -98,7 +98,7 @@
 
 use core::marker::PhantomData;
 
-use super::status::Status;
+use super::recovery::Status;
 use crate::{error::ErrorNode, span::AsSpan, utils::IntoComponents};
 
 /// A macro to generate literal type structures.
@@ -149,6 +149,13 @@ macro_rules! define_literal {
       #[doc = "// " $example_desc]
       #[doc = "let bad_lit = " $name "::<String, SimpleSpan, YulLang>::error(span);"]
       /// ```
+      // `PartialEq`/`Eq` are derived while the other four are written out. A derive constrains
+      // every type parameter, which is why the other four are hand-written — none of them reads
+      // `Lang`. These two cannot join them: the derive is what emits `StructuralPartialEq`,
+      // without which a `const` of one of these seventeen types cannot appear in a `match`
+      // pattern, and that is not observable by checking rendered output. The residual is that
+      // comparing or matching one still needs `Lang` to be `PartialEq + Eq`, as 0.9 required.
+      #[derive(PartialEq, Eq)]
       pub struct $name<
         D: ?::core::marker::Sized $( = $default)?,
         Span = $crate::__private::span::SimpleSpan,
@@ -210,25 +217,7 @@ macro_rules! define_literal {
       {
       }
 
-      impl<D, Span, Lang> ::core::cmp::PartialEq for $name<D, Span, Lang>
-      where
-        D: ::core::cmp::PartialEq + ?::core::marker::Sized,
-        Span: ::core::cmp::PartialEq,
-        Lang: ?::core::marker::Sized,
-      {
-        #[inline]
-        fn eq(&self, other: &Self) -> bool {
-          self.status == other.status && self.span == other.span && self.data == other.data
-        }
-      }
 
-      impl<D, Span, Lang> ::core::cmp::Eq for $name<D, Span, Lang>
-      where
-        D: ::core::cmp::Eq + ?::core::marker::Sized,
-        Span: ::core::cmp::Eq,
-        Lang: ?::core::marker::Sized,
-      {
-      }
 
       impl<D, Span, Lang> ::core::hash::Hash for $name<D, Span, Lang>
       where
@@ -357,7 +346,7 @@ macro_rules! define_literal {
       }
     }
 
-    impl<D: ?::core::marker::Sized, Span, Lang: ?::core::marker::Sized> $crate::types::RecoveryState
+    impl<D: ?::core::marker::Sized, Span, Lang: ?::core::marker::Sized> $crate::types::recovery::RecoveryState
       for $name<D, Span, Lang>
     {
       #[inline(always)]

@@ -156,7 +156,10 @@ impl RecoveryState for Ident<..> { fn status(&self) -> Status;
 ```
 
 ```rust
-use tokora::{SimpleSpan, error::ErrorNode, types::{Ident, Keyword, RecoveryState}, utils::IntoComponents};
+use tokora::{SimpleSpan, error::ErrorNode, types::{Ident, Keyword}, utils::IntoComponents};
+// `RecoveryState` is NOT in `types::*` — a trait reached through a glob can be rebound by a
+// second glob with only a warning, so it has to be named:
+use tokora::types::recovery::RecoveryState;
 
 struct MyLang;
 

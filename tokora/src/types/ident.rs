@@ -54,7 +54,7 @@
 //! allowing creation of placeholder identifiers during error recovery:
 //!
 //! ```rust,ignore
-//! use tokora::{error::ErrorNode, types::RecoveryState};
+//! use tokora::{error::ErrorNode, types::recovery::RecoveryState};
 //!
 //! // Create placeholder for malformed identifier
 //! let bad_ident = Ident::<String, SimpleSpan, YulLang>::error(span);
@@ -65,7 +65,7 @@
 
 use core::marker::PhantomData;
 
-use super::status::Status;
+use super::recovery::Status;
 use crate::{
   error::ErrorNode,
   span::{AsSpan, SimpleSpan},
@@ -149,6 +149,21 @@ use crate::{
 /// *ident.span_mut() = SimpleSpan::new(10, 18);
 /// assert_eq!(ident.span(), SimpleSpan::new(10, 18));
 /// ```
+// `PartialEq` and `Eq` are **derived** while the other four are written out, and that split is
+// the point rather than an inconsistency.
+//
+// A derive constrains every type parameter, which is why `Debug`, `Clone`, `Copy` and `Hash` are
+// hand-written here: none of them reads `Lang`, so none of them should demand anything of it.
+// `PartialEq`/`Eq` cannot join them. The derive is also what emits `StructuralPartialEq`, and
+// without that marker a `const` of this type cannot appear in a `match` pattern — "constant of
+// non-structural type", a property no amount of checking the rendered output can see, because it
+// is not observable except by trying to use a value in a pattern.
+//
+// So the residual is stated rather than hidden: comparing or pattern-matching one of these still
+// needs the language marker to be `PartialEq + Eq`. Printing, cloning, copying and hashing do
+// not. That is four of the six bounds dropped against 0.9, and structural matching kept exactly
+// as 0.9 had it.
+#[derive(PartialEq, Eq)]
 pub struct Ident<S: ?Sized, Span = SimpleSpan, Lang: ?Sized = ()> {
   _lang: PhantomData<Lang>,
   status: Status,
@@ -208,26 +223,6 @@ impl<S, Span, Lang> ::core::marker::Copy for Ident<S, Span, Lang>
 where
   S: ::core::marker::Copy,
   Span: ::core::marker::Copy,
-  Lang: ?Sized,
-{
-}
-
-impl<S, Span, Lang> ::core::cmp::PartialEq for Ident<S, Span, Lang>
-where
-  S: ::core::cmp::PartialEq + ?Sized,
-  Span: ::core::cmp::PartialEq,
-  Lang: ?Sized,
-{
-  #[inline]
-  fn eq(&self, other: &Self) -> bool {
-    self.status == other.status && self.span == other.span && self.ident == other.ident
-  }
-}
-
-impl<S, Span, Lang> ::core::cmp::Eq for Ident<S, Span, Lang>
-where
-  S: ::core::cmp::Eq + ?Sized,
-  Span: ::core::cmp::Eq,
   Lang: ?Sized,
 {
 }
@@ -429,8 +424,13 @@ impl<S, Span, Lang: ?Sized> Ident<S, Span, Lang> {
   /// # Examples
   ///
   /// ```rust
-  /// use tokora::{SimpleSpan, types::{Ident, RecoveryState, Status}, utils::IntoComponents};
-  /// # struct MyLang;
+  /// use tokora::{SimpleSpan, types::{Ident, Status}, utils::IntoComponents};
+  /// use tokora::types::recovery::RecoveryState;
+  /// // Comparing carriers needs the marker to be `PartialEq`: `PartialEq`/`Eq` stay derived
+  /// // so a `const` carrier keeps working in a `match` pattern, and a derive constrains
+  /// // every parameter. `Debug`, `Clone`, `Copy` and `Hash` need nothing of it.
+  /// #[derive(PartialEq)]
+  /// struct MyLang;
   ///
   /// let span = SimpleSpan::new(0, 4);
   /// let recovered = Ident::<&str, SimpleSpan, MyLang>::with_status(span, "name", Status::Missing);
@@ -514,7 +514,7 @@ impl<S, Span, Lang: ?Sized> Ident<S, Span, Lang> {
   }
 }
 
-impl<S: ?Sized, Span, Lang: ?Sized> super::RecoveryState for Ident<S, Span, Lang> {
+impl<S: ?Sized, Span, Lang: ?Sized> super::recovery::RecoveryState for Ident<S, Span, Lang> {
   #[inline(always)]
   fn status(&self) -> Status {
     self.status

@@ -227,7 +227,7 @@ mod unicode_escape;
 ///
 /// A **carrier** type — one with fields of its own, such as [`Ident`](crate::types::Ident),
 /// [`Keyword`](crate::types::Keyword) or the `Lit*` family — must instead hold the state in a
-/// field and report it through [`RecoveryState`](crate::types::RecoveryState), because a carrier's
+/// field and report it through [`RecoveryState`](crate::types::recovery::RecoveryState), because a carrier's
 /// payload is generic and publicly mutable: a caller can spell `"<error>"` by hand, and can
 /// edit a placeholder's payload afterwards, so comparing the payload against a sentinel answers
 /// *what does this node say* and never *did the parser find one here*. A carrier that

@@ -86,7 +86,7 @@ and will red until they do.
   `Status` is `#[non_exhaustive]`: a fourth recovery state is admissible later, so a `match` needs
   a wildcard arm and `is_valid()` is deliberately not `!is_error() && !is_missing()`.
 
-- **`types::RecoveryState`, and a `const fn status` on all nineteen recovery carriers**
+- **`types::recovery::RecoveryState` and `types::Status`, over all nineteen recovery carriers**
   (#301). `Keyword` and the seventeen literal carriers implemented `ErrorNode` — so
   `error(span)` and `missing(span)` were public and documented as recovery placeholders — while
   holding no field that could record which of the three states a value was in. The only way to
@@ -872,6 +872,43 @@ and will red until they do.
   `UnclosedEmitter` beside a converting sibling forces `ComposableEmitter` to include one of them:
   the converting one fails `Silent` verbatim, and the bound-free one stops covering the delimited
   driver the bundle exists for.
+
+- **`RecoveryState` lives in `tokora::types::recovery` and is not re-exported into
+  `tokora::types`** (#320). A trait reached through a glob can be rebound by a second glob without
+  an error. Reproduced against `rustc 1.100.0-nightly`, three arrangements behave differently:
+  two globs offering the same **type** name is `error[E0659]`; two globs offering the same method
+  through **differently named** traits is `error[E0034]`; but two globs offering the same **trait
+  name** *compiles*, warns under the warn-by-default `ambiguous_glob_imported_traits`
+  (rust-lang/rust#152822), and resolves to whichever glob was written **first** — so
+  `use tokora::types::*; use their_crate::*;` could silently rebind a consumer's own `is_valid`,
+  in either direction depending on import order.
+
+  Moving the three questions off inherent methods closed that rebind at the type and reopened it
+  at the re-export; naming the module closes it for good. A consumer's glob-imported trait is now
+  unopposed, and one who wants tokora's writes `use tokora::types::recovery::RecoveryState;` —
+  an explicit import, which beats a glob and is a choice rather than an accident.
+
+  **`Status` stays at `tokora::types::Status`**, because a type name collides loudly; it is also
+  available as `types::recovery::Status`. The cost to a consumer who is not colliding with
+  anything is one import line, and only for the trait.
+
+- **The recovery carriers keep `PartialEq`/`Eq` derived, and only the other four are hand-written**
+  (#320). Replacing all six derives dropped the compiler-generated `StructuralPartialEq`, so a
+  `const` of a carrier could no longer appear in a `match` pattern — *"constant of non-structural
+  type"*. That was an unannounced break against 0.9, and it slipped through because the change was
+  verified by **rendering**: `Debug`'s field order, `PartialEq`'s short-circuit order, `Hash`'s
+  bytes. Structural matching is not observable that way; only using a value in a pattern shows it.
+
+  Both properties cannot be had at once, and the split is where the evidence put it. Keeping
+  `PartialEq`/`Eq` derived restores structural matching **only when the marker itself satisfies
+  them**, because a derive still constrains every parameter — verified, not assumed: with the
+  derive restored and a marker carrying no traits at all, the pattern is still rejected.
+
+  So the **residual cost** is stated: comparing or pattern-matching a carrier still needs its
+  language marker to be `PartialEq + Eq`, exactly as 0.9 required. Printing, cloning, copying and
+  hashing no longer need anything of it. Four of the six bounds dropped, structural matching
+  unchanged — strictly better than 0.9 on every axis, which is why this is not a choice between
+  two breaks.
 
 - **`Ident::{is_valid, is_error, is_missing}` move to the `RecoveryState` trait** (#320). They have
   been inherent `const fn`s since #266. Keeping them there while the other eighteen carriers

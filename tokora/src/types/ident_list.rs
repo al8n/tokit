@@ -2,13 +2,20 @@ use core::marker::PhantomData;
 
 use crate::{
   span::AsSpan,
-  types::{Ident, RecoveryState},
+  types::{Ident, recovery::RecoveryState},
 };
 
 /// A list of identifiers.
 ///
 /// `S` remains sized because the default container stores `Ident<S, Span>` values
 /// inline in a `Vec`; use the individual [`Ident`] carrier for an unsized source.
+// `PartialEq`/`Eq` are derived while the other four are written out. A derive constrains every
+// type parameter, which is why the other four are hand-written — none of them reads `S` or
+// `Lang`. These two cannot join them: the derive is what emits `StructuralPartialEq`, without
+// which a `const` of this type cannot appear in a `match` pattern, and that is not observable
+// by checking rendered output. The residual is that comparing or matching one still needs `S`
+// and `Lang` to be `PartialEq + Eq`, exactly as 0.9 required.
+#[derive(PartialEq, Eq)]
 #[cfg(any(feature = "alloc", feature = "std"))]
 pub struct IdentList<
   S,
@@ -26,6 +33,13 @@ pub struct IdentList<
 ///
 /// `S` remains sized to keep this type's API consistent with its `Vec`-backed
 /// form; use the individual [`Ident`] carrier for an unsized source.
+// `PartialEq`/`Eq` are derived while the other four are written out. A derive constrains every
+// type parameter, which is why the other four are hand-written — none of them reads `S` or
+// `Lang`. These two cannot join them: the derive is what emits `StructuralPartialEq`, without
+// which a `const` of this type cannot appear in a `match` pattern, and that is not observable
+// by checking rendered output. The residual is that comparing or matching one still needs `S`
+// and `Lang` to be `PartialEq + Eq`, exactly as 0.9 required.
+#[derive(PartialEq, Eq)]
 #[cfg(not(any(feature = "alloc", feature = "std")))]
 pub struct IdentList<S, Span, Container, Lang: ?Sized = ()> {
   span: Span,
@@ -88,26 +102,6 @@ impl<S, Span, Container, Lang> ::core::marker::Copy for IdentList<S, Span, Conta
 where
   Span: ::core::marker::Copy,
   Container: ::core::marker::Copy,
-  Lang: ?Sized,
-{
-}
-
-impl<S, Span, Container, Lang> ::core::cmp::PartialEq for IdentList<S, Span, Container, Lang>
-where
-  Span: ::core::cmp::PartialEq,
-  Container: ::core::cmp::PartialEq,
-  Lang: ?Sized,
-{
-  #[inline]
-  fn eq(&self, other: &Self) -> bool {
-    self.span == other.span && self.identifiers == other.identifiers
-  }
-}
-
-impl<S, Span, Container, Lang> ::core::cmp::Eq for IdentList<S, Span, Container, Lang>
-where
-  Span: ::core::cmp::Eq,
-  Container: ::core::cmp::Eq,
   Lang: ?Sized,
 {
 }

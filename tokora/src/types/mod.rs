@@ -86,13 +86,20 @@ pub use ident::*;
 pub use ident_list::*;
 pub use keyword::*;
 pub use lit::*;
-pub use status::*;
+// `Status` is re-exported into `types` and `RecoveryState` deliberately is not. Reproduced
+// against rustc 1.100.0-nightly, the two names behave differently under a consumer's second glob:
+// a TYPE name is `error[E0659]: ambiguous`, while a TRAIT name compiles with only a
+// warn-by-default `ambiguous_glob_imported_traits` and silently picks whichever glob came first.
+// A trait in `types::*` would therefore let `use tokora::types::*; use their_crate::*;` rebind a
+// same-named `is_valid` with no error — so the trait must be named to be reached. See
+// `recovery`'s own header.
+pub use recovery::Status;
 
 mod ident;
 mod ident_list;
 mod keyword;
 mod lit;
-mod status;
+pub mod recovery;
 
 /// A type representing a recoverable parse node, which can be a valid node,
 /// an error node with span, or a missing node with span.

@@ -1,3 +1,31 @@
+//! The recovery state of a syntax carrier, and the trait that reads it.
+//!
+//! # Why this is a module you have to name
+//!
+//! [`RecoveryState`] is deliberately **not** re-exported into [`types`](super), so
+//! `use tokora::types::*;` does not bring it into scope and `use tokora::types::recovery::RecoveryState;`
+//! is how you reach it. That costs one import, and it buys the property the trait exists for.
+//!
+//! A trait and a type behave differently under a consumer's second glob import, which was
+//! reproduced against `rustc 1.100.0-nightly` rather than reasoned about:
+//!
+//! - Two globs offering the same **type** name: `error[E0659]: ambiguous`. Hard, at the use site.
+//! - Two globs offering the same **trait** name: it *compiles*. `ambiguous_glob_imported_traits`
+//!   is warn-by-default (a future-incompatibility, rust-lang/rust#152822), and the method call
+//!   silently resolves to whichever glob was written **first** — so either side can win depending
+//!   on import order.
+//! - Two globs offering the same **method** through differently named traits: `error[E0034]`.
+//!   Hard.
+//!
+//! So a trait in `types::*` would let `use tokora::types::*; use their_crate::*;` rebind a
+//! consumer's own `is_valid` with no error at all — the same silent rebind that moving these
+//! questions off inherent methods was meant to close, one level further out at the re-export.
+//! Naming the module removes the second glob: a consumer's glob-imported trait is then unopposed,
+//! and a consumer who imports this one explicitly has said which they meant, since an explicit
+//! import beats a glob.
+//!
+//! [`Status`] *is* re-exported as `types::Status`, because a type name collides loudly.
+
 /// The recovery state of a syntax carrier: whether the parser found the construct, found
 /// something malformed where it should have been, or found nothing at all.
 ///

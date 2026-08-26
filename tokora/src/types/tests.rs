@@ -1,4 +1,7 @@
 use super::*;
+// `RecoveryState` is no longer re-exported into `types`, so `use super::*` does not bring it in —
+// which is the whole repair, and this line is what an ordinary consumer writes instead.
+use super::recovery::RecoveryState;
 use std::{
   string::{String, ToString},
   vec,
@@ -882,12 +885,28 @@ fn an_error_node_placeholder_survives_a_decompose_and_rebuild() {
 /// consumer to do the same for a reason that does not exist.
 struct BareLang;
 
-/// The six traits every carrier in this module claims. `Recoverable` is deliberately absent: it
-/// claims `PartialOrd`/`Ord` as well and `Copy` not at all, and it holds no `PhantomData`, so it
-/// is not in this population.
-fn requires_the_six<T>(_: &T)
+/// A marker that carries the two the `PartialEq` derive still demands, and nothing else.
+#[derive(PartialEq, Eq)]
+struct EqLang;
+
+/// The four a bare marker buys: nothing in `Debug`, `Clone`, `Copy` or `Hash` reads `Lang`, so
+/// none of them may demand anything of it.
+fn requires_the_four<T>(_: &T)
 where
-  T: core::fmt::Debug + Clone + Copy + PartialEq + Eq + core::hash::Hash,
+  T: core::fmt::Debug + Clone + Copy + core::hash::Hash,
+{
+}
+
+/// The two a bare marker does **not** buy, and the reason is stated where the derives are: the
+/// `PartialEq` derive is what emits `StructuralPartialEq`, so keeping it is what keeps a `const`
+/// of a carrier usable in a `match` pattern — and a derive constrains every parameter. Comparing
+/// or matching therefore still needs `Lang: PartialEq + Eq`, exactly as 0.9 required.
+///
+/// `Recoverable` is deliberately absent from both: it claims `PartialOrd`/`Ord` as well and
+/// `Copy` not at all, and it holds no `PhantomData`, so it is not in this population.
+fn requires_the_other_two<T>(_: &T)
+where
+  T: PartialEq + Eq,
 {
 }
 
@@ -914,19 +933,24 @@ macro_rules! assert_marker_is_not_a_bound {
       let span = SimpleSpan::new(2, 8);
       let value = $carrier::<&str, SimpleSpan, BareLang>::with_status(span, "x", Status::Error);
 
-      requires_the_six(&value);
+      requires_the_four(&value);
 
       let copied = value;
-      let cloned = value.clone();
-      assert_eq!(copied, cloned, concat!(stringify!($carrier), ": Copy and Clone agree"));
+      let _cloned = value.clone();
       assert!(
-        format!("{value:?}").starts_with(concat!(stringify!($carrier), " {")),
+        format!("{copied:?}").starts_with(concat!(stringify!($carrier), " {")),
         concat!(stringify!($carrier), ": Debug names the type"),
       );
 
       let mut h = CountingHasher::default();
       value.hash(&mut h);
       assert_ne!(h.finish(), 0, concat!(stringify!($carrier), ": Hash reaches the fields"));
+
+      // The other two, over a marker that carries them — which is what the `PartialEq` derive
+      // costs and what `StructuralPartialEq` buys back.
+      let eq_marked = $carrier::<&str, SimpleSpan, EqLang>::with_status(span, "x", Status::Error);
+      requires_the_other_two(&eq_marked);
+      assert_eq!(eq_marked, eq_marked.clone(), concat!(stringify!($carrier), ": Eq over an Eq marker"));
     })+
   };
 }
@@ -964,15 +988,21 @@ fn no_carrier_demands_a_trait_of_its_language_marker() {
     span, segments,
   );
 
-  requires_the_six(&list);
+  requires_the_four(&list);
   assert!(list.is_valid());
-  assert_eq!(list, list.clone());
+
+  let eq_list = IdentList::<&str, SimpleSpan, [Ident<&str, SimpleSpan, EqLang>; 1], EqLang>::new(
+    span,
+    [Ident::<&str, SimpleSpan, EqLang>::new(span, "foo")],
+  );
+  requires_the_other_two(&eq_list);
+  assert_eq!(eq_list, eq_list.clone());
 }
 
 // --- A name this branch adds must not silently displace a consumer's own ---
 
 /// A downstream crate's scope, reproduced: the carriers are imported, and
-/// [`RecoveryState`](super::RecoveryState) deliberately is **not**. That is the position an
+/// [`RecoveryState`](super::recovery::RecoveryState) deliberately is **not**. That is the position an
 /// upgrading consumer is in, and it is why this is a module — `use super::*` in the parent puts
 /// the trait in scope, and a trait in scope contributes its method names whatever it is bound to.
 mod consumer_scope {
@@ -1013,7 +1043,7 @@ mod consumer_scope {
   /// tokora's own answer, reached without importing the trait — which is what a fully qualified
   /// path is for, and what the consumer would write on the rare call that wants it.
   fn tokora_status(lit: &LitDecimal<&str>) -> Status {
-    <LitDecimal<&str> as crate::types::RecoveryState>::status(lit)
+    <LitDecimal<&str> as crate::types::recovery::RecoveryState>::status(lit)
   }
 
   /// **The cell, and its two directions.**
@@ -1181,5 +1211,131 @@ mod consumer_scope {
     // The consumer's is still reachable, by name.
     let theirs = <LitDecimal<&str> as ConsumerCtor>::with_status(span, "42", false);
     assert_eq!(theirs.data_ref(), &"");
+  }
+}
+
+// --- A const of a carrier stays usable in a match pattern ---
+
+/// A language marker carrying the two the `PartialEq` derive demands.
+#[derive(PartialEq, Eq)]
+struct PatLang;
+
+/// **Structural matching, which is not observable by rendering.**
+///
+/// Round 3 replaced six derives with hand-written impls and checked the change by *rendering* —
+/// `Debug`'s field order, `PartialEq`'s short-circuit order, `Hash`'s bytes — and concluded
+/// nothing else moved. One thing had: `#[derive(PartialEq)]` also emits `StructuralPartialEq`,
+/// and without it a `const` of the type is rejected in a pattern with *"constant of non-structural
+/// type"*. No amount of printing a value can see that; only using one in a pattern can.
+///
+/// So `PartialEq`/`Eq` are derived again while `Debug`, `Clone`, `Copy` and `Hash` stay written
+/// out. The cell below is the differential: with the derives removed it does not compile, and the
+/// failure is at the pattern rather than at any assertion.
+///
+/// It covers a carrier of each shape — the two hand-written ones and one from the macro that
+/// generates seventeen.
+#[test]
+fn a_const_carrier_is_usable_in_a_match_pattern() {
+  // `SimpleSpan::new` is not a `const fn`, so the span parameter here is `()` — which is also the
+  // shape a dialect uses when it keeps a const table of spelled-out keywords.
+  const IDENT: Ident<&str, (), PatLang> = Ident::new((), "let");
+  const KEYWORD: Keyword<&str, (), PatLang> = Keyword::new((), "let");
+  const LIT: LitDecimal<&str, (), PatLang> = LitDecimal::new((), "42");
+
+  fn classify_ident(v: Ident<&str, (), PatLang>) -> u8 {
+    match v {
+      IDENT => 1,
+      _ => 0,
+    }
+  }
+
+  fn classify_keyword(v: Keyword<&str, (), PatLang>) -> u8 {
+    match v {
+      KEYWORD => 1,
+      _ => 0,
+    }
+  }
+
+  fn classify_lit(v: LitDecimal<&str, (), PatLang>) -> u8 {
+    match v {
+      LIT => 1,
+      _ => 0,
+    }
+  }
+
+  assert_eq!(classify_ident(IDENT), 1);
+  assert_eq!(classify_ident(Ident::new((), "other")), 0);
+  assert_eq!(classify_keyword(KEYWORD), 1);
+  assert_eq!(classify_lit(LIT), 1);
+
+  // A recovery placeholder is a different value from a hand-spelled one, in a pattern too — the
+  // status is part of what the pattern matches.
+  assert_eq!(
+    classify_ident(Ident::with_status((), "let", Status::Missing)),
+    0,
+    "the status participates in structural matching",
+  );
+}
+
+// --- A second glob must not be able to rebind a consumer's method ---
+
+/// A consumer crate that glob-imports **both** `tokora::types::*` and its own prelude.
+///
+/// This is the shape that survived moving the three questions onto a trait: the trait was
+/// re-exported into `types`, so `use tokora::types::*;` put it in scope beside a same-named one of
+/// the consumer's — and that is not the hard error a same-named *type* would give.
+///
+/// Reproduced against `rustc 1.100.0-nightly` before this was repaired, over three arrangements:
+///
+/// - two globs, same **trait** name: compiles. `ambiguous_glob_imported_traits` is warn-by-default
+///   (a future-incompatibility, rust-lang/rust#152822) and the call resolves to whichever glob was
+///   written **first**, so either side wins depending on import order.
+/// - two globs, same **type** name: `error[E0659]: ambiguous`. Hard.
+/// - two globs, same method through **differently named** traits: `error[E0034]`. Hard.
+///
+/// The repair is that `RecoveryState` is not in `types::*` at all — it lives in
+/// [`types::recovery`](super::recovery) and must be named. So the glob below contributes no
+/// competing `is_valid`, the consumer's is unopposed, and a consumer who wants tokora's writes an
+/// explicit import, which beats a glob and is a choice rather than an accident.
+mod second_glob {
+  /// The consumer's own prelude, glob-exported the way a crate's prelude is.
+  mod their_prelude {
+    use crate::types::LitDecimal;
+
+    pub trait RecoveryState {
+      fn is_valid(&self) -> bool;
+    }
+
+    impl RecoveryState for LitDecimal<&str> {
+      /// The semantic check: does the payload parse as a number?
+      fn is_valid(&self) -> bool {
+        !self.data_ref().is_empty() && self.data_ref().chars().all(|c| c.is_ascii_digit())
+      }
+    }
+  }
+
+  /// **The cell.** Two globs, one of them tokora's whole `types` namespace.
+  ///
+  /// With `pub use recovery::RecoveryState;` restored in `types/mod.rs` — the plant — this
+  /// function still compiles, emits only `ambiguous_glob_imported_traits`, and the assertion
+  /// below flips: `LitDecimal::new` marks every payload `Status::Valid`, so `"nope"` reads as
+  /// valid and the consumer's check is bypassed with no error anywhere.
+  #[test]
+  fn a_glob_of_tokora_types_does_not_rebind_the_consumers_predicate() {
+    use crate::types::*;
+    use their_prelude::*;
+
+    let nonsense = LitDecimal::<&str>::new(SimpleSpan::new(0, 4), "nope");
+    assert!(
+      !nonsense.is_valid(),
+      "a second glob must not rebind the consumer's semantic check",
+    );
+
+    // Tokora's own answer is still reachable, by naming it — which is the cost of the repair and
+    // the whole of it.
+    assert!(
+      <LitDecimal<&str> as crate::types::recovery::RecoveryState>::status(&nonsense).is_valid(),
+      "tokora's recovery status is the opposite answer, reached by naming the trait",
+    );
   }
 }
