@@ -77,18 +77,28 @@
 //! All literal types implement [`ErrorNode`] when `S: ErrorNode`:
 //!
 //! ```rust,ignore
-//! use tokora::types::LitDecimal;
+//! use tokora::types::{LitDecimal, RecoveryState};
 //! use tokora::error::ErrorNode;
 //!
 //! // Create placeholder for malformed literal
 //! let bad_lit = LitDecimal::<String, SimpleSpan, YulLang>::error(span);
+//! assert!(bad_lit.is_error());
 //!
 //! // Create placeholder for missing literal
 //! let missing_lit = LitDecimal::<String, SimpleSpan, YulLang>::missing(span);
+//! assert!(missing_lit.is_missing());
 //! ```
+//!
+//! Which of the three states a literal is in is read through the `RecoveryState` trait, which
+//! must be in scope, and never from the data. There is no inherent accessor: see the trait for
+//! why an inherent one cannot fail loudly. A placeholder's data is whatever `D::error` /
+//! `D::missing` produced — for `&str` the literal `"<error>"`, a value a caller can also spell
+//! by hand — and it is mutable through `data_mut`, so it reports what the node says rather
+//! than whether the parser found one.
 
 use core::marker::PhantomData;
 
+use super::recovery::Status;
 use crate::{error::ErrorNode, span::AsSpan, utils::IntoComponents};
 
 /// A macro to generate literal type structures.
@@ -139,15 +149,88 @@ macro_rules! define_literal {
       #[doc = "// " $example_desc]
       #[doc = "let bad_lit = " $name "::<String, SimpleSpan, YulLang>::error(span);"]
       /// ```
-      #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+      // `PartialEq`/`Eq` are derived while the other four are written out. A derive constrains
+      // every type parameter, which is why the other four are hand-written — none of them reads
+      // `Lang`. These two cannot join them: the derive is what emits `StructuralPartialEq`,
+      // without which a `const` of one of these seventeen types cannot appear in a `match`
+      // pattern, and that is not observable by checking rendered output. The residual is that
+      // comparing or matching one still needs `Lang` to be `PartialEq + Eq`, as 0.9 required.
+      #[derive(PartialEq, Eq)]
       pub struct $name<
         D: ?::core::marker::Sized $( = $default)?,
         Span = $crate::__private::span::SimpleSpan,
         Lang: ?::core::marker::Sized = (),
       > {
         _lang: PhantomData<Lang>,
+        status: Status,
         span: Span,
         data: D,
+      }
+
+      // Written out rather than derived, and the only thing that changes is the bound list. A
+      // derive constrains **every** type parameter, so `#[derive(Debug)]` here emitted
+      // `Lang: Debug` — a requirement on a marker that is never printed, compared or hashed,
+      // since `PhantomData<T>` implements all six for any `T` unconditionally. Seventeen literal
+      // types were unusable with an underived language marker for a reason that does not exist.
+      //
+      // Rendering, comparison order and hashed bytes are unchanged: every field is still visited
+      // in declaration order, the possibly-unsized one still goes in behind a second reference
+      // the way the derive passes it, and `PhantomData` hashes nothing.
+      impl<D, Span, Lang> ::core::fmt::Debug for $name<D, Span, Lang>
+      where
+        D: ::core::fmt::Debug + ?::core::marker::Sized,
+        Span: ::core::fmt::Debug,
+        Lang: ?::core::marker::Sized,
+      {
+        fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+          f.debug_struct(::core::stringify!($name))
+            .field("_lang", &&self._lang)
+            .field("status", &&self.status)
+            .field("span", &&self.span)
+            .field("data", &&self.data)
+            .finish()
+        }
+      }
+
+      impl<D, Span, Lang> ::core::clone::Clone for $name<D, Span, Lang>
+      where
+        D: ::core::clone::Clone,
+        Span: ::core::clone::Clone,
+        Lang: ?::core::marker::Sized,
+      {
+        #[inline]
+        fn clone(&self) -> Self {
+          Self {
+            _lang: PhantomData,
+            status: self.status,
+            span: ::core::clone::Clone::clone(&self.span),
+            data: ::core::clone::Clone::clone(&self.data),
+          }
+        }
+      }
+
+      impl<D, Span, Lang> ::core::marker::Copy for $name<D, Span, Lang>
+      where
+        D: ::core::marker::Copy,
+        Span: ::core::marker::Copy,
+        Lang: ?::core::marker::Sized,
+      {
+      }
+
+
+
+      impl<D, Span, Lang> ::core::hash::Hash for $name<D, Span, Lang>
+      where
+        D: ::core::hash::Hash + ?::core::marker::Sized,
+        Span: ::core::hash::Hash,
+        Lang: ?::core::marker::Sized,
+      {
+        #[inline]
+        fn hash<H: ::core::hash::Hasher>(&self, state: &mut H) {
+          ::core::hash::Hash::hash(&self.status, state);
+          ::core::hash::Hash::hash(&self.span, state);
+          ::core::hash::Hash::hash(&self.data, state);
+        }
       }
     }
 
@@ -161,11 +244,20 @@ macro_rules! define_literal {
     }
 
     impl<D, Span, Lang: ?::core::marker::Sized> IntoComponents for $name<D, Span, Lang> {
-      type Components = (Span, D);
+      /// The span, the data, **and the recovery status** — every field this type holds beyond
+      /// the zero-sized language marker, which the rebuild names in its own type.
+      ///
+      /// The status is here because this trait promises a complete decomposition and because
+      /// `FromComponents` is the inverse: without it in both, a consumer who took a literal apart
+      /// and put it back together would have to rebuild through `new`, which always declares the
+      /// result valid.
+      type Components = $crate::types::recovery::Components<Span, D>;
 
       #[inline(always)]
       fn into_components(self) -> Self::Components {
-        (self.span, self.data)
+        let Self { _lang, status, span, data } = self;
+
+        $crate::types::recovery::Components { span, payload: data, status }
       }
     }
 
@@ -211,6 +303,7 @@ macro_rules! define_literal {
       pub const fn data_ref(&self) -> &D {
         &self.data
       }
+
     }
 
     impl<D, Span, Lang: ?::core::marker::Sized> $name<D, Span, Lang> {
@@ -222,9 +315,18 @@ macro_rules! define_literal {
       /// - `data`: The literal's data
       #[inline(always)]
       pub const fn new(span: Span, data: D) -> Self {
+        Self::with_status(span, data, Status::Valid)
+      }
+
+      /// The status-setting constructor, crate-internal. Public construction with a chosen
+      /// status goes through `FromComponents`; see that trait for why an inherent
+      /// `with_status` could be re-targeted by a type-directed argument.
+      #[inline(always)]
+      const fn with_status(span: Span, data: D, status: Status) -> Self {
         Self {
           span,
           data,
+          status,
           _lang: PhantomData,
         }
       }
@@ -241,21 +343,47 @@ macro_rules! define_literal {
       }
     }
 
+    impl<D, Span, Lang: ?::core::marker::Sized> $crate::types::recovery::FromComponents
+      for $name<D, Span, Lang>
+    {
+      #[inline(always)]
+      fn from_components(components: Self::Components) -> Self {
+        let $crate::types::recovery::Components { span, payload, status } = components;
+
+        Self::with_status(span, payload, status)
+      }
+    }
+
+    impl<D: ?::core::marker::Sized, Span, Lang: ?::core::marker::Sized> $crate::types::recovery::RecoveryState
+      for $name<D, Span, Lang>
+    {
+      #[inline(always)]
+      fn status(&self) -> Status {
+        self.status
+      }
+    }
+
     impl<D, Span, Lang: ?::core::marker::Sized> ErrorNode<Span> for $name<D, Span, Lang>
     where
       D: ErrorNode<Span>,
       Span: Clone,
     {
       /// Creates a placeholder literal for **malformed content**.
+      ///
+      /// The result reports itself through `is_error`; the data is a placeholder, not the
+      /// channel.
       #[inline(always)]
       fn error(span: Span) -> Self {
-        Self::new(span.clone(), D::error(span))
+        Self::with_status(span.clone(), D::error(span), Status::Error)
       }
 
       /// Creates a placeholder literal for **missing required content**.
+      ///
+      /// The result reports itself through `is_missing`; the data is a placeholder, not the
+      /// channel.
       #[inline(always)]
       fn missing(span: Span) -> Self {
-        Self::new(span.clone(), D::missing(span))
+        Self::with_status(span.clone(), D::missing(span), Status::Missing)
       }
     }
   };

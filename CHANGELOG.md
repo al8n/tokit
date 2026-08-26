@@ -71,6 +71,111 @@ and will red until they do.
 
 ### Added
 
+- **`types::Status`, and `with_status` on all nineteen recovery carriers** (#320). The recovery
+  state stops being a private field and becomes a value a consumer can hold: it is returned by
+  `IntoComponents` (see **Changed (breaking)**) and accepted back by
+  `Ident::with_status`, `Keyword::with_status` and each `Lit*::with_status`, which are the inverses
+  of that decomposition and make a decompose-and-rebuild the identity in all three states.
+
+  `with_status` is also the only constructor that can express a state other than valid over a
+  payload the **caller** chose — `new` always declares the result valid, and `ErrorNode::error` /
+  `ErrorNode::missing` pick the payload themselves — so a dialect with its own placeholder
+  spelling now has a door. Without it a complete decomposition would still have ended in
+  laundering, because the only public way back in forced `Valid`.
+
+  `Status` is `#[non_exhaustive]`: a fourth recovery state is admissible later, so a `match` needs
+  a wildcard arm and `is_valid()` is deliberately not `!is_error() && !is_missing()`.
+
+- **`types::recovery::FromComponents` — the inverse of `IntoComponents`** (#320).
+  `T::from_components(x.into_components())` rebuilds a carrier with its recovery state intact, and
+  is the door that closes the laundering: rebuilding through `new` would declare a recovered node
+  valid.
+
+  It is a **trait** method, and that is a repair rather than a style. The same job was briefly done
+  by a `pub const fn with_status(span, payload, status)` inherent on each of the nineteen carriers,
+  argued loud because its `Status` parameter is a type no pre-upgrade expression can produce.
+  **That is false for a type-directed expression, and it was measured.** An unchanged
+  `unsafe { core::mem::zeroed() }` in that argument position infers as a consumer's own status enum
+  before the upgrade and as `Status` after; both revisions compile, there is no ambiguity, and
+  dispatch moves from the consumer's trait to tokora's inherent function. With `Status::Valid` at
+  discriminant zero, a consumer's zero-valued *rejection* becomes valid syntax.
+  `transmute::<u8, _>(0)` does the same, and `MaybeUninit::uninit().assume_init()` yields whatever
+  the stack held. Bounded routes were measured too and all fail loudly — `Default::default()`,
+  `x.into()`, an associated constant and a bounded generic call each need an impl or a named type
+  `Status` does not provide. The silent routes are exactly the **unbounded** ones.
+
+  A trait method sits where a consumer's inherent item outranks it, its argument is an associated
+  type rather than a bare `Status`, and `recovery` is not glob-re-exported — so it has to be named.
+  No consumer code depends on the withdrawn spelling: `with_status` is new in this release and
+  never shipped, which is why it goes where `Ident`'s predicates came back.
+
+- **`types::recovery::{RecoveryState, Status}`, over all nineteen recovery carriers**
+  (#301). `Keyword` and the seventeen literal carriers implemented `ErrorNode` — so
+  `error(span)` and `missing(span)` were public and documented as recovery placeholders — while
+  holding no field that could record which of the three states a value was in. The only way to
+  tell a recovered node from one spelled out in the source was to compare its payload against
+  the `"<error>"` / `"<missing>"` sentinel, which is a value a caller can spell by hand and edit
+  afterwards through `source_mut` / `data_mut`.
+
+  Each of the nineteen now carries the same private `Status` `Ident` has carried since #266, set
+  by `new` (valid) and by the two `ErrorNode` constructors. The rule they are all keeping is
+  stated once, on `ErrorNode` itself, under **Two Shapes of Implementor**: a *payload* type such
+  as `&str` has nowhere to put a state and so its placeholder is a sentinel; a *carrier* type with
+  fields of its own owes a status field. The trait's own diagnostics example used to demonstrate
+  the sentinel comparison and now reads the state.
+
+  **`Ident` keeps its three inherent predicates; the other eighteen carriers answer only through
+  the trait.** That asymmetry is a rule applied to two histories rather than an oversight, and the
+  rule is written beside the methods in `ident.rs`:
+
+  > Do not change resolution for a name that already shipped; do not create a new resolution
+  > hazard for a name that did not.
+
+  `Ident::is_valid` has been inherent since #266, and an inherent method **wins** the pick over an
+  extension trait's — so a downstream crate with its own `is_valid` for `Ident` has been getting
+  tokora's answer. Removing the inherent one does not merely cost them an import: the call still
+  compiles, with no ambiguity, and silently falls through to theirs. It falls the dangerous way,
+  too, since a check that merely accepts a non-empty payload reads `Ident::error(span)`'s
+  `"<error>"` as valid syntax. A draft of this release did remove them, on the argument that the
+  declared channel should not have two spellings; that argument is about how the surface reads,
+  and this one is about existing code changing meaning with nothing to catch it. They are not the
+  same weight.
+
+  **`is_valid`, `is_error` and `is_missing` are on `RecoveryState` for the other eighteen**, which
+  never had the names, and that is the point rather than a detail.
+
+  `IdentList` keeps its three as inherent methods and does **not** implement the trait. They are
+  not the same question either: a list is an aggregate, and `is_error` and `is_missing` can both
+  be true of one at once, which no single `Status` can say. Those three names are ones a downstream crate may
+  already have on an extension trait of its own — "this literal's payload parses as a number" —
+  and Rust prefers an inherent method over a trait's at an unqualified call site. Shipping them
+  inherent would have left `literal.is_valid()` compiling and quietly answering a different
+  question after an upgrade, with no diagnostic anywhere. On a trait the clash is
+  `error[E0034]: multiple applicable items in scope` naming both candidates, or no change at all
+  for a consumer who does not import ours. Widening `IntoComponents` rather than withdrawing it
+  was justified below by exactly this standard — that a change of meaning must not be silent —
+  and these methods are the case it would otherwise have excluded.
+
+  **`status` is on the trait too, and there is no inherent accessor of any name.** It was briefly
+  inherent, kept there to stay `const fn`, on the reasoning that a return type which did not exist
+  before could not be displaced silently. That reasoning is wrong, and the counterexample is one
+  line: `literal.status().is_valid()` typechecks either way, because `Status` offers `is_valid`
+  too — a differing return type is only loud if the caller *stores* the value. Since `new` marks
+  any caller-supplied payload `Valid`, a literal the consumer's own check would have rejected then
+  passes.
+
+  So the test a name has to survive is not *does the signature differ* but **does the whole call
+  chain still typecheck with a different meaning**, and an inherent accessor of any name fails it
+  whenever the two returned types share a method.
+
+  **The cost is that the recovery state is not readable in a const context**, by any spelling,
+  because a trait method cannot be `const`. Nothing in this crate read it in one, and a parse
+  result is not const-constructible in practice. Two ways to keep it were available and both are
+  worse: a `pub` field is a public *setter*, and `x.status = Status::Valid` would launder a
+  placeholder into valid syntax by assignment — the whole defect this type closes; a receiver-less
+  associated function escapes method syntax but is still displaced in path position, trading a
+  certainty for an improbability, and resting on the class of reasoning that was just wrong.
+
 - **`cst::TreeCheckpoint` — the builder's own checkpoint, carrying the one number `rowan`'s does
   not** (#316). Returned by `SyntaxTreeBuilder::checkpoint` and spent by `start_node_at`; it wraps
   `rowan::Checkpoint` beside the flat child index the depth ledger charges a retro-wrap against.
@@ -812,6 +917,143 @@ and will red until they do.
   the converting one fails `Silent` verbatim, and the bound-free one stops covering the delimited
   driver the bundle exists for.
 
+- **`RecoveryState`, `FromComponents` and `Components` live in `tokora::types::recovery` and are
+  reached by naming it; `Status` is also re-exported as `tokora::types::Status`** (#320). A glob of
+  `tokora::types::*` therefore gets the status type, and the traits are one import away:
+  `use tokora::types::recovery::{RecoveryState, FromComponents, Components};`.
+
+  **A measured table came out of settling this, and it is worth keeping on its own.** With the
+  consumer's source held fixed, the library gaining one item, and — this is the part an earlier
+  attempt got wrong — **both sides exposing the item the consumer reaches for**:
+
+  | kind       | vs an extern crate of that name  | vs a second glob            | vs a local def |
+  |------------|----------------------------------|-----------------------------|----------------|
+  | **module** | **silent redirect**              | `E0659`                     | local wins     |
+  | **type**   | **silent redirect**              | `E0659`                     | local wins     |
+  | **trait**  | `E0790`                          | **silent, first glob wins** | local wins     |
+  | fn / const | no interaction (value namespace) | `E0659`                     | local wins     |
+
+  The `type` row was first read as `E0599`, loud. That was a probe that could only be loud — it
+  asked the shadowing type for an associated item it did not have. With a dependency aliased
+  `Status` exporting `Error`, and tokora's `Status` carrying an `Error` variant with an inherent
+  `is_error()`, `Status::Error.is_error()` compiles on both revisions and the boolean inverts. So
+  **no kind is loud on both axes.**
+
+  **The placement is not derived from that table.** A draft read it as a budget and chose by
+  counting collidable names; that was the wrong criterion. The line this release is drawn on is:
+  **tokora must not silently change what a method on a tokora type means, while a name a consumer's
+  own glob shadows is that glob's cost and `::` is its fix.**
+
+  Those are two axes. `literal.is_valid()` on a `Lit*`, `Ident` or `Keyword` is the first — the
+  consumer holds tokora's type, calls what they believe is their own check, and gets tokora's
+  answer — and every carrier repair in this release is that class. `Status` in `types::*` and the
+  `recovery` module are the second: a path into the consumer's own namespace shadowed by a glob
+  they wrote, in code unrelated to tokora's carriers, with `::` as the remedy in both cases. Note
+  that *loud versus silent* does not sort them — the module clashes loudly and `Status` can clash
+  quietly — which is why the deciding property is whose type the call is on. It is also a rule
+  nothing could follow: no public module or vocabulary type could ever be added again.
+
+  **The module keeps the name `recovery`, and the check behind that is dated rather than argued.**
+  Against the crates.io API on 2026-08-27: `recovery` 0.1.6, ~16.1k downloads, last updated
+  2025-09-14, whose docs instruct `use recovery::Recovery;`. `Recovery` is not one of this module's
+  names, so a consumer of both crates gets `E0432` at their own import line — measured, plus
+  `E0659` where the name is then used — never a redirect. A rename was drafted on the mistake above
+  and withdrawn.
+
+- **The recovery carriers keep `PartialEq`/`Eq` derived, and only the other four are hand-written**
+  (#320). Replacing all six derives dropped the compiler-generated `StructuralPartialEq`, so a
+  `const` of a carrier could no longer appear in a `match` pattern — *"constant of non-structural
+  type"*. That was an unannounced break against 0.9, and it slipped through because the change was
+  verified by **rendering**: `Debug`'s field order, `PartialEq`'s short-circuit order, `Hash`'s
+  bytes. Structural matching is not observable that way; only using a value in a pattern shows it.
+
+  Both properties cannot be had at once, and the split is where the evidence put it. Keeping
+  `PartialEq`/`Eq` derived restores structural matching **only when the marker itself satisfies
+  them**, because a derive still constrains every parameter — verified, not assumed: with the
+  derive restored and a marker carrying no traits at all, the pattern is still rejected.
+
+  So the **residual cost** is stated: comparing or pattern-matching a carrier still needs its
+  language marker to be `PartialEq + Eq`, exactly as 0.9 required. Printing, cloning, copying and
+  hashing no longer need anything of it. Four of the six bounds dropped, structural matching
+  unchanged — strictly better than 0.9 on every axis, which is why this is not a choice between
+  two breaks.
+
+- **The recovery carriers stop demanding traits of their language marker** (#320). `Ident`,
+  `Keyword`, the seventeen `Lit*` types and `IdentList` derived `Debug`, `Copy`, `Clone`,
+  `PartialEq`, `Eq` and `Hash`, and a derive constrains **every** type parameter — so each of the
+  six carried a `Lang:` bound that nothing in the body uses, since `PhantomData<T>` implements all
+  six for any `T` unconditionally. `Ident<&str, SimpleSpan, MyLang>` was therefore not printable,
+  copyable, comparable or hashable unless the consumer derived those on the marker too, for a
+  reason that does not exist. `IdentList` demanded it twice over: `S` appears only in
+  `PhantomData<S>` and in the default container type, so `S: Debug` was spurious as well.
+
+  The six are now written out with bounds naming only the parameters the body reads.
+  **Nothing else changes**: `Debug` prints the same fields in declaration order, `PartialEq`
+  short-circuits in the same order, and `Hash` feeds the same bytes, because `PhantomData` hashes
+  nothing. Listed as breaking only because an impl's bounds are part of the surface — every
+  program that compiled before still compiles, and some that did not now do.
+
+  This is filed here rather than as a follow-up because #320's first draft **worked around it in a
+  doctest**, adding `#[derive(Debug, Clone, Copy, PartialEq)]` to a marker to make the example
+  build. Published documentation that teaches a consumer to derive four traits on a marker for a
+  reason that is not real is worse than the bare defect, so the workaround is gone and the example
+  now stands as a consumer would write it — which is also the regression test.
+
+- **`IntoComponents::Components` on all nineteen recovery carriers becomes
+  `types::recovery::Components { span, payload, status }` — a named struct, not a tuple** (#320). `Ident`, `Keyword` and the
+  seventeen `Lit*` types hold a span, a payload and a recovery status, and returned two of the
+  three. The trait's own contract is that a decomposition is complete with no information loss,
+  and the test of that is whether the output rebuilds the input: it did not, so
+  `LitDecimal::error(span)` and `LitDecimal::new(span, "<error>")` decomposed **identically**, and
+  anything that took a carrier apart and put it back together through `new` reported a recovery
+  placeholder as valid syntax — the laundering #303 removed from `Ident::map`, reached one door
+  over. `Keyword`'s inherent `into_components`, which wins the pick over the trait's at an
+  unqualified call site, widens with it and the trait impl now delegates to it so the two shapes
+  cannot drift.
+
+  **`Ident` is included even though it predates this**, because it is the model the #266 rule
+  points at and the type this branch held up as correct; a model with the hole teaches the hole,
+  and leaving it would have left `Ident::into_components` returning a 2-tuple beside `Keyword`'s
+  3-tuple.
+
+  Migration is a compile error at every site: `let (span, src) = x.into_components();` becomes
+  `let Components { span, payload, .. } = …`. Withdrawing the impls was the alternative and is
+  worse: for an owned payload `into_components` is the only extraction that does not clone, and
+  withdrawal removes a capability where completing it is what was needed.
+
+  **A three-tuple was tried first and is not safe**, which is why the shape is a struct. Widening
+  `(Span, Payload)` to `(Span, Payload, Status)` was defended on the grounds that the arity changes
+  and every stale destructuring therefore breaks loudly. One line defeats that:
+
+  ```rust,ignore
+  let (_, .., value) = literal.into_components();
+  value.is_valid()
+  ```
+
+  `..` matches zero elements against a pair and one against a triple, so `value` is the payload
+  before and the status after. Both compile whenever the payload also answers `is_valid`, and
+  since `new` assigns `Status::Valid`, a payload the caller's own check rejects then reports
+  valid. `(.., b)` and `.1` are the same defect in other spellings.
+
+  That was the third exemption of its kind refuted in this release — after *the return type
+  differs* and *the argument type is a `Status`* — and all three failed the same way: each
+  estimated what a consumer could have written, and estimated it too small. So this is not a
+  better-argued exemption but a shape no tuple pattern can match at all. Ten shapes were compiled
+  against both the old pair and the new struct: `(a, b)`, `(_, b)`, `(a, ..)`, `(_, .., b)`,
+  `(.., b)`, a trailing comma, `ref` bindings, a `match` arm, `.0` and `.1`. All ten build against
+  the pair — that is the control — and all ten are refused against the struct, with `E0308` for the
+  patterns and `E0609` for the index accesses. Eight of them are `compile_fail` doctests on
+  `Components` with the codes pinned, and the pinning was itself checked by planting a wrong code.
+
+  It is the better API besides: three positional parts whose third is a status is exactly the
+  shape that made `..` dangerous, and a named field says which is which.
+
+  **The stated residual.** A consumer who never looks inside the value keeps compiling —
+  `format!("{:?}", x.into_components())`, or passing it to a generic sink. What they observe
+  changes; what they can *extract* does not, because every pattern, index and typed argument is
+  now refused. There is no spelling that silently hands back the status where the payload used to
+  be.
+
 - **`CachedToken::state` and `CachedToken::into_components` are crate-internal** (#311). The regime
   a cached token carries is now an opaque payload: carried, cloned and moved, never read.
 
@@ -1418,6 +1660,35 @@ and will red until they do.
   `FromLogos` is the one member of the family with no reference impl and cannot have one: it
   constructs (`fn from_logos(Self::Logos) -> Self`), and a `&'a T` cannot be built from an owned
   logos token.
+
+- **`From<Keyword> for Ident` carries the recovery status instead of fabricating `Valid`**
+  (#301). `Keyword::<&str>::missing(span).into()` produced an `Ident` reporting `is_valid()`,
+  and an `IdentList` containing that segment then reported itself valid as a whole. The
+  conversion was documented as unfixable at the call site because the information did not exist
+  on the source side; it does now, and it crosses unchanged. `Keyword::map` carries it too, for
+  the reason `Ident::map` does — mapping `&str` to `String` changes how a spelling is stored,
+  not whether there was one.
+
+  **Two behaviours change with no diagnostic.** `Keyword::error(span)` no longer compares equal
+  to `Keyword::new(span, "<error>")`, and hashes differently, because the status is part of the
+  value; and the eighteen carriers grow one field, so `Keyword<&str, SimpleSpan>` goes from 32 to
+  40 bytes — exactly `Ident<&str, SimpleSpan>`'s size, which already paid it.
+
+- **`InvalidHexDigits`'s shared reader can no longer be turned into a truncating one by a method
+  added later** (#280). The type's `Deref`, `DerefMut` and `bump` read `as_slices().0` /
+  `as_mut_slices().0` — the first physical segment of a ring buffer handed out as the whole set,
+  the shape #245 fixed in `IncompleteSyntax`. It was correct, because the only mutation was an
+  append and so the head never left zero, but that was a property of the method list rather than
+  of the type, and two of the three reads went through `Deref`/`DerefMut` and so did not name
+  `as_slices` for a grep to find.
+
+  The two reads whose receiver is exclusive now normalize instead of assuming: `make_contiguous`
+  returns the whole ring by construction, whatever state it is in. The one that cannot — `Deref`
+  takes `&self` by trait definition, and one `&[T]` cannot describe two segments — is backed by
+  containment rather than by a comment: the struct is declared in a private submodule, so its
+  field is unreachable from the rest of the file, and every mutation goes through one funnel that
+  restores contiguity on exit, the unwinding one included. A `pop_front` added next year is a
+  private-field error, not a silent reintroduction.
 
 - **A green tree deep enough to abort in its own destructor can no longer be materialized**
   (#316). The construction half of an uncatchable process abort reachable from safe third-party
@@ -2314,6 +2585,27 @@ and will red until they do.
   `increase_both_and_check`'s claimed it decreased recursion (it increases both).
 
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
+
+**`Status` is a new public name in `tokora::types`** (#320). A consumer with
+`use tokora::types::*;` and a `Status` of their own gets `error[E0659]` at the name, resolved by an
+explicit import or an `as` alias. `RecoveryState` and `FromComponents` are **not** in that
+namespace — they live in `tokora::types::recovery` and must be named, because a trait behind a
+glob is picked silently where a type is not.
+
+*Three earlier drafts of this release listed more names here, and all are withdrawn.* The third
+listed `with_status` as a new inherent associated function that could not be displaced silently,
+because its `Status` parameter is a type no pre-upgrade code can produce. That is true only of
+expressions whose type comes from the expression; an `unsafe { zeroed() }` takes its type from the
+**parameter**, compiles on both revisions, and moves dispatch. There is no inherent `with_status`
+any more — see `FromComponents` under **Added**.* The first
+listed `is_valid`, `is_error` and `is_missing` as new inherent methods on `Keyword` and the
+seventeen `Lit*` types, offering UFCS as the fix; they are on `RecoveryState` and were never
+shipped inherent. The second listed `status` beside `with_status` on the argument that a new
+return type makes a clash loud; that argument is false, since `literal.status().is_valid()`
+typechecks whichever `status` wins, and there is now no inherent `status` at all. **A note in this
+section is the right home for a name that fails loudly and the wrong one for a name that rebinds
+in silence** — and the test for which is whether the whole call chain still typechecks with a
+different meaning, not whether the signature differs.
 
 **`InputRef::trip_snapshot` and `InputRef::tripped_during_attempt` are new inherent methods on a
 type that already shipped.** An inherent item wins the pick over an extension trait's, so a

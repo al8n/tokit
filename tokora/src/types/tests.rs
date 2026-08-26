@@ -1,5 +1,9 @@
 use super::*;
+// `RecoveryState` is no longer re-exported into `types`, so `use super::*` does not bring it in —
+// which is the whole repair, and this line is what an ordinary consumer writes instead.
+use super::recovery::{Components, FromComponents, RecoveryState, Status};
 use std::{
+  format,
   string::{String, ToString},
   vec,
   vec::Vec,
@@ -143,9 +147,14 @@ fn ident_list_of_mapped_recovery_segments_is_not_valid() {
 fn ident_into_components() {
   use crate::utils::IntoComponents;
   let ident = Ident::<&str>::new(SimpleSpan::new(0, 3), "foo");
-  let (span, source) = ident.into_components();
+  let Components {
+    span,
+    payload: source,
+    status,
+  } = ident.into_components();
   assert_eq!(span, SimpleSpan::new(0, 3));
   assert_eq!(source, "foo");
+  assert!(status.is_valid());
 }
 
 #[test]
@@ -196,7 +205,12 @@ fn keyword_map() {
 #[test]
 fn keyword_into_components() {
   let kw = Keyword::<&str>::new(SimpleSpan::new(0, 3), "let");
-  let (span, source) = kw.into_components();
+  let Components {
+    span,
+    payload: source,
+    status,
+  } = kw.into_components();
+  assert!(status.is_valid());
   assert_eq!(span, SimpleSpan::new(0, 3));
   assert_eq!(source, "let");
 }
@@ -207,18 +221,105 @@ fn keyword_into_ident() {
   let ident: Ident<&str> = kw.into();
   assert_eq!(ident.source(), "let");
   assert_eq!(ident.span(), SimpleSpan::new(0, 3));
+  assert!(ident.is_valid());
 }
 
 #[test]
 fn keyword_error_node() {
   let err = Keyword::<&str>::error(SimpleSpan::new(0, 5));
+  assert!(err.is_error());
+  assert!(!err.is_valid());
   assert_eq!(err.source(), "<error>");
 }
 
 #[test]
 fn keyword_missing_node() {
   let missing = Keyword::<&str>::missing(SimpleSpan::new(0, 5));
+  assert!(missing.is_missing());
+  assert!(!missing.is_valid());
   assert_eq!(missing.source(), "<missing>");
+}
+
+/// The conversion carries the recovery status instead of fabricating `Valid`. The valid row is
+/// the non-vacuity control: it passed before this channel existed, so a green table is evidence
+/// about the two recovery rows.
+#[test]
+fn keyword_into_ident_carries_the_recovery_status() {
+  let span = SimpleSpan::new(4, 7);
+
+  let rows: [(&str, Keyword<&str>, [bool; 3]); 3] = [
+    ("valid", Keyword::new(span, "let"), [true, false, false]),
+    ("error", Keyword::error(span), [false, true, false]),
+    ("missing", Keyword::missing(span), [false, false, true]),
+  ];
+
+  for (label, keyword, [valid, error, missing]) in rows {
+    let ident: Ident<&str> = keyword.into();
+    assert_eq!(ident.is_valid(), valid, "{label}: is_valid");
+    assert_eq!(ident.is_error(), error, "{label}: is_error");
+    assert_eq!(ident.is_missing(), missing, "{label}: is_missing");
+  }
+}
+
+/// A source-only `map` changes how the spelling is stored, not whether the parser found one.
+#[test]
+fn keyword_map_preserves_recovery_status() {
+  let span = SimpleSpan::new(0, 3);
+
+  let rows: [(&str, Keyword<&str>, &str, [bool; 3]); 3] = [
+    (
+      "valid",
+      Keyword::new(span, "let"),
+      "LET",
+      [true, false, false],
+    ),
+    (
+      "error",
+      Keyword::error(span),
+      "<ERROR>",
+      [false, true, false],
+    ),
+    (
+      "missing",
+      Keyword::missing(span),
+      "<MISSING>",
+      [false, false, true],
+    ),
+  ];
+
+  for (label, keyword, expected_source, [valid, error, missing]) in rows {
+    let mapped: Keyword<String> = keyword.map(str::to_uppercase);
+    assert_eq!(mapped.source_ref(), expected_source, "{label}: source");
+    assert_eq!(mapped.span(), span, "{label}: span");
+    assert_eq!(mapped.is_valid(), valid, "{label}: is_valid");
+    assert_eq!(mapped.is_error(), error, "{label}: is_error");
+    assert_eq!(mapped.is_missing(), missing, "{label}: is_missing");
+  }
+}
+
+/// The payload is not the channel: spelling a sentinel into a carrier by hand does not make it
+/// a recovery placeholder, and editing a placeholder's payload does not make it valid syntax.
+#[test]
+fn a_sentinel_payload_is_not_a_recovery_status() {
+  let span = SimpleSpan::new(0, 7);
+
+  let mut hand_written = Keyword::<&str>::new(span, "<error>");
+  assert!(hand_written.is_valid());
+  assert!(!hand_written.is_error());
+
+  *hand_written.source_mut() = "<missing>";
+  assert!(hand_written.is_valid());
+  assert!(!hand_written.is_missing());
+
+  let mut recovered = Keyword::<&str>::missing(span);
+  *recovered.source_mut() = "let";
+  assert!(recovered.is_missing());
+  assert!(!recovered.is_valid());
+
+  let mut lit = LitDecimal::<&str>::error(span);
+  *lit.data_mut() = "42";
+  assert!(lit.is_error());
+  assert!(!lit.is_valid());
 }
 
 // --- Literal types tests ---
@@ -248,12 +349,16 @@ fn lit_decimal_data_mut() {
 #[test]
 fn lit_decimal_error_node() {
   let err = LitDecimal::<&str>::error(SimpleSpan::new(0, 5));
+  assert!(err.is_error());
+  assert!(!err.is_valid());
   assert_eq!(err.data(), "<error>");
 }
 
 #[test]
 fn lit_decimal_missing_node() {
   let missing = LitDecimal::<&str>::missing(SimpleSpan::new(0, 5));
+  assert!(missing.is_missing());
+  assert!(!missing.is_valid());
   assert_eq!(missing.data(), "<missing>");
 }
 
@@ -285,7 +390,12 @@ fn lit_hex_new() {
 fn lit_into_components() {
   use crate::utils::IntoComponents;
   let lit = LitDecimal::<&str>::new(SimpleSpan::new(0, 2), "42");
-  let (span, data) = IntoComponents::into_components(lit);
+  let Components {
+    span,
+    payload: data,
+    status,
+  } = IntoComponents::into_components(lit);
+  assert!(status.is_valid());
   assert_eq!(span, SimpleSpan::new(0, 2));
   assert_eq!(data, "42");
 }
@@ -427,7 +537,12 @@ fn keyword_as_span() {
 fn keyword_into_components_trait() {
   use crate::utils::IntoComponents;
   let kw = Keyword::<&str>::new(SimpleSpan::new(0, 3), "let");
-  let (span, source) = IntoComponents::into_components(kw);
+  let Components {
+    span,
+    payload: source,
+    status,
+  } = IntoComponents::into_components(kw);
+  assert!(status.is_valid());
   assert_eq!(span, SimpleSpan::new(0, 3));
   assert_eq!(source, "let");
 }
@@ -435,9 +550,14 @@ fn keyword_into_components_trait() {
 #[test]
 fn keyword_into_components_method() {
   let kw = Keyword::<&str>::new(SimpleSpan::new(0, 3), "let");
-  let (span, source) = kw.into_components();
+  let Components {
+    span,
+    payload: source,
+    status,
+  } = kw.into_components();
   assert_eq!(span, SimpleSpan::new(0, 3));
   assert_eq!(source, "let");
+  assert!(status.is_valid());
 }
 
 // --- Additional Ident tests for coverage ---
@@ -458,7 +578,12 @@ fn ident_as_span() {
 fn ident_into_components_trait() {
   use crate::utils::IntoComponents;
   let ident = Ident::<&str>::new(SimpleSpan::new(0, 3), "foo");
-  let (span, source) = IntoComponents::into_components(ident);
+  let Components {
+    span,
+    payload: source,
+    status,
+  } = IntoComponents::into_components(ident);
+  assert!(status.is_valid());
   assert_eq!(span, SimpleSpan::new(0, 3));
   assert_eq!(source, "foo");
 }
@@ -596,7 +721,12 @@ fn lit_false_new() {
 fn lit_decimal_into_components_trait() {
   use crate::utils::IntoComponents;
   let lit = LitHex::<&str>::new(SimpleSpan::new(0, 4), "0xFF");
-  let (span, data) = IntoComponents::into_components(lit);
+  let Components {
+    span,
+    payload: data,
+    status,
+  } = IntoComponents::into_components(lit);
+  assert!(status.is_valid());
   assert_eq!(span, SimpleSpan::new(0, 4));
   assert_eq!(data, "0xFF");
 }
@@ -604,13 +734,26 @@ fn lit_decimal_into_components_trait() {
 #[test]
 fn lit_error_node_generic() {
   let err = Lit::<&str>::error(SimpleSpan::new(0, 5));
+  assert!(err.is_error());
+  assert!(!err.is_valid());
   assert_eq!(err.data(), "<error>");
 }
 
 #[test]
 fn lit_missing_node_generic() {
   let missing = Lit::<&str>::missing(SimpleSpan::new(0, 5));
+  assert!(missing.is_missing());
+  assert!(!missing.is_valid());
   assert_eq!(missing.data(), "<missing>");
+}
+
+/// A literal built by `new` is valid, whatever its data type — the status is the channel, and
+/// `new` is the door that declares it.
+#[test]
+fn a_literal_built_by_new_is_valid() {
+  assert!(LitDecimal::<&str>::new(SimpleSpan::new(0, 2), "42").is_valid());
+  assert!(LitBool::<bool>::new(SimpleSpan::new(0, 4), true).is_valid());
+  assert!(LitNull::<()>::new(SimpleSpan::new(0, 4), ()).is_valid());
 }
 
 #[test]
@@ -618,4 +761,843 @@ fn lit_bump() {
   let mut lit = LitDecimal::<&str>::new(SimpleSpan::new(0, 2), "42");
   lit.bump(&5);
   assert_eq!(lit.span(), SimpleSpan::new(5, 7));
+}
+
+// --- Round trip: decompose and rebuild, over every carrier and every state ---
+
+/// Decomposes and rebuilds one carrier in each of its three states, and checks four things per
+/// state: the span survives, the payload survives, **the status survives**, and the rebuilt value
+/// equals the one it came from.
+///
+/// The last is the one that matters. `IntoComponents` promises a complete decomposition, so its
+/// output has to be enough to reconstruct the input — and before tokora#320 it was not: the tuple
+/// was `(Span, Payload)` over a carrier holding a status too, so `error(span)` and
+/// `new(span, "<error>")` decomposed identically and any rebuild through `new` reported a
+/// recovery placeholder as valid syntax.
+///
+/// Written over the carrier list rather than over one exemplar, because that list is the
+/// population: seventeen of the nineteen come from one `define_literal!` body, and a test that
+/// named only `LitDecimal` would report green over the sixteen it never ran.
+macro_rules! assert_status_survives_a_round_trip {
+  ($($carrier:ident),+ $(,)?) => {
+    $({
+      let span = SimpleSpan::new(3, 9);
+
+      for status in [Status::Valid, Status::Error, Status::Missing] {
+        let name = stringify!($carrier);
+        let original = $carrier::<&str>::from_components(Components { span, payload: "payload", status });
+
+        let Components { span: sp, payload, status: st } = IntoComponents::into_components(original);
+        assert_eq!(sp, span, "{name} in {status:?}: span");
+        assert_eq!(payload, "payload", "{name} in {status:?}: payload");
+        assert_eq!(st, status, "{name} in {status:?}: status survives the decomposition");
+
+        let rebuilt = $carrier::<&str>::from_components(Components { span: sp, payload, status: st });
+        assert_eq!(rebuilt, original, "{name} in {status:?}: the round trip is the identity");
+        assert_eq!(rebuilt.is_valid(), status.is_valid(), "{name} in {status:?}: is_valid");
+        assert_eq!(rebuilt.is_error(), status.is_error(), "{name} in {status:?}: is_error");
+        assert_eq!(rebuilt.is_missing(), status.is_missing(), "{name} in {status:?}: is_missing");
+      }
+    })+
+  };
+}
+
+#[test]
+fn every_carrier_survives_a_decompose_and_rebuild_in_every_state() {
+  use crate::utils::IntoComponents;
+
+  assert_status_survives_a_round_trip!(
+    Ident,
+    Keyword,
+    Lit,
+    LitDecimal,
+    LitHex,
+    LitOctal,
+    LitBinary,
+    LitFloat,
+    LitHexFloat,
+    LitString,
+    LitMultilineString,
+    LitRawString,
+    LitChar,
+    LitByte,
+    LitByteString,
+    LitBool,
+    LitTrue,
+    LitFalse,
+    LitNull,
+  );
+}
+
+/// `Keyword` carries a second decomposition door: an inherent `into_components` that wins the
+/// pick over the trait's at an unqualified call site. The two returning different shapes would be
+/// a defect no diagnostic reports, so both are driven here.
+#[test]
+fn keywords_inherent_decomposition_agrees_with_the_trait_one() {
+  use crate::utils::IntoComponents;
+
+  let span = SimpleSpan::new(1, 5);
+
+  for status in [Status::Valid, Status::Error, Status::Missing] {
+    let kw = Keyword::<&str>::from_components(Components {
+      span,
+      payload: "then",
+      status,
+    });
+
+    let inherent = Keyword::into_components(kw);
+    let via_trait = IntoComponents::into_components(kw);
+
+    assert_eq!(inherent, via_trait, "{status:?}: the two doors agree");
+    assert_eq!(
+      inherent.status, status,
+      "{status:?}: the inherent door carries the status"
+    );
+    assert_eq!(
+      Keyword::<&str>::from_components(inherent),
+      kw,
+      "{status:?}: the inherent door's output rebuilds its input",
+    );
+  }
+}
+
+/// The states an `ErrorNode` constructor declares survive the same trip. This is the shape a
+/// consumer actually writes — take a recovered node apart, put it back — and the one that used to
+/// come back valid.
+#[test]
+fn an_error_node_placeholder_survives_a_decompose_and_rebuild() {
+  use crate::utils::IntoComponents;
+
+  let span = SimpleSpan::new(0, 5);
+
+  for (label, kw, lit) in [
+    (
+      "error",
+      Keyword::<&str>::error(span),
+      LitDecimal::<&str>::error(span),
+    ),
+    (
+      "missing",
+      Keyword::<&str>::missing(span),
+      LitDecimal::<&str>::missing(span),
+    ),
+  ] {
+    let Components {
+      span: sp,
+      payload: src,
+      status: st,
+    } = IntoComponents::into_components(kw);
+    let rebuilt = Keyword::<&str>::from_components(Components {
+      span: sp,
+      payload: src,
+      status: st,
+    });
+    assert_eq!(rebuilt, kw, "{label}: keyword round trip");
+    assert!(
+      !rebuilt.is_valid(),
+      "{label}: a rebuilt keyword is not valid syntax"
+    );
+
+    let Components {
+      span: sp,
+      payload: data,
+      status: st,
+    } = IntoComponents::into_components(lit);
+    let rebuilt = LitDecimal::<&str>::from_components(Components {
+      span: sp,
+      payload: data,
+      status: st,
+    });
+    assert_eq!(rebuilt, lit, "{label}: literal round trip");
+    assert!(
+      !rebuilt.is_valid(),
+      "{label}: a rebuilt literal is not valid syntax"
+    );
+  }
+}
+
+// --- A language marker is a marker: no carrier may demand traits of it ---
+
+/// A language marker written the way a consumer actually writes one — a bare unit struct with
+/// **no derives at all**.
+///
+/// This is the whole instrument. Every carrier in this module holds a `PhantomData<Lang>`, and a
+/// `derive` constrains every type parameter, so the six derived impls each carried a `Lang:` bound
+/// that nothing in the body uses: `PhantomData<T>` is `Debug`, `Clone`, `Copy`, `PartialEq`, `Eq`
+/// and `Hash` for any `T`, unconditionally. Before tokora#320 that made
+/// `Ident<&str, SimpleSpan, BareLang>` neither printable, copyable, comparable nor hashable, and
+/// the cells below did not compile.
+///
+/// It was found the way such things are found — a doctest that would not build until four derives
+/// were added to its marker — and the workaround was the reason to fix it rather than file it:
+/// published documentation that derives `Debug + Clone + Copy + PartialEq` on a marker teaches a
+/// consumer to do the same for a reason that does not exist.
+struct BareLang;
+
+/// A marker that carries the two the `PartialEq` derive still demands, and nothing else.
+#[derive(PartialEq, Eq)]
+struct EqLang;
+
+/// The four a bare marker buys: nothing in `Debug`, `Clone`, `Copy` or `Hash` reads `Lang`, so
+/// none of them may demand anything of it.
+fn requires_the_four<T>(_: &T)
+where
+  T: core::fmt::Debug + Clone + Copy + core::hash::Hash,
+{
+}
+
+/// The two a bare marker does **not** buy, and the reason is stated where the derives are: the
+/// `PartialEq` derive is what emits `StructuralPartialEq`, so keeping it is what keeps a `const`
+/// of a carrier usable in a `match` pattern — and a derive constrains every parameter. Comparing
+/// or matching therefore still needs `Lang: PartialEq + Eq`, exactly as 0.9 required.
+///
+/// `Recoverable` is deliberately absent from both: it claims `PartialOrd`/`Ord` as well and
+/// `Copy` not at all, and it holds no `PhantomData`, so it is not in this population.
+fn requires_the_other_two<T>(_: &T)
+where
+  T: PartialEq + Eq,
+{
+}
+
+#[derive(Default)]
+struct CountingHasher(u64);
+
+impl core::hash::Hasher for CountingHasher {
+  fn finish(&self) -> u64 {
+    self.0
+  }
+
+  fn write(&mut self, bytes: &[u8]) {
+    self.0 = self.0.wrapping_add(bytes.len() as u64);
+  }
+}
+
+/// Names the bound and then exercises it, so the cell proves the impls work rather than only that
+/// they resolve.
+macro_rules! assert_marker_is_not_a_bound {
+  ($($carrier:ident),+ $(,)?) => {
+    $({
+      use core::hash::{Hash, Hasher};
+
+      let span = SimpleSpan::new(2, 8);
+      let value = $carrier::<&str, SimpleSpan, BareLang>::from_components(Components { span, payload: "x", status: Status::Error });
+
+      requires_the_four(&value);
+
+      let copied = value;
+      let _cloned = value.clone();
+      assert!(
+        format!("{copied:?}").starts_with(concat!(stringify!($carrier), " {")),
+        concat!(stringify!($carrier), ": Debug names the type"),
+      );
+
+      let mut h = CountingHasher::default();
+      value.hash(&mut h);
+      assert_ne!(h.finish(), 0, concat!(stringify!($carrier), ": Hash reaches the fields"));
+
+      // The other two, over a marker that carries them — which is what the `PartialEq` derive
+      // costs and what `StructuralPartialEq` buys back.
+      let eq_marked = $carrier::<&str, SimpleSpan, EqLang>::from_components(Components { span, payload: "x", status: Status::Error });
+      requires_the_other_two(&eq_marked);
+      assert_eq!(eq_marked, eq_marked.clone(), concat!(stringify!($carrier), ": Eq over an Eq marker"));
+    })+
+  };
+}
+
+#[test]
+fn no_carrier_demands_a_trait_of_its_language_marker() {
+  assert_marker_is_not_a_bound!(
+    Ident,
+    Keyword,
+    Lit,
+    LitDecimal,
+    LitHex,
+    LitOctal,
+    LitBinary,
+    LitFloat,
+    LitHexFloat,
+    LitString,
+    LitMultilineString,
+    LitRawString,
+    LitChar,
+    LitByte,
+    LitByteString,
+    LitBool,
+    LitTrue,
+    LitFalse,
+    LitNull,
+  );
+
+  // `IdentList` is the twentieth, and the one where **two** parameters were phantom: `S` appears
+  // only in `PhantomData<S>` and in the default container, so a derive demanded `S: Debug` too.
+  // The container has to be `Copy` for the `Copy` cell to mean anything, so it is an array.
+  let span = SimpleSpan::new(0, 3);
+  let segments = [Ident::<&str, SimpleSpan, BareLang>::new(span, "foo")];
+  let list = IdentList::<&str, SimpleSpan, [Ident<&str, SimpleSpan, BareLang>; 1], BareLang>::new(
+    span, segments,
+  );
+
+  requires_the_four(&list);
+  assert!(list.is_valid());
+
+  let eq_list = IdentList::<&str, SimpleSpan, [Ident<&str, SimpleSpan, EqLang>; 1], EqLang>::new(
+    span,
+    [Ident::<&str, SimpleSpan, EqLang>::new(span, "foo")],
+  );
+  requires_the_other_two(&eq_list);
+  assert_eq!(eq_list, eq_list.clone());
+}
+
+// --- A name this branch adds must not silently displace a consumer's own ---
+
+/// A downstream crate's scope, reproduced: the carriers are imported, and
+/// [`RecoveryState`](super::recovery::RecoveryState) deliberately is **not**. That is the position an
+/// upgrading consumer is in, and it is why this is a module — `use super::*` in the parent puts
+/// the trait in scope, and a trait in scope contributes its method names whatever it is bound to.
+mod consumer_scope {
+  use crate::{
+    SimpleSpan,
+    error::ErrorNode,
+    types::{Ident, LitDecimal, recovery::Status},
+  };
+
+  /// A downstream extension trait with the three names, meaning something of its own.
+  ///
+  /// This is the review's example for tokora#320: a consumer whose `is_valid` asks whether a
+  /// `LitDecimal`'s payload actually parses as a number. `LitDecimal::new` marks every payload
+  /// `Status::Valid`, so if tokora's answer displaced this one the check would be bypassed and
+  /// `"nope"` would read as a valid decimal, with nothing at the call site to say so.
+  trait ConsumerChecks {
+    fn is_valid(&self) -> bool;
+    fn is_error(&self) -> bool;
+    fn is_missing(&self) -> bool;
+  }
+
+  impl ConsumerChecks for LitDecimal<&str> {
+    /// Deliberately the opposite answer from tokora's: `<error>` does not parse as a number, and
+    /// `"12"` does, whatever either value's recovery status is.
+    fn is_valid(&self) -> bool {
+      !self.data_ref().is_empty() && self.data_ref().chars().all(|c| c.is_ascii_digit())
+    }
+
+    fn is_error(&self) -> bool {
+      !ConsumerChecks::is_valid(self)
+    }
+
+    fn is_missing(&self) -> bool {
+      self.data_ref().is_empty()
+    }
+  }
+
+  /// tokora's own answer, reached without importing the trait — which is what a fully qualified
+  /// path is for, and what the consumer would write on the rare call that wants it.
+  fn tokora_status(lit: &LitDecimal<&str>) -> Status {
+    <LitDecimal<&str> as crate::types::recovery::RecoveryState>::status(lit)
+  }
+
+  /// **The cell, and its two directions.**
+  ///
+  /// *Here*, with only the consumer's trait in scope, every unqualified `is_valid` reaches the
+  /// consumer's method — which is exactly the behaviour an upgrade must not change. Before
+  /// tokora#320 moved the three questions onto a trait they were inherent methods on all
+  /// seventeen `Lit*` types and on `Keyword`, and Rust prefers an inherent method over a trait's
+  /// at an unqualified call site, so this function kept compiling and the two assertions marked
+  /// below **reversed** — silently, with no diagnostic anywhere.
+  ///
+  /// *In the parent module*, where `use super::*` does put `RecoveryState` in scope beside a
+  /// consumer trait, the same call is `error[E0034]: multiple applicable items in scope`, naming
+  /// both candidates. That is not hypothetical: writing this cell in the parent produced exactly
+  /// that error, which is why it lives here.
+  ///
+  /// Ambiguity, or an explicit choice, or no change at all. Never a different answer.
+  #[test]
+  fn a_consumers_own_predicate_is_not_displaced_by_tokoras() {
+    let span = SimpleSpan::new(0, 4);
+
+    // A recovery placeholder. Both sides agree it is not valid, for different reasons.
+    let recovered = LitDecimal::<&str>::error(span);
+    assert!(
+      !recovered.is_valid(),
+      "the consumer's check owns the unqualified call"
+    );
+    assert!(recovered.is_error());
+
+    // The pair that reverses if the inherent methods come back: the consumer rejects this
+    // payload, tokora's status calls it valid, and the unqualified call must be the consumer's.
+    let nonsense = LitDecimal::<&str>::new(span, "nope");
+    assert!(
+      !nonsense.is_valid(),
+      "the consumer rejects a non-numeric payload"
+    );
+    assert!(
+      tokora_status(&nonsense).is_valid(),
+      "tokora's own answer is the opposite one, and naming it is how you get it",
+    );
+
+    // A digit payload the consumer accepts, so the cell is not one-sided.
+    let real = LitDecimal::<&str>::new(span, "12");
+    assert!(real.is_valid());
+    assert!(!real.is_missing());
+    assert!(tokora_status(&real).is_valid());
+  }
+
+  /// A consumer's **semantic** status: their own type, with the method names such a type most
+  /// naturally carries.
+  #[derive(Debug, PartialEq)]
+  enum SemanticStatus {
+    Ok,
+    Overflows,
+  }
+
+  impl SemanticStatus {
+    fn is_valid(&self) -> bool {
+      matches!(self, Self::Ok)
+    }
+  }
+
+  /// The extension trait that the round-4 reasoning said could not be displaced silently.
+  trait ConsumerStatus {
+    fn status(&self) -> SemanticStatus;
+  }
+
+  impl ConsumerStatus for LitDecimal<&str> {
+    /// Rejects a literal that would not fit, whatever its recovery state is.
+    fn status(&self) -> SemanticStatus {
+      match self.data_ref().parse::<u8>() {
+        Ok(_) => SemanticStatus::Ok,
+        Err(_) => SemanticStatus::Overflows,
+      }
+    }
+  }
+
+  /// **The cell that refutes the round-4 argument, and pins the repair.**
+  ///
+  /// `status` was briefly inherent on all nineteen carriers, kept there to stay `const`, on the
+  /// reasoning that a *return* type which did not exist before could not be displaced silently: a
+  /// consumer whose `status()` returned something else would get a type error.
+  ///
+  /// A differing return type is only loud **if the caller stores the value**. The chain below
+  /// stores nothing, and [`Status`](crate::types::recovery::Status) offers `is_valid` too, so with an
+  /// inherent `status` in place `literal.status().is_valid()` keeps compiling and silently stops
+  /// asking the consumer's question. `new` marks any caller-supplied payload `Status::Valid`, so
+  /// `"999"` — which does not fit the consumer's `u8` — passes.
+  ///
+  /// So the test a name must survive is not *does the signature differ* but **does the whole call
+  /// chain still typecheck with a different meaning**. There is no inherent reader any more:
+  /// `status` is reached through `RecoveryState`, so this chain reaches the consumer's method,
+  /// and a consumer who imports the trait as well gets `error[E0034]` instead.
+  /// Every assertion below is a `bool`-valued **chain**, and that is the point: naming
+  /// `SemanticStatus` anywhere in this function would make the plant fail as `error[E0308]` on
+  /// the stored value instead — the shape that was always loud — and the silent one would never
+  /// get to run. An instrument that catches the defect by the wrong mechanism proves nothing
+  /// about the right one.
+  #[test]
+  fn a_chained_call_still_reaches_the_consumers_status() {
+    let span = SimpleSpan::new(0, 3);
+
+    // Fits a `u8`, and was spelled out in the source: both sides say valid, for different reasons.
+    let small = LitDecimal::<&str>::new(span, "42");
+    assert!(
+      small.status().is_valid(),
+      "the consumer's chain owns the unqualified call"
+    );
+    assert!(tokora_status(&small).is_valid());
+
+    // The pair that reverses under the plant: the consumer's check rejects an overflowing
+    // literal, while tokora's recovery status calls it valid because `new` said so.
+    let overflowing = LitDecimal::<&str>::new(span, "999");
+    assert!(
+      !overflowing.status().is_valid(),
+      "the consumer's semantic check rejects an overflowing literal",
+    );
+    assert!(
+      tokora_status(&overflowing).is_valid(),
+      "tokora's recovery status says valid, which is the answer that must not win here",
+    );
+  }
+
+  /// The other half of the contrast: a consumer who **stores** the value does get a type error if
+  /// an inherent `status` displaces theirs. That shape was never the problem, and recording it
+  /// here is what keeps the cell above honest about which shape is.
+  #[test]
+  fn a_stored_status_names_the_consumers_own_type() {
+    let span = SimpleSpan::new(0, 3);
+    let overflowing = LitDecimal::<&str>::new(span, "999");
+
+    let semantic: SemanticStatus = overflowing.status();
+    assert_eq!(semantic, SemanticStatus::Overflows);
+  }
+
+  /// A downstream extension trait over `Ident`, in the shape the round-6 review describes: an
+  /// `is_valid` that merely accepts a non-empty payload.
+  ///
+  /// The shape matters. `Ident::error(span)` carries the `"<error>"` sentinel, which **is**
+  /// non-empty, so this check says *valid* about a value tokora knows is a recovery placeholder.
+  /// Whichever of the two answers a call reaches therefore decides whether a placeholder is
+  /// processed as real syntax.
+  trait ConsumerIdentChecks {
+    fn is_valid(&self) -> bool;
+  }
+
+  impl ConsumerIdentChecks for Ident<&str> {
+    fn is_valid(&self) -> bool {
+      !self.source_ref().is_empty()
+    }
+  }
+
+  /// **The fourth failure mode: a removal that silently un-displaces a consumer's method.**
+  ///
+  /// The first three modes were all about *adding* a name that displaces a consumer's. This one
+  /// runs the other way. `Ident::is_valid` is inherent on 0.9, so an inherent method wins the pick
+  /// and this consumer has been getting **tokora's** answer. Take the inherent one away — offering
+  /// the spelling only through a trait that is not in `types::*` — and the call still compiles,
+  /// with no ambiguity at all, and falls through to theirs. A recovery placeholder then reads as
+  /// valid syntax.
+  ///
+  /// Which is why the cell asserts a *behaviour* rather than a compilation. Planting the removal
+  /// back does not break the build; it flips the answer, and that is the whole hazard.
+  ///
+  /// `RecoveryState` is deliberately not imported in this module, exactly as a downstream crate
+  /// would have it, so nothing here is arranged to make tokora win.
+  #[test]
+  fn removing_idents_inherent_predicate_would_silently_reach_the_consumers() {
+    let span = SimpleSpan::new(0, 7);
+
+    // The pair that flips. tokora says "this is an error placeholder"; the consumer's check sees a
+    // non-empty payload and says "valid".
+    let placeholder = Ident::<&str>::error(span);
+    assert!(
+      !placeholder.is_valid(),
+      "a recovery placeholder must not be read as valid syntax",
+    );
+    assert_eq!(placeholder.source_ref(), &"<error>");
+    assert!(
+      ConsumerIdentChecks::is_valid(&placeholder),
+      "the consumer's own check would call it valid, which is what makes the fall-through unsafe",
+    );
+
+    // The non-vacuity control: the two agree on a real identifier, so a green cell is evidence
+    // about the pair above rather than about the arrangement.
+    let real = Ident::<&str>::new(span, "count");
+    assert!(real.is_valid());
+    assert!(ConsumerIdentChecks::is_valid(&real));
+
+    // A missing placeholder carries `"<missing>"`, non-empty for the same reason.
+    let missing = Ident::<&str>::missing(span);
+    assert!(
+      !missing.is_valid(),
+      "a missing placeholder is not valid syntax either"
+    );
+    assert!(ConsumerIdentChecks::is_valid(&missing));
+  }
+
+  /// A consumer's zero-valued **rejection** state, and a constructor taking it.
+  ///
+  /// The discriminants matter: theirs is `Reject = 0`, and tokora's `Status::Valid` is also at
+  /// zero. That is what turns a re-targeted argument into a semantic inversion rather than a
+  /// visible error.
+  #[derive(Debug, Copy, Clone, PartialEq)]
+  #[repr(u8)]
+  enum TheirStatus {
+    Reject = 0,
+    Accept = 1,
+  }
+
+  trait ConsumerCtor {
+    fn with_status(span: SimpleSpan, data: &'static str, status: TheirStatus) -> Self;
+  }
+
+  impl ConsumerCtor for LitDecimal<&'static str> {
+    fn with_status(span: SimpleSpan, data: &'static str, status: TheirStatus) -> Self {
+      // A rejection produces an empty payload, so the outcome is visible at runtime.
+      LitDecimal::new(
+        span,
+        if status == TheirStatus::Accept {
+          data
+        } else {
+          ""
+        },
+      )
+    }
+  }
+
+  /// **The fifth failure mode: an argument whose type the parameter chooses.**
+  ///
+  /// A draft of this branch shipped `with_status` as a `pub const fn` inherent on all nineteen
+  /// carriers, arguing it could not be displaced silently because its third parameter is a
+  /// [`Status`](crate::types::recovery::Status), a type no pre-upgrade expression can produce. That holds
+  /// for expressions whose type comes from the *expression* — `Default::default()`, `x.into()`,
+  /// an associated constant, a bounded generic call — all of which were measured and all of which
+  /// fail with `E0277` or `E0308`.
+  ///
+  /// It is false for expressions whose type comes from the **parameter**. Measured across the two
+  /// revisions: an unchanged `unsafe { core::mem::zeroed() }` infers as the consumer's enum
+  /// before and as tokora's `Status` after, both compile, and dispatch moves from the consumer's
+  /// trait to tokora's inherent function. `Reject = 0` becomes `Status::Valid`, so a rejection
+  /// silently becomes valid syntax. `transmute::<u8, _>(0)` does the same, and
+  /// `MaybeUninit::uninit().assume_init()` is worse — it yields whatever the stack held.
+  ///
+  /// So the constructor is not in the inherent namespace at all: it is
+  /// [`FromComponents::from_components`](crate::types::recovery::FromComponents::from_components),
+  /// a trait method, which a consumer's inherent item outranks. The call below reaches the
+  /// consumer's constructor and must keep doing so.
+  #[test]
+  fn a_type_directed_argument_still_reaches_the_consumers_constructor() {
+    let span = SimpleSpan::new(0, 2);
+
+    // The precondition that makes a re-targeted argument an inversion rather than a visible
+    // error, pinned rather than described: both zero discriminants mean opposite things.
+    assert_eq!(
+      TheirStatus::Reject as u8,
+      0,
+      "the consumer's rejection is at zero"
+    );
+    assert_eq!(Status::Valid as u8, 0, "tokora's valid is at zero too");
+
+    // The type-directed expression, unchanged across the upgrade, at an **unqualified** call.
+    // Naming `ConsumerCtor::` here would pin the trait and no inherent item could ever displace
+    // it — which would arrange the cell so the defect could not reach it. This is the spelling a
+    // consumer actually writes, and the one an inherent `with_status` captures.
+    let built = LitDecimal::<&str>::with_status(span, "42", unsafe { core::mem::zeroed() });
+
+    assert_eq!(
+      built.data_ref(),
+      &"",
+      "a zero-valued argument must still mean the consumer's Reject, not tokora's Valid",
+    );
+
+    // The non-vacuity control, and it has to be type-directed too. Naming `TheirStatus::Accept`
+    // here would be `error[E0308]` under the plant — the loud shape — and the build would stop
+    // before the silent line above ever ran. `1` is `Accept` for the consumer and `Error` for
+    // tokora, both valid `#[repr(u8)]` discriminants, so this line compiles and holds either way
+    // while the line above is the one that moves.
+    // The missing target annotation is the subject of this cell, not an oversight: annotating it
+    // would pin the type and remove the very inference the test is about.
+    #[allow(clippy::missing_transmute_annotations)]
+    let accepted =
+      LitDecimal::<&str>::with_status(span, "42", unsafe { core::mem::transmute::<u8, _>(1u8) });
+    assert_eq!(accepted.data_ref(), &"42");
+
+    // tokora's own status-preserving construction is still reachable, by the trait that replaced
+    // the constructor — and it is the exact inverse of the decomposition.
+    use crate::{types::recovery::FromComponents, utils::IntoComponents};
+    let placeholder = LitDecimal::<&str>::error(span);
+    let rebuilt = LitDecimal::<&str>::from_components(placeholder.into_components());
+    assert_eq!(rebuilt, placeholder);
+    assert!(!tokora_status(&rebuilt).is_valid());
+  }
+}
+
+// --- A const of a carrier stays usable in a match pattern ---
+
+/// A language marker carrying the two the `PartialEq` derive demands.
+#[derive(PartialEq, Eq)]
+struct PatLang;
+
+/// **Structural matching, which is not observable by rendering.**
+///
+/// Round 3 replaced six derives with hand-written impls and checked the change by *rendering* —
+/// `Debug`'s field order, `PartialEq`'s short-circuit order, `Hash`'s bytes — and concluded
+/// nothing else moved. One thing had: `#[derive(PartialEq)]` also emits `StructuralPartialEq`,
+/// and without it a `const` of the type is rejected in a pattern with *"constant of non-structural
+/// type"*. No amount of printing a value can see that; only using one in a pattern can.
+///
+/// So `PartialEq`/`Eq` are derived again while `Debug`, `Clone`, `Copy` and `Hash` stay written
+/// out. The cell below is the differential: with the derives removed it does not compile, and the
+/// failure is at the pattern rather than at any assertion.
+///
+/// It covers a carrier of each shape — the two hand-written ones and one from the macro that
+/// generates seventeen.
+#[test]
+fn a_const_carrier_is_usable_in_a_match_pattern() {
+  // `SimpleSpan::new` is not a `const fn`, so the span parameter here is `()` — which is also the
+  // shape a dialect uses when it keeps a const table of spelled-out keywords.
+  const IDENT: Ident<&str, (), PatLang> = Ident::new((), "let");
+  const KEYWORD: Keyword<&str, (), PatLang> = Keyword::new((), "let");
+  const LIT: LitDecimal<&str, (), PatLang> = LitDecimal::new((), "42");
+
+  fn classify_ident(v: Ident<&str, (), PatLang>) -> u8 {
+    match v {
+      IDENT => 1,
+      _ => 0,
+    }
+  }
+
+  fn classify_keyword(v: Keyword<&str, (), PatLang>) -> u8 {
+    match v {
+      KEYWORD => 1,
+      _ => 0,
+    }
+  }
+
+  fn classify_lit(v: LitDecimal<&str, (), PatLang>) -> u8 {
+    match v {
+      LIT => 1,
+      _ => 0,
+    }
+  }
+
+  assert_eq!(classify_ident(IDENT), 1);
+  assert_eq!(classify_ident(Ident::new((), "other")), 0);
+  assert_eq!(classify_keyword(KEYWORD), 1);
+  assert_eq!(classify_lit(LIT), 1);
+
+  // A recovery placeholder is a different value from a hand-spelled one, in a pattern too — the
+  // status is part of what the pattern matches.
+  assert_eq!(
+    classify_ident(Ident::from_components(Components {
+      span: (),
+      payload: "let",
+      status: Status::Missing
+    })),
+    0,
+    "the status participates in structural matching",
+  );
+}
+
+// --- A second glob must not be able to rebind a consumer's method ---
+
+/// A consumer crate that glob-imports **both** `tokora::types::*` and its own prelude.
+///
+/// This is the shape that survived moving the three questions onto a trait: the trait was
+/// re-exported into `types`, so `use tokora::types::*;` put it in scope beside a same-named one of
+/// the consumer's — and that is not the hard error a same-named *type* would give.
+///
+/// Reproduced against `rustc 1.100.0-nightly` before this was repaired, over three arrangements:
+///
+/// - two globs, same **trait** name: compiles. `ambiguous_glob_imported_traits` is warn-by-default
+///   (a future-incompatibility, rust-lang/rust#152822) and the call resolves to whichever glob was
+///   written **first**, so either side wins depending on import order.
+/// - two globs, same **type** name: `error[E0659]: ambiguous`. Hard.
+/// - two globs, same method through **differently named** traits: `error[E0034]`. Hard.
+///
+/// The repair is that `RecoveryState` is not in `types::*` at all — it lives in
+/// [`types::recovery`](super::recovery) and must be named. So the glob below contributes no
+/// competing `is_valid`, the consumer's is unopposed, and a consumer who wants tokora's writes an
+/// explicit import, which beats a glob and is a choice rather than an accident.
+mod second_glob {
+  /// The consumer's own prelude, glob-exported the way a crate's prelude is.
+  mod their_prelude {
+    use crate::types::LitDecimal;
+
+    pub trait RecoveryState {
+      fn is_valid(&self) -> bool;
+    }
+
+    impl RecoveryState for LitDecimal<&str> {
+      /// The semantic check: does the payload parse as a number?
+      fn is_valid(&self) -> bool {
+        !self.data_ref().is_empty() && self.data_ref().chars().all(|c| c.is_ascii_digit())
+      }
+    }
+  }
+
+  /// **The cell.** Two globs, one of them tokora's whole `types` namespace.
+  ///
+  /// With `pub use recovery::RecoveryState;` restored in `types/mod.rs` — the plant — this
+  /// function still compiles, emits only `ambiguous_glob_imported_traits`, and the assertion
+  /// below flips: `LitDecimal::new` marks every payload `Status::Valid`, so `"nope"` reads as
+  /// valid and the consumer's check is bypassed with no error anywhere.
+  #[test]
+  fn a_glob_of_tokora_types_does_not_rebind_the_consumers_predicate() {
+    use crate::types::*;
+    use their_prelude::*;
+
+    let nonsense = LitDecimal::<&str>::new(SimpleSpan::new(0, 4), "nope");
+    assert!(
+      !nonsense.is_valid(),
+      "a second glob must not rebind the consumer's semantic check",
+    );
+
+    // Tokora's own answer is still reachable, by naming it — which is the cost of the repair and
+    // the whole of it.
+    assert!(
+      <LitDecimal<&str> as crate::types::recovery::RecoveryState>::status(&nonsense).is_valid(),
+      "tokora's recovery status is the opposite answer, reached by naming the trait",
+    );
+  }
+}
+
+// --- No pattern written against the old two-tuple may compile against the new shape ---
+
+/// **The differential for `Components` being a braced struct rather than a three-tuple.**
+///
+/// The widening from `(Span, Payload)` to `(Span, Payload, Status)` was defended as loud because
+/// it changes the arity. One line defeats that: `let (_, .., value) = literal.into_components();`
+/// binds `value` to the payload against a pair and to the status against a triple, and both
+/// compile whenever the payload also answers `is_valid`. Since `new` assigns `Status::Valid`, a
+/// payload the caller's own check rejects then reports valid. `(.., b)` and `.1` are the same
+/// defect in other spellings.
+///
+/// That was the third exemption of its kind refuted on this branch — after *the return type
+/// differs* and *the argument type is a `Status`* — and all three estimated the set of things a
+/// consumer could have written, and estimated it too small. So the repair is not a better-argued
+/// exemption but a shape no tuple pattern can match at all.
+///
+/// # How that was established
+///
+/// Ten pattern shapes were compiled against both the old pair and the new struct, as standalone
+/// programs, and the pair is the control rather than an assumption — all ten build against it:
+///
+/// | pattern | old `(Span, Payload)` | `Components` |
+/// |---|---|---|
+/// | `let (a, b)` | builds | `E0308` |
+/// | `let (_, b)` | builds | `E0308` |
+/// | `let (a, ..)` | builds | `E0308` |
+/// | `let (_, .., b)` | builds | `E0308` |
+/// | `let (.., b)` | builds | `E0308` |
+/// | `let (_, b,)` (trailing comma) | builds | `E0308` |
+/// | `let (ref a, ref b)` | builds | `E0308` |
+/// | `match .. { (_, b) => }` | builds | `E0308` |
+/// | `t.0` | builds | `E0609` |
+/// | `t.1` | builds | `E0609` |
+///
+/// The cell below is the in-tree half: it holds the shapes a consumer would have written, in the
+/// form they now have to take. Each is `compile_fail` in its tuple spelling — that half cannot be
+/// a runtime assertion, so it is a doctest on
+/// [`Components`](super::recovery::Components) rather than a `#[test]`, and this function pins the
+/// *positive* half: that the named form binds what its name says.
+#[test]
+fn the_components_struct_binds_by_name_not_by_position() {
+  use crate::utils::IntoComponents;
+
+  let span = SimpleSpan::new(1, 5);
+
+  // A payload whose own notion of validity disagrees with the recovery status, which is what
+  // makes a mis-bound third element dangerous rather than merely wrong.
+  let lit = LitDecimal::<&str>::new(span, "nope");
+  let Components {
+    span: got_span,
+    payload,
+    status,
+  } = IntoComponents::into_components(lit);
+
+  assert_eq!(got_span, span);
+  assert_eq!(payload, "nope", "the payload binds by name");
+  assert!(
+    status.is_valid(),
+    "the status binds by name, and `new` declared it valid"
+  );
+
+  // The `..` that used to move: with a struct it can only elide *named* fields, so the binding
+  // that survives is the one the author named, not the one position three happens to hold.
+  let Components { payload, .. } = IntoComponents::into_components(lit);
+  assert_eq!(
+    payload, "nope",
+    "`..` cannot slide a binding onto the status"
+  );
+
+  let Components { status, .. } = IntoComponents::into_components(lit);
+  assert!(status.is_valid());
+
+  // Round trip through the same shape, in all three states.
+  for st in [Status::Valid, Status::Error, Status::Missing] {
+    let original = LitDecimal::<&str>::from_components(Components {
+      span,
+      payload: "42",
+      status: st,
+    });
+    let rebuilt = LitDecimal::<&str>::from_components(original.into_components());
+    assert_eq!(rebuilt, original, "{st:?}: the round trip is the identity");
+  }
 }

@@ -22,6 +22,8 @@ scope limit below before reading a green run as safety:
 | `silent*` | a SILENT row listed in `disclosed.txt` | no — known, and in the CHANGELOG |
 | `ok*` | both sides agree AND the row is justified in `no_collision.txt` | no |
 | `new-owner` | the base side cannot resolve the row's **owner** and the head side can — the same diff introduces the owner as well as the name | no |
+| `new-owner-err` | the same, where the head side **rejects** the collision (E0034) instead of taking it — a new owner's `loud`, reachable on one side only | no |
+| `new-owner-nc*` | the same, where the **consumer's** item wins an earlier pick so no collision is constructed; justified by pick order in `no_collision.txt` | no |
 | `SILENT` | both compile, neither warns, the witness disagrees, not disclosed | **yes** |
 | `UNPROBED` | for an item row, both sides agree and it is **not** justified in `no_collision.txt`; for a glob row, rustc said nothing about the name at all. The glob form cannot be silenced by `no_collision.txt` | **yes** |
 | `INCONCL` | no before-state: the base side did not compile, its witness was not 1, or the marker was missing/duplicated | **yes** |
@@ -137,6 +139,36 @@ that, with the two witnesses listed above. Note what it does *not* say: nothing 
 consumer written after the release. A two-sided delta harness cannot see that, on either
 side of the line.
 
+**`witness=0` was read as "tokora's new item took the call" when it only ever meant "the
+consumer's item did not."** The two differ whenever the SUBJECT already carries an item of the
+probed name, and the first new trait to hit it was `RecoveryState`: it declares
+`is_valid`/`is_error`/`is_missing`, and `Ident` — the obvious subject, already in the fixture's
+import list — has carried inherent `is_valid`/`is_error`/`is_missing` since long before the base
+ref. An inherent item outranks every trait item at the same step, so three rows compiled, ran,
+reported `witness=0` and scored `new-owner` over a call that went to a method the base ref
+already had. **None of the four witnesses in place disagreed with any of them**, because each of
+the four is about the OWNER being new and none is about the call being tokora's new item.
+
+rustc reported it in the same log the whole time — `unused import: `new_module::RecoveryState``
+— and that is now the fifth witness: a `witness=0` row whose owner's import is reported unused
+is INCONCL, not `new-owner`. It costs the templates one rule, which is written where a subject
+is chosen: **an owner's import may not carry `#[allow(unused_imports)]`**, because a suppressed
+warning is a witness that cannot fire. The subject moved to `Keyword`, which declares no
+inherent item of any probed name, and the reason it had to is recorded in `TRAITS` rather than
+in a commit message.
+
+**A new owner whose item cannot WIN the receiver walk had no verdict at all.** `new-owner`
+required `witness=0` — the silent steal — and that is the one outcome a `&self` trait method
+cannot produce here: the three `trait_method` spellings put the consumer at `self` (one pick
+earlier, consumer wins) or `&self` (the same pick, E0034). Ten of one release's fourteen trait
+rows were therefore filed INCONCL — "a broken probe" — over rustc naming the exact collision
+they were built to find. `new-owner-err` is that outcome given a verdict, on the `glob-err`
+witness moved to the item level; `new-owner-nc*` is the earlier-pick case, justified by pick
+order exactly as `read_frontier/same_pick` already was. Note what neither reaches, and it is in
+the run trailer too: with no `&mut self` spelling there is no consumer that sits at a LATER pick
+than a tokora `&self` item, so on such an owner the SILENT verdict is unreachable by
+construction and a run of `new-owner-err` rows is not evidence that no silent shape exists.
+
 **And it happened again, four owners at once, because the templates are the one part of this
 harness that is not derived.** #168 mints `EmitterView` and `Cst`, gives the pre-existing
 `ParseState` its first inherent items, and adds `commit_lexer_error` to the pre-existing
@@ -218,7 +250,9 @@ positive evidence that the probe actually constructed what it claims:
 | `glob-err` | a head diagnostic naming the subject **and** mentioning ambiguity — a build that fails for an unrelated reason measured nothing |
 | `glob-ok` | an ambiguity diagnostic naming the subject — "both sides compiled" alone cannot distinguish *this toolchain does not reject it* from *no collision was constructed* |
 | `ok*` | agreement plus a written justification in `no_collision.txt`, staleness-checked |
-| `new-owner` | a base-side unresolved-import / cannot-find / failed-to-resolve diagnostic **naming this row's owner**, *and* the absence of the same diagnostic on head — a template that misspells its owner would otherwise report `new-owner` forever while having compiled nowhere |
+| `new-owner` | a base-side unresolved-import / cannot-find / failed-to-resolve diagnostic **naming this row's owner**, *and* the absence of the same diagnostic on head — a template that misspells its owner would otherwise report `new-owner` forever while having compiled nowhere — *and* head must not report that owner's import **unused**: see below |
+| `new-owner-err` | the base-side witness above, plus **three** head-side conditions: an `E0034`, the ambiguity's own label naming this row's **item**, and a candidate note naming this row's **owner**. The third is what says one of the two candidates was tokora's |
+| `new-owner-nc*` | the base-side witness above, plus a completed head run whose witness shows the consumer's item took the call, plus a written pick-order justification in `no_collision.txt`, staleness-checked |
 | `loud` | the base side ran (`witness=1`), and cargo names **the probe crate** as what failed — so the failure is the probe's, not a dependency's. **Attribution to the collision is still not established**: in the inherent-method and associated-function categories it may be the probe's own arity — see below |
 
 The fatal verdicts — `SILENT`, `UNPROBED`, `INCONCL`, `FATAL`, `STALE` — need no witness, because

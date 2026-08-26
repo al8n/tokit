@@ -302,6 +302,45 @@ impl Node<PLang> for ProbeNode {
 '''
 
 
+# ── Reaching an owner that lives in a module the base ref does not have ──────────────────
+#
+# The indirection below is not decoration and must not be flattened to a direct import.
+#
+# `run.sh` grants `new-owner` only on positive evidence: a base-side diagnostic that NAMES this
+# row's owner. Every owner before this one lived in a module the base ref already had, so
+# `use tokora::EmitterView;` failed as `unresolved import \`tokora::EmitterView\`` — the owner in
+# the message. `tokora::diagnostic` is the first WHOLE MODULE a diff has added, and there the
+# same shape reports the module instead: `unresolved import \`tokora::diagnostic\``, with no
+# mention of `Code` anywhere in the output. Measured, all three spellings, on the base ref
+# `c14b936`:
+#
+#   use tokora::diagnostic::Code;   -> E0432 `tokora::diagnostic`      (1 error, no `Code`)
+#   use tokora::diagnostic::*;      -> E0432 `tokora::diagnostic`      (1 error, no `Code`)
+#   impl .. for tokora::diagnostic::Code -> E0433 `diagnostic` in `tokora`  (3, no `Code`)
+#
+# rustc suppresses the follow-on `cannot find type \`Code\`` in all three, which is the right
+# thing for a compiler to do and leaves the harness with no evidence: every row scores INCONCL
+# while the head side is measuring exactly what it should.
+#
+# Re-exporting through a local module splits the one failure into two, and the second one names
+# the owner:
+#
+#   error[E0432]: unresolved import `tokora::diagnostic`
+#   error[E0432]: unresolved import `new_module::Code`
+#
+# The head side resolves both hops and is unchanged. Any future diff adding a module takes this
+# shape; a direct import of a type inside a new module cannot reach `new-owner` at all.
+def new_module_imports(module, *names):
+    """Import `names` from `module` so a base ref lacking `module` names each one when it fails."""
+    tail = names[0] if len(names) == 1 else "{%s}" % ", ".join(names)
+    return (
+        "mod new_module {\n"
+        "  pub use %s::*;\n"
+        "}\n"
+        "use new_module::%s;\n" % (module, tail)
+    )
+
+
 # The subject an `Emitter`-declared row rides.
 #
 # `Silent<PErr>` is the fixture's OWN emitter — `PCtx` is built on it — so this is a type tokora
@@ -384,6 +423,49 @@ pub fn lexer_value() -> PLexer<'static> {
 # for (the fixture's own types, not a convenient one), say in the row's `no_collision.txt` entry
 # WHY the subject satisfies the bound, and never read a green `ok*` on a `&mut`-self row as
 # evidence that the subject was right. `EMITTER_SUBJECT_FIXTURE` above is the worked example.
+
+# ── The subject for `tokora::types::recovery`, and WHY IT IS NOT `Ident` ─────────────────
+#
+# Both traits are implemented for `Ident` and for `Keyword`, and `Ident` is the one already in
+# the shared fixture's import list — so it is the obvious pick and it is the WRONG one, which
+# is a fact rather than a preference. `Ident` has carried inherent `is_valid`, `is_error` and
+# `is_missing` since long before the base ref, and an inherent item outranks every trait item
+# at the same step of the receiver walk. Measured, on the `later_pick_discarded` spelling: the
+# probe compiled, ran, reported `CONSUMER-CALLS: 0` and scored `new-owner` — over a call that
+# went to `Ident`'s OWN pre-existing method, with `RecoveryState` reported unused in the same
+# log. Three false verdicts in one run, in the exact shape this harness exists to refuse.
+#
+# `Keyword` declares no inherent `status`, `is_valid`, `is_error` or `is_missing` — check that
+# before moving this subject, because the check is what the choice rests on — so tokora's trait
+# item is the only candidate of that name on it besides the consumer's. `run.sh`'s fifth witness
+# now REFUSES the `Ident` shape rather than trusting this note, but the note is what tells the
+# next author which way to move when it fires.
+#
+# The import is deliberately NOT wrapped in `#[allow(unused_imports)]`, and that is load-bearing
+# rather than an oversight: `unused import: `new_module::RecoveryState`` IS the fifth witness's
+# evidence, and an allow is a witness that cannot fire. `trait_scope`'s `scope` field carries
+# that allow for its own documented reason, which is why these two traits reach the probe
+# through `fixture` instead.
+RECOVERY_CARRIER = r'''
+use tokora::types::Keyword;
+
+/// A carrier tokora implements both `types::recovery` traits for, and which declares no
+/// inherent item of any probed name. Built directly: `Keyword::new` is public and const, and a
+/// parse would hand the value back through a grammar rather than to the line making the call.
+pub fn recovery_carrier() -> Keyword<&'static str> {
+  Keyword::new(tokora::SimpleSpan::new(0, 1), "probe")
+}
+'''
+
+RECOVERY_STATE_FIXTURE = (
+    new_module_imports("tokora::types::recovery", "RecoveryState") + RECOVERY_CARRIER
+)
+
+FROM_COMPONENTS_FIXTURE = (
+    new_module_imports("tokora::types::recovery", "FromComponents") + RECOVERY_CARRIER
+)
+
+
 TRAITS = {
     "ParseInput": {
         "recvr": "parse_num",
@@ -593,6 +675,55 @@ TRAITS = {
         "self_ty": None,
         "scope": "use tokora::state::recursion_tracker::*;",
         "fixture": None,
+    },
+    # ── `RecoveryState` / `FromComponents` — a NEW trait in a NEW module ────────────────────
+    #
+    # The first owners here that the same diff introduces AND that live in a module the base ref
+    # does not have. Both facts matter and they are answered in different places:
+    #
+    #   * the module is new, so a direct `use tokora::types::recovery::RecoveryState;` fails on
+    #     base as `unresolved import `tokora::types::recovery`` — the MODULE, with the owner
+    #     suppressed — and every row scores INCONCL for want of a diagnostic naming the owner.
+    #     `new_module_imports` splits that into two errors, the second `unresolved import
+    #     `new_module::RecoveryState``. Measured on `a218439`, exactly the `tokora::diagnostic`
+    #     shape that function was written for.
+    #   * the owner is new, so the BASE side cannot compile and no row here can reach `loud`,
+    #     `silent` or `ok*` — those all need a before-state. The three verdicts a new owner can
+    #     reach are `new-owner` (head takes the call), `new-owner-err` (head refuses to choose)
+    #     and `new-owner-nc*` (the consumer wins an earlier pick, justified by pick order).
+    #
+    # Which one each spelling lands on is decided by ONE fact: every item on both traits takes
+    # `&self` or no receiver at all, and the `trait_method` spellings are named for a tokora
+    # method taken BY VALUE. Against `&self` there is no LATER pick for the consumer to sit at —
+    # `same_pick` (`self`) is one pick EARLIER and wins outright; `later_pick_*` (`&self`) is the
+    # SAME pick and rustc refuses to choose. So no spelling here can produce a silent steal, and
+    # that is a property of the receiver kinds rather than of these names. It is the mirror of
+    # `Emitter::commit_lexer_error`, one receiver step over: there tokora's `&mut self` is later
+    # than every consumer spelling, here tokora's `&self` is earlier than or equal to all of them.
+    #
+    # `FromComponents::from_components` takes no receiver, so it is a `trait_assoc_fn` and its
+    # rule is path resolution rather than a walk: the consumer's `impl<T> ConsumerAssoc for T`
+    # and tokora's trait are both applicable to `Keyword` and rustc reports E0034. That is the
+    # `loud` verdict that category's docstring predicts, reached on the one side a new owner has.
+    #
+    # `self_ty` carries the turbofish because the template spells `{ty}::{name}()` and a bare
+    # `Keyword<&'static str>::from_components()` is not a path.
+    "RecoveryState": {
+        "recvr": "recovery_carrier()",
+        # `RecoveryState` declares no receiver-less item, so no `trait_assoc_fn` row can arise
+        # and filling this in "just in case" is how a probe ends up riding a guess.
+        "self_ty": None,
+        # The import is in `fixture`, not here: `trait_scope` wraps `scope` in
+        # `#[allow(unused_imports)]`, and that allow would suppress the fifth witness's evidence.
+        "scope": None,
+        "fixture": RECOVERY_STATE_FIXTURE,
+    },
+    "FromComponents": {
+        # No receiver value: `FromComponents` declares exactly one item and it takes none.
+        "recvr": None,
+        "self_ty": "Keyword::<&'static str>",
+        "scope": None,
+        "fixture": FROM_COMPONENTS_FIXTURE,
     },
 }
 
@@ -951,45 +1082,6 @@ pub fn mini_cst() -> Cst<'static, Mini<'static>, Silent<PErr>> {
 '''
 
 
-# ── Reaching an owner that lives in a module the base ref does not have ──────────────────
-#
-# The indirection below is not decoration and must not be flattened to a direct import.
-#
-# `run.sh` grants `new-owner` only on positive evidence: a base-side diagnostic that NAMES this
-# row's owner. Every owner before this one lived in a module the base ref already had, so
-# `use tokora::EmitterView;` failed as `unresolved import \`tokora::EmitterView\`` — the owner in
-# the message. `tokora::diagnostic` is the first WHOLE MODULE a diff has added, and there the
-# same shape reports the module instead: `unresolved import \`tokora::diagnostic\``, with no
-# mention of `Code` anywhere in the output. Measured, all three spellings, on the base ref
-# `c14b936`:
-#
-#   use tokora::diagnostic::Code;   -> E0432 `tokora::diagnostic`      (1 error, no `Code`)
-#   use tokora::diagnostic::*;      -> E0432 `tokora::diagnostic`      (1 error, no `Code`)
-#   impl .. for tokora::diagnostic::Code -> E0433 `diagnostic` in `tokora`  (3, no `Code`)
-#
-# rustc suppresses the follow-on `cannot find type \`Code\`` in all three, which is the right
-# thing for a compiler to do and leaves the harness with no evidence: every row scores INCONCL
-# while the head side is measuring exactly what it should.
-#
-# Re-exporting through a local module splits the one failure into two, and the second one names
-# the owner:
-#
-#   error[E0432]: unresolved import `tokora::diagnostic`
-#   error[E0432]: unresolved import `new_module::Code`
-#
-# The head side resolves both hops and is unchanged. Any future diff adding a module takes this
-# shape; a direct import of a type inside a new module cannot reach `new-owner` at all.
-def new_module_imports(module, *names):
-    """Import `names` from `module` so a base ref lacking `module` names each one when it fails."""
-    tail = names[0] if len(names) == 1 else "{%s}" % ", ".join(names)
-    return (
-        "mod new_module {\n"
-        "  pub use %s::*;\n"
-        "}\n"
-        "use new_module::%s;\n" % (module, tail)
-    )
-
-
 # ── Inherent subjects whose OWNER this same diff introduces ──────────────────────────────
 #
 # `EmitterView` and `Cst` are minted by the diff that adds their items, so the BASE side cannot
@@ -1216,6 +1308,39 @@ INHERENT_SUBJECTS = {
             "unlimited": ("", "TokenBudget"),
             "with_limitation": ("1_000", "TokenBudget"),
         },
+    },
+    # `Status` is minted by the same diff as its three items, so it takes this table's new-owner
+    # shape like every entry above it: the base side cannot name the type at all, and only the
+    # head side's binding has to be right. Its module (`tokora::types`) is NOT new — only the
+    # `Status` name within it is — so a plain `use tokora::types::Status;` already names the
+    # owner in the base-side diagnostic and the `new_module_imports` indirection the
+    # `diagnostic` types need buys nothing here, the same reasoning `Probe`'s entry gives.
+    # `recovery`, the submodule `Status` is re-exported from, is new too, but the owner probed
+    # here is reached through the pre-existing `types` re-export, not through `recovery` itself.
+    #
+    # It is `Copy` and all three items take `self` BY VALUE — not `&self` or `&mut self`, one
+    # step EARLIER than any other receiver kind this table carries. The receiver walk is
+    # therefore stronger than `Code`'s or `Probe`'s (found at the `&T` step): tokora's item is
+    # found at the FIRST candidate, `T` itself, before the generated consumer's `&mut self`
+    # extension method is even a candidate.
+    "Status": {
+        "imports": "use tokora::types::Status;\n",
+        "fixture": "",
+        "ty": "Status",
+        "setup": "",
+        # `Status::Error`, not `::Valid` — the module's own doc header measures exactly this
+        # variant (`Status::Error.is_error()`, "the boolean reads false before and true after"),
+        # so the subject here reproduces the same construction rather than a fresh guess.
+        "build": "  let mut subject: Status = Status::Error;\n",
+        "calls": {
+            "is_valid": ("", "bool"),
+            "is_error": ("", "bool"),
+            "is_missing": ("", "bool"),
+        },
+        # `Status` declares no receiver-less associated function — a consumer does not build one
+        # from a constructor, it is handed back through `RecoveryState::status`. An empty table
+        # rather than an absent key, for the reason `Cst`'s empty `assoc_calls` gives.
+        "assoc_calls": {},
     },
 }
 
@@ -1667,6 +1792,15 @@ def trait_method(name, owner, spelling):
         "increase_both": "",
         "increase_both_and_check": "",
         "increase_and_check": "",
+        # `RecoveryState`'s four. `status` takes `&self` and nothing else; the other three are
+        # DEFAULTED methods on it with the same signature — read `types/recovery.rs` and there
+        # is nothing after `&self` in any of them. The same empty-argument shape `clear`,
+        # `read_frontier` and `take_probe` already ride, not the multi-argument support #225
+        # declines.
+        "status": "",
+        "is_valid": "",
+        "is_error": "",
+        "is_missing": "",
     }.get(name)
     if args is None:
         # The pointer matters more than the refusal. An author who lands here reads "add a

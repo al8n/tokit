@@ -130,19 +130,43 @@ Read the parameter's *name*, not just its letter.
 
 ```text
 impl<S, Span, Lang> Ident<S, Span, Lang> {
-    const fn new(span: Span, source: S) -> Self;
-    const fn span(&self) -> Span where Span: Copy;        // + span_ref / span_mut
+    const fn new(span: Span, source: S) -> Self;           // status: Valid
+    const fn span(&self) -> Span where Span: Copy;         // + span_ref / span_mut
     const fn source(&self) -> S where S: Copy;             // + source_ref / source_mut
     fn bump(&mut self, by: &Span::Offset) -> &mut Self where Span: crate::Span;
-    const fn is_valid/is_error/is_missing(&self) -> bool;  // recovery status (Ident only)
     fn map<U>(self, f: impl FnOnce(S) -> U) -> Ident<U, Span, Lang>;
 }
-// Keyword has the same new/span*/source*/map, but no is_valid/is_error/is_missing and no bump —
-// it carries no status of its own, and converts into `Ident` for free via `From`.
+
+// Construction WITH a chosen status is a trait method too, and for the same reason: an inherent
+// `with_status(.., Status)` captures a type-directed argument — an unchanged
+// `unsafe { zeroed() }` infers as the consumer's status before the upgrade and as tokora's
+// after, both compile, and a zero-valued rejection becomes Valid.
+impl FromComponents for Ident<..> { fn from_components(c: Self::Components) -> Self; }
+// Components is a NAMED STRUCT { span, payload, status }, not a 3-tuple: `let (_, .., v) = ..`
+// binds the payload against a pair and the status against a triple, and both compile.
+
+// The recovery state is read through a trait, and ONLY through it — there is no inherent
+// accessor of any name, because an inherent one can be displaced by a consumer's extension
+// method whenever the two return types share a method (`x.status().is_valid()` typechecks
+// either way). The trait has to be imported, which is what makes a clash loud.
+impl RecoveryState for Ident<..> { fn status(&self) -> Status;
+                                   fn is_valid/is_error/is_missing(&self) -> bool; }
+// Cost: none of this is `const` — a trait method cannot be.
+
+// Keyword and every `Lit*` type carry the same status and the same two doors to it, so
+// converting a Keyword into an Ident via `From` carries the state across rather than declaring
+// the result valid. `bump` is Ident's alone.
+//
+// `IdentList` keeps is_valid/is_error/is_missing as INHERENT methods and does not implement the
+// trait: a list is an aggregate, and is_error and is_missing can both be true of one at once,
+// which no single Status can say.
 ```
 
 ```rust
 use tokora::{SimpleSpan, error::ErrorNode, types::{Ident, Keyword}, utils::IntoComponents};
+// `RecoveryState` is NOT in `types::*` — a trait reached through a glob can be rebound by a
+// second glob with only a warning, so it has to be named:
+use tokora::types::recovery::{Components, FromComponents, RecoveryState};
 
 struct MyLang;
 
@@ -161,10 +185,17 @@ let kw = Keyword::<&str, SimpleSpan, MyLang>::new(SimpleSpan::new(0, 3), "let");
 let as_ident: Ident<&str, SimpleSpan, MyLang> = kw.into();
 assert_eq!(as_ident.source_ref(), &"let");
 
-// Both destructure via `IntoComponents`; `.map` transforms the payload in place.
-let (span, source) = ident.into_components();
-let upper = Ident::<&str, SimpleSpan, MyLang>::new(span, source).map(|s| s.to_uppercase());
+// Both destructure via `IntoComponents`, into span, payload AND status. The status is in the
+// tuple because `FromComponents` is the inverse: rebuilding through `new` would declare a
+// recovered node valid, which is the laundering the three-part decomposition exists to prevent.
+let Components { span, payload, status } = ident.into_components();
+let upper = Ident::<&str, SimpleSpan, MyLang>::from_components(Components { span, payload, status })
+    .map(|s| s.to_uppercase());
 assert_eq!(upper.source_ref(), "MY_VAR");
+assert!(upper.is_valid());
+
+let parts = bad.into_components();
+assert!(Ident::<&str, SimpleSpan, MyLang>::from_components(parts).is_error());
 ```
 
 Both also have real combinator entry points, not just bare constructors. Once the token type opts
@@ -182,8 +213,8 @@ Keyword::<(), ()>::try_parse(inp) -> Result<ParseAttempt<Keyword<L::Token, L::Sp
 ```
 
 [`IdentList<S, Span = SimpleSpan, Container = Vec<Ident<S, Span>>, Lang: ?Sized = ()>`](crate::types::IdentList)
-aggregates already-parsed identifiers. It has no status of its own — `is_valid`/`is_error`/
-`is_missing` scan the elements on every call:
+aggregates already-parsed identifiers. It stores no status of its own — `is_valid`/`is_error`/
+`is_missing` scan the elements on every call, so the list's answer is its segments':
 
 ```rust
 use tokora::{SimpleSpan, error::ErrorNode, types::{Ident, IdentList}};

@@ -1,12 +1,21 @@
 use core::marker::PhantomData;
 
+// No `RecoveryState` import: `Ident`'s three predicates are inherent, so they win the pick here
+// without one. That is the same resolution a downstream crate gets, and the reason `Ident` keeps
+// them — see the rule stated beside them in `ident.rs`.
 use crate::{span::AsSpan, types::Ident};
 
 /// A list of identifiers.
 ///
 /// `S` remains sized because the default container stores `Ident<S, Span>` values
 /// inline in a `Vec`; use the individual [`Ident`] carrier for an unsized source.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+// `PartialEq`/`Eq` are derived while the other four are written out. A derive constrains every
+// type parameter, which is why the other four are hand-written — none of them reads `S` or
+// `Lang`. These two cannot join them: the derive is what emits `StructuralPartialEq`, without
+// which a `const` of this type cannot appear in a `match` pattern, and that is not observable
+// by checking rendered output. The residual is that comparing or matching one still needs `S`
+// and `Lang` to be `PartialEq + Eq`, exactly as 0.9 required.
+#[derive(PartialEq, Eq)]
 #[cfg(any(feature = "alloc", feature = "std"))]
 pub struct IdentList<
   S,
@@ -24,13 +33,90 @@ pub struct IdentList<
 ///
 /// `S` remains sized to keep this type's API consistent with its `Vec`-backed
 /// form; use the individual [`Ident`] carrier for an unsized source.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+// `PartialEq`/`Eq` are derived while the other four are written out. A derive constrains every
+// type parameter, which is why the other four are hand-written — none of them reads `S` or
+// `Lang`. These two cannot join them: the derive is what emits `StructuralPartialEq`, without
+// which a `const` of this type cannot appear in a `match` pattern, and that is not observable
+// by checking rendered output. The residual is that comparing or matching one still needs `S`
+// and `Lang` to be `PartialEq + Eq`, exactly as 0.9 required.
+#[derive(PartialEq, Eq)]
 #[cfg(not(any(feature = "alloc", feature = "std")))]
 pub struct IdentList<S, Span, Container, Lang: ?Sized = ()> {
   span: Span,
   identifiers: Container,
   _m: PhantomData<S>,
   _lang: PhantomData<Lang>,
+}
+
+// The six impls below replace a `derive`, and the only thing that changes is the bound list.
+//
+// A derive constrains **every** type parameter, so `#[derive(Debug)]` on a type holding a
+// `PhantomData<Lang>` emitted `Lang: Debug` — a requirement on a marker that is never printed,
+// never compared and never hashed, because `PhantomData<T>` implements all six for any `T`
+// unconditionally. The effect was that `IdentList<..., MyLang>` was not `Debug`, `Copy` or
+// comparable unless the consumer derived those on `MyLang` too, for a reason that does not
+// exist. tokora#320 caught it the way such things are caught: a doctest that would not compile
+// until four derives were added to the marker.
+//
+// Rendered output and comparison order are unchanged. `Debug` still prints every field in
+// declaration order including the marker, `PartialEq` still short-circuits in that order, and
+// `Hash` still feeds the same bytes — `PhantomData` hashes nothing, so omitting it is not a
+// change.
+
+impl<S, Span, Container, Lang> ::core::fmt::Debug for IdentList<S, Span, Container, Lang>
+where
+  Span: ::core::fmt::Debug,
+  Container: ::core::fmt::Debug,
+  Lang: ?Sized,
+{
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    // Declaration order, which is the order the derive printed in: `span`, `identifiers`, then
+    // the two markers. Nothing about the rendering changes here, only the bounds above.
+    f.debug_struct("IdentList")
+      .field("span", &&self.span)
+      .field("identifiers", &&self.identifiers)
+      .field("_m", &&self._m)
+      .field("_lang", &&self._lang)
+      .finish()
+  }
+}
+
+impl<S, Span, Container, Lang> ::core::clone::Clone for IdentList<S, Span, Container, Lang>
+where
+  Span: ::core::clone::Clone,
+  Container: ::core::clone::Clone,
+  Lang: ?Sized,
+{
+  #[inline]
+  fn clone(&self) -> Self {
+    Self {
+      _m: ::core::marker::PhantomData,
+      _lang: ::core::marker::PhantomData,
+      span: ::core::clone::Clone::clone(&self.span),
+      identifiers: ::core::clone::Clone::clone(&self.identifiers),
+    }
+  }
+}
+
+impl<S, Span, Container, Lang> ::core::marker::Copy for IdentList<S, Span, Container, Lang>
+where
+  Span: ::core::marker::Copy,
+  Container: ::core::marker::Copy,
+  Lang: ?Sized,
+{
+}
+
+impl<S, Span, Container, Lang> ::core::hash::Hash for IdentList<S, Span, Container, Lang>
+where
+  Span: ::core::hash::Hash,
+  Container: ::core::hash::Hash,
+  Lang: ?Sized,
+{
+  #[inline]
+  fn hash<H: ::core::hash::Hasher>(&self, state: &mut H) {
+    ::core::hash::Hash::hash(&self.span, state);
+    ::core::hash::Hash::hash(&self.identifiers, state);
+  }
 }
 
 impl<S, Span, Container, Lang: ?Sized> AsSpan<Span> for IdentList<S, Span, Container, Lang> {
@@ -40,6 +126,13 @@ impl<S, Span, Container, Lang: ?Sized> AsSpan<Span> for IdentList<S, Span, Conta
   }
 }
 
+/// The three predicates below are **inherent and stay inherent**, unlike the carriers'.
+///
+/// They are not the same question. A carrier is in exactly one of three states, which is what
+/// [`RecoveryState`](super::recovery::RecoveryState) reports; a list is an aggregate, and `is_error` and `is_missing` can both be
+/// true of one at the same time. No single [`Status`](super::recovery::Status) can say that, so this type
+/// does not implement the trait and there is no name for it to displace — these three predate
+/// tokora#320 and are unchanged by it.
 impl<S, Span, Container, Lang: ?Sized> IdentList<S, Span, Container, Lang> {
   /// Returns `true` if all identifiers in the path are valid.
   #[inline(always)]

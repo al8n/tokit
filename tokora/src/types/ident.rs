@@ -54,7 +54,7 @@
 //! allowing creation of placeholder identifiers during error recovery:
 //!
 //! ```rust,ignore
-//! use tokora::error::ErrorNode;
+//! use tokora::{error::ErrorNode, types::recovery::RecoveryState};
 //!
 //! // Create placeholder for malformed identifier
 //! let bad_ident = Ident::<String, SimpleSpan, YulLang>::error(span);
@@ -65,20 +65,12 @@
 
 use core::marker::PhantomData;
 
+use super::recovery::Status;
 use crate::{
   error::ErrorNode,
   span::{AsSpan, SimpleSpan},
   utils::IntoComponents,
 };
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-#[repr(u8)]
-#[non_exhaustive]
-enum Status {
-  Valid,
-  Error,
-  Missing,
-}
 
 /// A language identifier with span tracking.
 ///
@@ -130,14 +122,16 @@ enum Status {
 /// ## Extracting Components
 ///
 /// ```rust
-/// # use tokora::{SimpleSpan, types::Ident, utils::IntoComponents};
+/// # use tokora::{SimpleSpan, types::{Ident, recovery::Components}, utils::IntoComponents};
 /// # struct MyLang;
 /// # let span = SimpleSpan::new(0, 3);
 /// let ident = Ident::<&str, SimpleSpan, MyLang>::new(span, "foo");
 ///
-/// // Destructure into span and source
-/// let (span, source) = ident.into_components();
-/// assert_eq!(source, "foo");
+/// // Destructure into span, payload and recovery status. A named struct, not a tuple: see
+/// // `types::recovery::Components` for the `..` pattern that made a three-tuple unsafe.
+/// let Components { span, payload, status } = ident.into_components();
+/// assert_eq!(payload, "foo");
+/// assert!(status.is_valid());
 /// ```
 ///
 /// ## Mutable Access
@@ -156,12 +150,96 @@ enum Status {
 /// *ident.span_mut() = SimpleSpan::new(10, 18);
 /// assert_eq!(ident.span(), SimpleSpan::new(10, 18));
 /// ```
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+// `PartialEq` and `Eq` are **derived** while the other four are written out, and that split is
+// the point rather than an inconsistency.
+//
+// A derive constrains every type parameter, which is why `Debug`, `Clone`, `Copy` and `Hash` are
+// hand-written here: none of them reads `Lang`, so none of them should demand anything of it.
+// `PartialEq`/`Eq` cannot join them. The derive is also what emits `StructuralPartialEq`, and
+// without that marker a `const` of this type cannot appear in a `match` pattern — "constant of
+// non-structural type", a property no amount of checking the rendered output can see, because it
+// is not observable except by trying to use a value in a pattern.
+//
+// So the residual is stated rather than hidden: comparing or pattern-matching one of these still
+// needs the language marker to be `PartialEq + Eq`. Printing, cloning, copying and hashing do
+// not. That is four of the six bounds dropped against 0.9, and structural matching kept exactly
+// as 0.9 had it.
+#[derive(PartialEq, Eq)]
 pub struct Ident<S: ?Sized, Span = SimpleSpan, Lang: ?Sized = ()> {
   _lang: PhantomData<Lang>,
   status: Status,
   span: Span,
   ident: S,
+}
+
+// The six impls below replace a `derive`, and the only thing that changes is the bound list.
+//
+// A derive constrains **every** type parameter, so `#[derive(Debug)]` on a type holding a
+// `PhantomData<Lang>` emitted `Lang: Debug` — a requirement on a marker that is never printed,
+// never compared and never hashed, because `PhantomData<T>` implements all six for any `T`
+// unconditionally. The effect was that `Ident<..., MyLang>` was not `Debug`, `Copy` or
+// comparable unless the consumer derived those on `MyLang` too, for a reason that does not
+// exist. tokora#320 caught it the way such things are caught: a doctest that would not compile
+// until four derives were added to the marker.
+//
+// Rendered output and comparison order are unchanged. `Debug` still prints every field in
+// declaration order including the marker, `PartialEq` still short-circuits in that order, and
+// `Hash` still feeds the same bytes — `PhantomData` hashes nothing, so omitting it is not a
+// change.
+
+impl<S, Span, Lang> ::core::fmt::Debug for Ident<S, Span, Lang>
+where
+  S: ::core::fmt::Debug + ?Sized,
+  Span: ::core::fmt::Debug,
+  Lang: ?Sized,
+{
+  fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+    f.debug_struct("Ident")
+      .field("_lang", &&self._lang)
+      .field("status", &&self.status)
+      .field("span", &&self.span)
+      .field("ident", &&self.ident)
+      .finish()
+  }
+}
+
+impl<S, Span, Lang> ::core::clone::Clone for Ident<S, Span, Lang>
+where
+  S: ::core::clone::Clone,
+  Span: ::core::clone::Clone,
+  Lang: ?Sized,
+{
+  #[inline]
+  fn clone(&self) -> Self {
+    Self {
+      _lang: ::core::marker::PhantomData,
+      status: self.status,
+      span: ::core::clone::Clone::clone(&self.span),
+      ident: ::core::clone::Clone::clone(&self.ident),
+    }
+  }
+}
+
+impl<S, Span, Lang> ::core::marker::Copy for Ident<S, Span, Lang>
+where
+  S: ::core::marker::Copy,
+  Span: ::core::marker::Copy,
+  Lang: ?Sized,
+{
+}
+
+impl<S, Span, Lang> ::core::hash::Hash for Ident<S, Span, Lang>
+where
+  S: ::core::hash::Hash + ?Sized,
+  Span: ::core::hash::Hash,
+  Lang: ?Sized,
+{
+  #[inline]
+  fn hash<H: ::core::hash::Hasher>(&self, state: &mut H) {
+    ::core::hash::Hash::hash(&self.status, state);
+    ::core::hash::Hash::hash(&self.span, state);
+    ::core::hash::Hash::hash(&self.ident, state);
+  }
 }
 
 impl<S: ?Sized, Span, Lang: ?Sized> AsSpan<Span> for Ident<S, Span, Lang> {
@@ -172,11 +250,30 @@ impl<S: ?Sized, Span, Lang: ?Sized> AsSpan<Span> for Ident<S, Span, Lang> {
 }
 
 impl<S, Span, Lang: ?Sized> IntoComponents for Ident<S, Span, Lang> {
-  type Components = (Span, S);
+  /// The span, the source, **and the recovery status** — every field this type holds beyond the
+  /// zero-sized language marker, which the rebuild names in its own type.
+  ///
+  /// The status is here because this trait promises a complete decomposition and because
+  /// [`FromComponents`](super::recovery::FromComponents) is the inverse: without it in both, a consumer who took
+  /// a carrier apart and put it back together would have to rebuild through
+  /// [`new`](Ident::new), which always declares the result valid — the same laundering tokora#303
+  /// removed from [`map`](Ident::map), reached one door over.
+  type Components = super::recovery::Components<Span, S>;
 
   #[inline(always)]
   fn into_components(self) -> Self::Components {
-    (self.span, self.ident)
+    let Self {
+      _lang,
+      status,
+      span,
+      ident,
+    } = self;
+
+    super::recovery::Components {
+      span,
+      payload: ident,
+      status,
+    }
   }
 }
 
@@ -294,22 +391,58 @@ impl<S: ?Sized, Span, Lang: ?Sized> Ident<S, Span, Lang> {
     &self.ident
   }
 
+  // ── Why these three are inherent HERE and on no other carrier ──────────────────────────────
+  //
+  // The rule, stated once because the asymmetry below is the rule applied to two histories
+  // rather than an accident:
+  //
+  //   Do not change resolution for a name that already shipped;
+  //   do not create a new resolution hazard for a name that did not.
+  //
+  // `Ident` shipped these three as inherent `const fn`s in 0.9. Removing them does not merely
+  // cost a consumer an import: an inherent method **wins** the pick over an extension trait's, so
+  // a downstream crate with its own `is_valid` for `Ident` was getting tokora's answer. Take the
+  // inherent one away and that call still compiles, with no ambiguity, and silently falls through
+  // to theirs — and it falls the dangerous way, because a check that merely accepts a non-empty
+  // payload reads `Ident::error(span)`'s `"<error>"` as valid syntax. Removal changes resolution
+  // as surely as addition does, in the direction with no diagnostic.
+  //
+  // `Keyword` and the seventeen `Lit*` types never had the names, so giving them inherent ones
+  // would be the opposite defect — the new hazard — and they answer through
+  // [`RecoveryState`](super::recovery::RecoveryState) alone. `Ident` implements that trait too,
+  // so generic code over carriers sees one uniform channel; these three are exactly its answers.
+  //
+  // The drift argument that removed them is about how the surface reads. This one is about
+  // existing code changing meaning with nothing to catch it. They are not the same weight.
+
   /// Returns `true` is this identifier represents an error identifier.
+  ///
+  /// Also available as [`RecoveryState::is_error`](super::recovery::RecoveryState::is_error),
+  /// which is the spelling every other carrier uses; this inherent form is `Ident`'s alone and
+  /// predates the trait.
   #[inline(always)]
   pub const fn is_error(&self) -> bool {
-    matches!(self.status, Status::Error)
+    self.status.is_error()
   }
 
   /// Returns `true` is this identifier represents a missing identifier.
+  ///
+  /// Also available as [`RecoveryState::is_missing`](super::recovery::RecoveryState::is_missing),
+  /// which is the spelling every other carrier uses; this inherent form is `Ident`'s alone and
+  /// predates the trait.
   #[inline(always)]
   pub const fn is_missing(&self) -> bool {
-    matches!(self.status, Status::Missing)
+    self.status.is_missing()
   }
 
   /// Returns `true` is this identifier is valid (not error or missing).
+  ///
+  /// Also available as [`RecoveryState::is_valid`](super::recovery::RecoveryState::is_valid),
+  /// which is the spelling every other carrier uses; this inherent form is `Ident`'s alone and
+  /// predates the trait.
   #[inline(always)]
   pub const fn is_valid(&self) -> bool {
-    matches!(self.status, Status::Valid)
+    self.status.is_valid()
   }
 }
 
@@ -339,8 +472,14 @@ impl<S, Span, Lang: ?Sized> Ident<S, Span, Lang> {
     Self::with_status(span, source, Status::Valid)
   }
 
+  /// The status-setting constructor, crate-internal.
+  ///
+  /// Public construction with a chosen status goes through
+  /// [`FromComponents`](super::recovery::FromComponents), whose argument is an associated
+  /// type rather than a bare `Status` — see that trait for the type-directed inference
+  /// route that made an inherent `with_status` unsafe to ship.
   #[inline(always)]
-  const fn with_status(span: Span, source: S, status: Status) -> Self {
+  pub(super) const fn with_status(span: Span, source: S, status: Status) -> Self {
     Self {
       span,
       ident: source,
@@ -407,6 +546,26 @@ impl<S, Span, Lang: ?Sized> Ident<S, Span, Lang> {
       span,
       ident: f(ident),
     }
+  }
+}
+
+impl<S, Span, Lang: ?Sized> super::recovery::FromComponents for Ident<S, Span, Lang> {
+  #[inline(always)]
+  fn from_components(components: Self::Components) -> Self {
+    let super::recovery::Components {
+      span,
+      payload,
+      status,
+    } = components;
+
+    Self::with_status(span, payload, status)
+  }
+}
+
+impl<S: ?Sized, Span, Lang: ?Sized> super::recovery::RecoveryState for Ident<S, Span, Lang> {
+  #[inline(always)]
+  fn status(&self) -> Status {
+    self.status
   }
 }
 

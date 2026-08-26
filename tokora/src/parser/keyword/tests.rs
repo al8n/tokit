@@ -8,6 +8,7 @@ use crate::{
   logos::{self, Logos},
   span::Spanned,
   token::Token as TokenTrait,
+  types::recovery::Components,
 };
 
 #[derive(Debug, Clone, Logos, PartialEq)]
@@ -175,7 +176,11 @@ fn parse_exact_accepts_matching_keyword() {
     Keyword::parse_exact(&"if").parse_input(inp)
   }
   let r = Parser::with_context(ctx()).apply(parse).parse_str("if");
-  let (span, tok) = r.unwrap().into_components();
+  let Components {
+    span,
+    payload: tok,
+    status: _,
+  } = r.unwrap().into_components();
   assert_eq!(tok, Token::If);
   assert_eq!(span, SimpleSpan::new(0, 2));
 }
@@ -205,7 +210,11 @@ fn parse_accepts_else_keyword() {
     Keyword::parse(inp)
   }
   let r = Parser::with_context(ctx()).apply(parse).parse_str("else");
-  let (span, tok) = r.unwrap().into_components();
+  let Components {
+    span,
+    payload: tok,
+    status: _,
+  } = r.unwrap().into_components();
   assert_eq!(tok, Token::Else);
   assert_eq!(span, SimpleSpan::new(0, 4));
 }
@@ -245,7 +254,11 @@ fn parse_accepts_any_keyword() {
     Keyword::parse(inp)
   }
   let r = Parser::with_context(ctx()).apply(parse).parse_str("if");
-  let (span, tok) = r.unwrap().into_components();
+  let Components {
+    span,
+    payload: tok,
+    status: _,
+  } = r.unwrap().into_components();
   assert_eq!(tok, Token::If);
   assert_eq!(span, SimpleSpan::new(0, 2));
 }
@@ -258,7 +271,11 @@ fn parse_sliced_accepts_else_keyword() {
     Keyword::parse_sliced(inp)
   }
   let r = Parser::with_context(ctx()).apply(parse).parse_str("else");
-  let (span, source) = r.unwrap().into_components();
+  let Components {
+    span,
+    payload: source,
+    status: _,
+  } = r.unwrap().into_components();
   assert_eq!(source, "else");
   assert_eq!(span, SimpleSpan::new(0, 4));
 }
@@ -309,7 +326,11 @@ fn parse_exact_sliced_accepts_matching_keyword_with_span() {
     Keyword::parse_exact_sliced(&"if").parse_input(inp)
   }
   let r = Parser::with_context(ctx()).apply(parse).parse_str("if");
-  let (span, source) = r.unwrap().into_components();
+  let Components {
+    span,
+    payload: source,
+    status: _,
+  } = r.unwrap().into_components();
   assert_eq!(source, "if");
   assert_eq!(span, SimpleSpan::new(0, 2));
 }
