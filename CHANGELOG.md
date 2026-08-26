@@ -71,7 +71,7 @@ and will red until they do.
 
 ### Added
 
-- **`types::recovery::Status`, and `with_status` on all nineteen recovery carriers** (#320). The recovery
+- **`types::Status`, and `with_status` on all nineteen recovery carriers** (#320). The recovery
   state stops being a private field and becomes a value a consumer can hold: it is returned by
   `IntoComponents` (see **Changed (breaking)**) and accepted back by
   `Ident::with_status`, `Keyword::with_status` and each `Lit*::with_status`, which are the inverses
@@ -917,13 +917,14 @@ and will red until they do.
   the converting one fails `Silent` verbatim, and the bound-free one stops covering the delimited
   driver the bundle exists for.
 
-- **The whole recovery API lives in `tokora::types::recovery` and nothing from it is re-exported
-  into `tokora::types`** (#320). Reaching it is
-  `use tokora::types::recovery::{Components, FromComponents, RecoveryState, Status};`.
+- **`RecoveryState`, `FromComponents` and `Components` live in `tokora::types::recovery` and are
+  reached by naming it; `Status` is also re-exported as `tokora::types::Status`** (#320). A glob of
+  `tokora::types::*` therefore gets the status type, and the traits are one import away:
+  `use tokora::types::recovery::{RecoveryState, FromComponents, Components};`.
 
-  Every placement puts *some* new name into a namespace a consumer can already glob, and the kinds
-  do not resolve alike. Measured against `rustc 1.100.0-nightly`, consumer source held fixed, the
-  library gaining one item, **and both sides exposing the item the consumer reaches for**:
+  **A measured table came out of settling this, and it is worth keeping on its own.** With the
+  consumer's source held fixed, the library gaining one item, and — this is the part an earlier
+  attempt got wrong — **both sides exposing the item the consumer reaches for**:
 
   | kind       | vs an extern crate of that name  | vs a second glob            | vs a local def |
   |------------|----------------------------------|-----------------------------|----------------|
@@ -932,26 +933,25 @@ and will red until they do.
   | **trait**  | `E0790`                          | **silent, first glob wins** | local wins     |
   | fn / const | no interaction (value namespace) | `E0659`                     | local wins     |
 
-  Two earlier drafts of this release were built on a wrong row. The first measured `type` against
-  an extern crate as `E0599`, loud, and re-exported `Status` into `types` on that basis. The probe
-  asked the shadowing type for an associated item it did not have, so it could only be loud: with
-  a dependency aliased `Status` exporting `Error`, and tokora's `Status` carrying an `Error`
-  variant with an inherent `is_error()`, `Status::Error.is_error()` compiles on both revisions and
-  **the boolean inverts**. The second draft then moved all four items into `types` to get the
-  module name out of the glob, on that same false premise.
+  The `type` row was first read as `E0599`, loud. That was a probe that could only be loud — it
+  asked the shadowing type for an associated item it did not have. With a dependency aliased
+  `Status` exporting `Error`, and tokora's `Status` carrying an `Error` variant with an inherent
+  `is_error()`, `Status::Error.is_error()` compiles on both revisions and the boolean inverts. So
+  **no kind is loud on both axes.**
 
-  **No kind that can carry this API is loud on both axes**, so the question is not which kind is
-  safe but how few silent names a placement adds. The floor is one — a public trait must live in a
-  module, and every module is either already globbed or a new name in one — and a module reaches
-  it. Re-exporting the four items instead puts four names into `types::*`: `Status` and
-  `Components` silent against an extern crate, `RecoveryState` and `FromComponents` silent against
-  a second glob.
+  **The placement is not derived from that table.** A draft read it as a budget and chose by
+  counting collidable names; that was the wrong criterion. This release's concern is a *silent
+  semantic change* — code that keeps compiling and means something different, with nothing to tell
+  the consumer. A glob-import name clash is not that: a glob is the consumer's own choice, the
+  clash is its ordinary cost, and it is paid at compile time with a leading `::` as the fix. It is
+  also a rule nothing could follow, since it would mean no public module could ever be added.
 
-  **The residual, named as what it is.** A consumer with a dependency named or aliased `recovery`
-  who writes `use tokora::types::*;` has every `recovery::…` path rebound to tokora, with no error
-  and no warning. The only lever left is the module's *name*, and that is **probability, not
-  safety**: no identifier is barred from being a crate alias. It is not pulled, because the gain
-  cannot be quantified and the churn is real.
+  **The module keeps the name `recovery`, and the check behind that is dated rather than argued.**
+  Against the crates.io API on 2026-08-27: `recovery` 0.1.6, ~16.1k downloads, last updated
+  2025-09-14, whose docs instruct `use recovery::Recovery;`. `Recovery` is not one of this module's
+  names, so a consumer of both crates gets `E0432` at their own import line — measured, plus
+  `E0659` where the name is then used — never a redirect. A rename was drafted on the mistake above
+  and withdrawn.
 
 - **The recovery carriers keep `PartialEq`/`Eq` derived, and only the other four are hand-written**
   (#320). Replacing all six derives dropped the compiler-generated `StructuralPartialEq`, so a

@@ -86,18 +86,17 @@ pub use ident::*;
 pub use ident_list::*;
 pub use keyword::*;
 pub use lit::*;
-// Nothing from `recovery` is re-exported here, and that includes `Status`.
+// `Status` is re-exported here so a consumer who writes `use tokora::types::*` gets the status
+// type without naming the module; `RecoveryState`, `FromComponents` and `Components` are reached
+// through `types::recovery`.
 //
-// An earlier draft did re-export the type, on a measurement that said a TYPE name collides loudly
-// under a consumer's glob while a TRAIT name does not. The type half of that was wrong: the probe
-// asked the shadowing type for an associated item it did not have, so it could only be loud. With
-// both sides carrying the item the consumer reaches for, a glob-added type silently shadows an
-// extern crate of the same name exactly as a module does — a dependency aliased `Status` has
-// `Status::Error.is_error()` flip from its answer to tokora's, both revisions compiling.
-//
-// So the count is what matters, not the kind: `recovery` alone puts ONE new name into `types::*`,
-// where re-exporting the four items puts four, two silent on each axis. See `recovery`'s header
-// for the re-measured table and the residual this leaves.
+// That split is ordinary library design, not a safety measurement. A draft of this release chose
+// placements by counting how many names a glob could collide with, and that was the wrong
+// criterion: a glob-import name clash is not a silent semantic change, it is the ordinary cost of
+// a glob, which is the consumer's own choice, and it is paid at compile time with a leading `::`
+// as the one-line fix. `recovery`'s header carries the measured table those rounds produced,
+// which does stand, and the dated crates.io check behind keeping the module's name.
+pub use recovery::Status;
 
 mod ident;
 mod ident_list;
