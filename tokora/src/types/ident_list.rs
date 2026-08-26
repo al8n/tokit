@@ -1,9 +1,9 @@
 use core::marker::PhantomData;
 
-use crate::{
-  span::AsSpan,
-  types::{Ident, recovery::RecoveryState},
-};
+// No `RecoveryState` import: `Ident`'s three predicates are inherent, so they win the pick here
+// without one. That is the same resolution a downstream crate gets, and the reason `Ident` keeps
+// them — see the rule stated beside them in `ident.rs`.
+use crate::{span::AsSpan, types::Ident};
 
 /// A list of identifiers.
 ///
@@ -129,7 +129,7 @@ impl<S, Span, Container, Lang: ?Sized> AsSpan<Span> for IdentList<S, Span, Conta
 /// The three predicates below are **inherent and stay inherent**, unlike the carriers'.
 ///
 /// They are not the same question. A carrier is in exactly one of three states, which is what
-/// [`RecoveryState`] reports; a list is an aggregate, and `is_error` and `is_missing` can both be
+/// [`RecoveryState`](super::recovery::RecoveryState) reports; a list is an aggregate, and `is_error` and `is_missing` can both be
 /// true of one at the same time. No single [`Status`](super::Status) can say that, so this type
 /// does not implement the trait and there is no name for it to displace — these three predate
 /// tokora#320 and are unchanged by it.

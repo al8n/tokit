@@ -385,6 +385,60 @@ impl<S: ?Sized, Span, Lang: ?Sized> Ident<S, Span, Lang> {
   pub const fn source_ref(&self) -> &S {
     &self.ident
   }
+
+  // ── Why these three are inherent HERE and on no other carrier ──────────────────────────────
+  //
+  // The rule, stated once because the asymmetry below is the rule applied to two histories
+  // rather than an accident:
+  //
+  //   Do not change resolution for a name that already shipped;
+  //   do not create a new resolution hazard for a name that did not.
+  //
+  // `Ident` shipped these three as inherent `const fn`s in 0.9. Removing them does not merely
+  // cost a consumer an import: an inherent method **wins** the pick over an extension trait's, so
+  // a downstream crate with its own `is_valid` for `Ident` was getting tokora's answer. Take the
+  // inherent one away and that call still compiles, with no ambiguity, and silently falls through
+  // to theirs — and it falls the dangerous way, because a check that merely accepts a non-empty
+  // payload reads `Ident::error(span)`'s `"<error>"` as valid syntax. Removal changes resolution
+  // as surely as addition does, in the direction with no diagnostic.
+  //
+  // `Keyword` and the seventeen `Lit*` types never had the names, so giving them inherent ones
+  // would be the opposite defect — the new hazard — and they answer through
+  // [`RecoveryState`](super::recovery::RecoveryState) alone. `Ident` implements that trait too,
+  // so generic code over carriers sees one uniform channel; these three are exactly its answers.
+  //
+  // The drift argument that removed them is about how the surface reads. This one is about
+  // existing code changing meaning with nothing to catch it. They are not the same weight.
+
+  /// Returns `true` is this identifier represents an error identifier.
+  ///
+  /// Also available as [`RecoveryState::is_error`](super::recovery::RecoveryState::is_error),
+  /// which is the spelling every other carrier uses; this inherent form is `Ident`'s alone and
+  /// predates the trait.
+  #[inline(always)]
+  pub const fn is_error(&self) -> bool {
+    self.status.is_error()
+  }
+
+  /// Returns `true` is this identifier represents a missing identifier.
+  ///
+  /// Also available as [`RecoveryState::is_missing`](super::recovery::RecoveryState::is_missing),
+  /// which is the spelling every other carrier uses; this inherent form is `Ident`'s alone and
+  /// predates the trait.
+  #[inline(always)]
+  pub const fn is_missing(&self) -> bool {
+    self.status.is_missing()
+  }
+
+  /// Returns `true` is this identifier is valid (not error or missing).
+  ///
+  /// Also available as [`RecoveryState::is_valid`](super::recovery::RecoveryState::is_valid),
+  /// which is the spelling every other carrier uses; this inherent form is `Ident`'s alone and
+  /// predates the trait.
+  #[inline(always)]
+  pub const fn is_valid(&self) -> bool {
+    self.status.is_valid()
+  }
 }
 
 impl<S, Span, Lang: ?Sized> Ident<S, Span, Lang> {

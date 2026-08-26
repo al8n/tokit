@@ -101,8 +101,29 @@ and will red until they do.
   fields of its own owes a status field. The trait's own diagnostics example used to demonstrate
   the sentinel comparison and now reads the state.
 
-  **`is_valid`, `is_error` and `is_missing` are on `RecoveryState`, not on the carriers**, and
-  that is the point rather than a detail. Those three names are ones a downstream crate may
+  **`Ident` keeps its three inherent predicates; the other eighteen carriers answer only through
+  the trait.** That asymmetry is a rule applied to two histories rather than an oversight, and the
+  rule is written beside the methods in `ident.rs`:
+
+  > Do not change resolution for a name that already shipped; do not create a new resolution
+  > hazard for a name that did not.
+
+  `Ident::is_valid` has been inherent since #266, and an inherent method **wins** the pick over an
+  extension trait's — so a downstream crate with its own `is_valid` for `Ident` has been getting
+  tokora's answer. Removing the inherent one does not merely cost them an import: the call still
+  compiles, with no ambiguity, and silently falls through to theirs. It falls the dangerous way,
+  too, since a check that merely accepts a non-empty payload reads `Ident::error(span)`'s
+  `"<error>"` as valid syntax. A draft of this release did remove them, on the argument that the
+  declared channel should not have two spellings; that argument is about how the surface reads,
+  and this one is about existing code changing meaning with nothing to catch it. They are not the
+  same weight.
+
+  **`is_valid`, `is_error` and `is_missing` are on `RecoveryState` for the other eighteen**, which
+  never had the names, and that is the point rather than a detail.
+
+  `IdentList` keeps its three as inherent methods and does **not** implement the trait. They are
+  not the same question either: a list is an aggregate, and `is_error` and `is_missing` can both
+  be true of one at once, which no single `Status` can say. Those three names are ones a downstream crate may
   already have on an extension trait of its own — "this literal's payload parses as a number" —
   and Rust prefers an inherent method over a trait's at an unqualified call site. Shipping them
   inherent would have left `literal.is_valid()` compiling and quietly answering a different
@@ -909,28 +930,6 @@ and will red until they do.
   hashing no longer need anything of it. Four of the six bounds dropped, structural matching
   unchanged — strictly better than 0.9 on every axis, which is why this is not a choice between
   two breaks.
-
-- **`Ident::{is_valid, is_error, is_missing}` move to the `RecoveryState` trait** (#320). They have
-  been inherent `const fn`s since #266. Keeping them there while the other eighteen carriers
-  answered through a trait would have reintroduced exactly the `Ident`-versus-the-rest drift the
-  shared `Status` exists to prevent: the declared semantic channel would have had two spellings,
-  and which one a reader needs would depend on which carrier they held.
-
-  Migration is `use tokora::types::RecoveryState;`, and rustc names it — an unimported trait method
-  is `error[E0599]` with *"items from traits can only be used if the trait is in scope"*. In a
-  const context, where a trait method cannot go at all, it is `ident.status().is_valid()`.
-
-  Two arguments were weighed and rejected. Leaving `Ident` inherent is safe for the upgrade but is
-  the drift above. Deprecated inherent forwarders keep both properties, at the cost of warning on
-  call sites that are not wrong yet and of leaving `Ident` — alone among the nineteen — able to
-  displace a consumer's extension trait for another release. The break is taken instead, in a
-  cycle that is already breaking, because it is loud, mechanical, and prospective: it also means a
-  consumer who adds an `is_valid` of their own *after* upgrading gets ambiguity rather than
-  silence.
-
-  `IdentList` keeps its three as inherent methods and does **not** implement the trait. They are
-  not the same question: a list is an aggregate, and `is_error` and `is_missing` can both be true
-  of one at once, which no single `Status` can say.
 
 - **The recovery carriers stop demanding traits of their language marker** (#320). `Ident`,
   `Keyword`, the seventeen `Lit*` types and `IdentList` derived `Debug`, `Copy`, `Clone`,

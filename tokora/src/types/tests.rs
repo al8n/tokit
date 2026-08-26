@@ -1009,7 +1009,7 @@ mod consumer_scope {
   use crate::{
     SimpleSpan,
     error::ErrorNode,
-    types::{LitDecimal, Status},
+    types::{Ident, LitDecimal, Status},
   };
 
   /// A downstream extension trait with the three names, meaning something of its own.
@@ -1177,6 +1177,69 @@ mod consumer_scope {
 
     let semantic: SemanticStatus = overflowing.status();
     assert_eq!(semantic, SemanticStatus::Overflows);
+  }
+
+  /// A downstream extension trait over `Ident`, in the shape the round-6 review describes: an
+  /// `is_valid` that merely accepts a non-empty payload.
+  ///
+  /// The shape matters. `Ident::error(span)` carries the `"<error>"` sentinel, which **is**
+  /// non-empty, so this check says *valid* about a value tokora knows is a recovery placeholder.
+  /// Whichever of the two answers a call reaches therefore decides whether a placeholder is
+  /// processed as real syntax.
+  trait ConsumerIdentChecks {
+    fn is_valid(&self) -> bool;
+  }
+
+  impl ConsumerIdentChecks for Ident<&str> {
+    fn is_valid(&self) -> bool {
+      !self.source_ref().is_empty()
+    }
+  }
+
+  /// **The fourth failure mode: a removal that silently un-displaces a consumer's method.**
+  ///
+  /// The first three modes were all about *adding* a name that displaces a consumer's. This one
+  /// runs the other way. `Ident::is_valid` is inherent on 0.9, so an inherent method wins the pick
+  /// and this consumer has been getting **tokora's** answer. Take the inherent one away — offering
+  /// the spelling only through a trait that is not in `types::*` — and the call still compiles,
+  /// with no ambiguity at all, and falls through to theirs. A recovery placeholder then reads as
+  /// valid syntax.
+  ///
+  /// Which is why the cell asserts a *behaviour* rather than a compilation. Planting the removal
+  /// back does not break the build; it flips the answer, and that is the whole hazard.
+  ///
+  /// `RecoveryState` is deliberately not imported in this module, exactly as a downstream crate
+  /// would have it, so nothing here is arranged to make tokora win.
+  #[test]
+  fn removing_idents_inherent_predicate_would_silently_reach_the_consumers() {
+    let span = SimpleSpan::new(0, 7);
+
+    // The pair that flips. tokora says "this is an error placeholder"; the consumer's check sees a
+    // non-empty payload and says "valid".
+    let placeholder = Ident::<&str>::error(span);
+    assert!(
+      !placeholder.is_valid(),
+      "a recovery placeholder must not be read as valid syntax",
+    );
+    assert_eq!(placeholder.source_ref(), &"<error>");
+    assert!(
+      ConsumerIdentChecks::is_valid(&placeholder),
+      "the consumer's own check would call it valid, which is what makes the fall-through unsafe",
+    );
+
+    // The non-vacuity control: the two agree on a real identifier, so a green cell is evidence
+    // about the pair above rather than about the arrangement.
+    let real = Ident::<&str>::new(span, "count");
+    assert!(real.is_valid());
+    assert!(ConsumerIdentChecks::is_valid(&real));
+
+    // A missing placeholder carries `"<missing>"`, non-empty for the same reason.
+    let missing = Ident::<&str>::missing(span);
+    assert!(
+      !missing.is_valid(),
+      "a missing placeholder is not valid syntax either"
+    );
+    assert!(ConsumerIdentChecks::is_valid(&missing));
   }
 
   /// A consumer constructor with the same name and arity as the new inherent `with_status`.
