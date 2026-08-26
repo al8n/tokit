@@ -2415,7 +2415,6 @@ where
   ) -> Result<(), Self::Error>
   where
     L: Lexer<'inp>,
-    Self::Error: crate::emitter::FromUnclosed<'inp, L, Lang>,
   {
     self.forward_diag::<Lang, _>(None, |inner| inner.emit_unclosed(err))
   }

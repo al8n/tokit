@@ -128,6 +128,24 @@ macro_rules! define_punctuator_token_traits {
         )*
       }
 
+      /// Punctuation forwards across the borrow, like every other token capability.
+      ///
+      /// Every constructor defaults to `None`, so a *partial* forwarding impl would compile and
+      /// silently answer `None` for the arms it forgot — the same failure mode as no impl at
+      /// all, minus the compile error. The list is therefore generated from the same
+      /// `$punct` sequence that generates the trait, and cannot drift from it.
+      impl<'a, T> PunctuatorToken<'a> for &'a T
+      where
+        T: PunctuatorToken<'a>,
+      {
+        $(
+          #[inline(always)]
+          fn $punct() -> Option<Self::Kind> {
+            <T as PunctuatorToken<'a>>::$punct()
+          }
+        )*
+      }
+
       $(
         impl<'inp, T, S, C, Lang> $crate::__private::Check<T, ::core::primitive::bool> for $crate::punct::$name<S, C, Lang>
         where

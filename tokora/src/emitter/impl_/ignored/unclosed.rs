@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::{emitter::FromUnclosed, error::Unclosed};
+use crate::error::Unclosed;
 
 impl<'a, L, Lang: ?Sized> UnclosedEmitter<'a, L, Lang> for Ignored
 where
@@ -13,7 +13,6 @@ where
   ) -> Result<(), Self::Error>
   where
     L: Lexer<'a>,
-    Self::Error: FromUnclosed<'a, L, Lang>,
   {
     Ok(())
   }

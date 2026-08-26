@@ -1,7 +1,7 @@
 use crate::{
   container::Container as ContainerT,
   delimiter::Delimiter,
-  emitter::{FromUnclosed, FullContainerEmitter, UnclosedEmitter},
+  emitter::{FullContainerEmitter, UnclosedEmitter},
   error::Unclosed,
 };
 
@@ -35,8 +35,7 @@ impl<'inp, L, P, O, Condition, Ctx, Delim, W, Lang: ?Sized>
     W: Window,
     Ctx: ParseContext<'inp, L, Lang>,
     Ctx::Emitter: FullContainerEmitter<'inp, L, Lang> + UnclosedEmitter<'inp, L, Lang>,
-    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error:
-      From<UnexpectedEot<L::Offset, Lang>> + FromUnclosed<'inp, L, Lang>,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
     Container: ContainerT<O> + DelimiterHandler<'inp, L>,
   {
     // Sync the input to the next token boundary, any lexer errors will be emitted during this process.

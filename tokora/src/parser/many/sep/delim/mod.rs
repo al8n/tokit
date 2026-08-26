@@ -2,7 +2,7 @@ use crate::{
   TryParseInput,
   container::Container as ContainerT,
   delimiter::Delimiter,
-  emitter::{FromUnclosed, FullContainerEmitter, SeparatedEmitter, UnclosedEmitter},
+  emitter::{FullContainerEmitter, SeparatedEmitter, UnclosedEmitter},
   error::Unclosed,
   punct::Punctuator,
   try_parse_input::{Accept, Decline},
@@ -49,8 +49,7 @@ impl<'inp, L, P, Sep, O, Ctx, Delim, Lang: ?Sized, Cmpl>
       + UnclosedEmitter<'inp, L, Lang>,
     Ctx: ParseContext<'inp, L, Lang>,
     Cmpl: crate::input::SurfaceIncomplete<'inp, L, Ctx, Lang>,
-    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error:
-      From<UnexpectedEot<L::Offset, Lang>> + FromUnclosed<'inp, L, Lang>,
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
     Container: DelimiterHandler<'inp, L> + SeparatorHandler<'inp, L> + ContainerT<O>,
     EH: EndStateHandler<'inp, 'closure, Sep, O, L, Ctx, Lang, Cmpl>,
     CH: ContinueStateHandler<'inp, 'closure, Sep, O, L, Ctx, Lang, Cmpl>,

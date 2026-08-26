@@ -616,7 +616,7 @@ macro_rules! impl_separated_delim {
         + UnclosedEmitter<'inp, L, Lang>
         $($emitters)*,
       <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error:
-        From<UnexpectedEot<L::Offset, Lang>> + crate::emitter::FromUnclosed<'inp, L, Lang>,
+        From<UnexpectedEot<L::Offset, Lang>>,
       Ctx: ParseContext<'inp, L, Lang>,
       Container: Default + ContainerT<O> + SeparatorHandler<'inp, L> + DelimiterHandler<'inp, L>,
       Delim: Delimiter<'inp, L, Lang>,
@@ -645,7 +645,7 @@ macro_rules! impl_separated_delim {
         + UnclosedEmitter<'inp, L, Lang>
         $($emitters)*,
       <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error:
-        From<UnexpectedEot<L::Offset, Lang>> + crate::emitter::FromUnclosed<'inp, L, Lang>,
+        From<UnexpectedEot<L::Offset, Lang>>,
       Ctx: ParseContext<'inp, L, Lang>,
       Container: Default + ContainerT<O> + SeparatorHandler<'inp, L> + DelimiterHandler<'inp, L>,
       Delim: Delimiter<'inp, L, Lang>,
@@ -675,7 +675,7 @@ macro_rules! impl_separated_delim {
         + UnclosedEmitter<'inp, L, Lang>
         $($emitters)*,
       <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error:
-        From<UnexpectedEot<L::Offset, Lang>> + crate::emitter::FromUnclosed<'inp, L, Lang>,
+        From<UnexpectedEot<L::Offset, Lang>>,
       Ctx: ParseContext<'inp, L, Lang>,
       Container: ContainerT<O> + SeparatorHandler<'inp, L> + DelimiterHandler<'inp, L>,
       Delim: Delimiter<'inp, L, Lang>,
@@ -709,7 +709,7 @@ macro_rules! impl_separated_delim {
         + UnclosedEmitter<'inp, L, Lang>
         $($emitters)*,
       <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error:
-        From<UnexpectedEot<L::Offset, Lang>> + crate::emitter::FromUnclosed<'inp, L, Lang>,
+        From<UnexpectedEot<L::Offset, Lang>>,
       Ctx: ParseContext<'inp, L, Lang>,
       Container: ContainerT<O> + SeparatorHandler<'inp, L> + DelimiterHandler<'inp, L>,
       Delim: Delimiter<'inp, L, Lang>,
@@ -1342,7 +1342,7 @@ macro_rules! impl_separated_while_delim {
         + UnclosedEmitter<'inp, L, Lang>
         $($emitters)*,
       <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error:
-        From<UnexpectedEot<L::Offset, Lang>> + crate::emitter::FromUnclosed<'inp, L, Lang>,
+        From<UnexpectedEot<L::Offset, Lang>>,
       Ctx: ParseContext<'inp, L, Lang>,
       Container: Default + ContainerT<O> + SeparatorHandler<'inp, L> + DelimiterHandler<'inp, L>,
       Delim: Delimiter<'inp, L, Lang>,
@@ -1373,7 +1373,7 @@ macro_rules! impl_separated_while_delim {
         + UnclosedEmitter<'inp, L, Lang>
         $($emitters)*,
       <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error:
-        From<UnexpectedEot<L::Offset, Lang>> + crate::emitter::FromUnclosed<'inp, L, Lang>,
+        From<UnexpectedEot<L::Offset, Lang>>,
       Ctx: ParseContext<'inp, L, Lang>,
       Container: Default + ContainerT<O> + SeparatorHandler<'inp, L> + DelimiterHandler<'inp, L>,
       Delim: Delimiter<'inp, L, Lang>,
@@ -1405,7 +1405,7 @@ macro_rules! impl_separated_while_delim {
         + UnclosedEmitter<'inp, L, Lang>
         $($emitters)*,
       <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error:
-        From<UnexpectedEot<L::Offset, Lang>> + crate::emitter::FromUnclosed<'inp, L, Lang>,
+        From<UnexpectedEot<L::Offset, Lang>>,
       Ctx: ParseContext<'inp, L, Lang>,
       Container: ContainerT<O> + SeparatorHandler<'inp, L> + DelimiterHandler<'inp, L>,
       Delim: Delimiter<'inp, L, Lang>,
@@ -1441,7 +1441,7 @@ macro_rules! impl_separated_while_delim {
         + UnclosedEmitter<'inp, L, Lang>
         $($emitters)*,
       <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error:
-        From<UnexpectedEot<L::Offset, Lang>> + crate::emitter::FromUnclosed<'inp, L, Lang>,
+        From<UnexpectedEot<L::Offset, Lang>>,
       Ctx: ParseContext<'inp, L, Lang>,
       Container: ContainerT<O> + SeparatorHandler<'inp, L> + DelimiterHandler<'inp, L>,
       Delim: Delimiter<'inp, L, Lang>,
