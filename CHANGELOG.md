@@ -1448,6 +1448,22 @@ and will red until they do.
   value; and the eighteen carriers grow one field, so `Keyword<&str, SimpleSpan>` goes from 32 to
   40 bytes — exactly `Ident<&str, SimpleSpan>`'s size, which already paid it.
 
+- **`InvalidHexDigits`'s shared reader can no longer be turned into a truncating one by a method
+  added later** (#280). The type's `Deref`, `DerefMut` and `bump` read `as_slices().0` /
+  `as_mut_slices().0` — the first physical segment of a ring buffer handed out as the whole set,
+  the shape #245 fixed in `IncompleteSyntax`. It was correct, because the only mutation was an
+  append and so the head never left zero, but that was a property of the method list rather than
+  of the type, and two of the three reads went through `Deref`/`DerefMut` and so did not name
+  `as_slices` for a grep to find.
+
+  The two reads whose receiver is exclusive now normalize instead of assuming: `make_contiguous`
+  returns the whole ring by construction, whatever state it is in. The one that cannot — `Deref`
+  takes `&self` by trait definition, and one `&[T]` cannot describe two segments — is backed by
+  containment rather than by a comment: the struct is declared in a private submodule, so its
+  field is unreachable from the rest of the file, and every mutation goes through one funnel that
+  restores contiguity on exit, the unwinding one included. A `pop_front` added next year is a
+  private-field error, not a silent reintroduction.
+
 - **A green tree deep enough to abort in its own destructor can no longer be materialized**
   (#316). The construction half of an uncatchable process abort reachable from safe third-party
   code: `rowan`'s recursive release of a green tree. Both public construction doors are covered —
