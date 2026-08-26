@@ -131,12 +131,18 @@ Read the parameter's *name*, not just its letter.
 ```text
 impl<S, Span, Lang> Ident<S, Span, Lang> {
     const fn new(span: Span, source: S) -> Self;           // status: Valid
-    const fn with_status(span: Span, source: S, status: Status) -> Self;
     const fn span(&self) -> Span where Span: Copy;         // + span_ref / span_mut
     const fn source(&self) -> S where S: Copy;             // + source_ref / source_mut
     fn bump(&mut self, by: &Span::Offset) -> &mut Self where Span: crate::Span;
     fn map<U>(self, f: impl FnOnce(S) -> U) -> Ident<U, Span, Lang>;
 }
+
+// Construction WITH a chosen status is a trait method too, and for the same reason: an inherent
+// `with_status(.., Status)` captures a type-directed argument — an unchanged
+// `unsafe { zeroed() }` infers as the consumer's status before the upgrade and as tokora's
+// after, both compile, and a zero-valued rejection becomes Valid.
+impl FromComponents for Ident<..> { fn from_components(c: Self::Components) -> Self; }
+//                                  // exactly the inverse of into_components
 
 // The recovery state is read through a trait, and ONLY through it — there is no inherent
 // accessor of any name, because an inherent one can be displaced by a consumer's extension
@@ -159,7 +165,7 @@ impl RecoveryState for Ident<..> { fn status(&self) -> Status;
 use tokora::{SimpleSpan, error::ErrorNode, types::{Ident, Keyword}, utils::IntoComponents};
 // `RecoveryState` is NOT in `types::*` — a trait reached through a glob can be rebound by a
 // second glob with only a warning, so it has to be named:
-use tokora::types::recovery::RecoveryState;
+use tokora::types::recovery::{FromComponents, RecoveryState};
 
 struct MyLang;
 
@@ -179,16 +185,16 @@ let as_ident: Ident<&str, SimpleSpan, MyLang> = kw.into();
 assert_eq!(as_ident.source_ref(), &"let");
 
 // Both destructure via `IntoComponents`, into span, payload AND status. The status is in the
-// tuple because `with_status` is the inverse: rebuilding through `new` would declare a recovered
-// node valid, which is the laundering the three-part decomposition exists to prevent.
+// tuple because `FromComponents` is the inverse: rebuilding through `new` would declare a
+// recovered node valid, which is the laundering the three-part decomposition exists to prevent.
 let (span, source, status) = ident.into_components();
-let upper = Ident::<&str, SimpleSpan, MyLang>::with_status(span, source, status)
+let upper = Ident::<&str, SimpleSpan, MyLang>::from_components((span, source, status))
     .map(|s| s.to_uppercase());
 assert_eq!(upper.source_ref(), "MY_VAR");
 assert!(upper.is_valid());
 
 let (span, source, status) = bad.into_components();
-assert!(Ident::<&str, SimpleSpan, MyLang>::with_status(span, source, status).is_error());
+assert!(Ident::<&str, SimpleSpan, MyLang>::from_components((span, source, status)).is_error());
 ```
 
 Both also have real combinator entry points, not just bare constructors. Once the token type opts

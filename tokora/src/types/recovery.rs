@@ -39,13 +39,13 @@
 /// It is not decoration on the carrier: it is the third thing every carrier is made of, beside
 /// the span and the payload. So it appears in
 /// [`IntoComponents::Components`](crate::utils::IntoComponents::Components) — which promises a
-/// *complete* decomposition — and it is accepted back by each carrier's `with_status`
-/// constructor. Those two are inverses, which is what makes the round trip an identity in all
+/// *complete* decomposition — and it is accepted back by [`FromComponents`], the inverse over
+/// the same associated type. Those two are inverses, which is what makes the round trip an identity in all
 /// three states; without the status in both, a decompose-and-rebuild would report every
 /// recovered node as valid syntax, the same laundering tokora#303 removed from `Ident::map`.
 ///
 /// A consumer does not have to interpret it to carry it, and mostly should not: pass it through
-/// `with_status`, or ask it one of the three questions below.
+/// [`FromComponents`], or ask it one of the three questions below.
 ///
 /// # Non-exhaustive
 ///
@@ -160,4 +160,47 @@ pub trait RecoveryState {
   fn is_missing(&self) -> bool {
     self.status().is_missing()
   }
+}
+
+/// Rebuilds a syntax carrier from the components [`IntoComponents`](crate::utils::IntoComponents)
+/// took it apart into — the exact inverse, over the same associated type.
+///
+/// ```rust
+/// use tokora::{SimpleSpan, error::ErrorNode, types::{LitDecimal, recovery::FromComponents}};
+/// use tokora::utils::IntoComponents;
+///
+/// let placeholder = LitDecimal::<&str>::error(SimpleSpan::new(0, 3));
+/// let rebuilt = LitDecimal::<&str>::from_components(placeholder.into_components());
+///
+/// assert_eq!(rebuilt, placeholder);
+/// ```
+///
+/// # Why this replaced a `with_status` constructor
+///
+/// The same job was briefly done by a `pub const fn with_status(span, payload, status)` inherent
+/// on each of the nineteen carriers, on the argument that its `Status` parameter could not be
+/// supplied by any expression written before that type existed. **That is false for a
+/// type-directed expression**, and it was measured rather than argued: an unchanged
+/// `unsafe { core::mem::zeroed() }`, `unsafe { core::mem::transmute::<u8, _>(0) }` or
+/// `unsafe { MaybeUninit::uninit().assume_init() }` in that argument position is inferred as a
+/// consumer's own status enum before the upgrade and as [`Status`] after. Both revisions compile,
+/// there is no ambiguity, and dispatch moves from the consumer's trait to tokora's inherent
+/// function — with `Status::Valid` at discriminant zero, a consumer's zero-valued *rejection*
+/// state becomes valid syntax. The `MaybeUninit` route is worse still: it yields whatever the
+/// stack held.
+///
+/// Bounded routes are not affected and were measured too — `Default::default()`, `x.into()`, an
+/// associated constant and a generic `fn mk<T: Default>() -> T` all fail with `E0277` or `E0308`,
+/// because each needs a trait impl or a named type that [`Status`] does not provide. The silent
+/// routes are exactly the *unbounded* ones.
+///
+/// So the constructor is a trait method rather than an inherent one, which puts it where a
+/// consumer's inherent item outranks it instead of the other way round, and this module is not
+/// glob-re-exported, so it has to be named. It takes one argument whose type is an associated
+/// type of the implementor, and it is reachable by construction to anyone who can decompose:
+/// `T::from_components(x.into_components())` is the round trip, and it is total in all three
+/// recovery states.
+pub trait FromComponents: crate::utils::IntoComponents + Sized {
+  /// Rebuilds the value from its components, carrying the recovery state across unchanged.
+  fn from_components(components: Self::Components) -> Self;
 }

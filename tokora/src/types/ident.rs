@@ -253,7 +253,7 @@ impl<S, Span, Lang: ?Sized> IntoComponents for Ident<S, Span, Lang> {
   /// zero-sized language marker, which the rebuild names in its own type.
   ///
   /// The status is here because this trait promises a complete decomposition and because
-  /// [`with_status`](Ident::with_status) is the inverse: without it in both, a consumer who took
+  /// [`FromComponents`](super::recovery::FromComponents) is the inverse: without it in both, a consumer who took
   /// a carrier apart and put it back together would have to rebuild through
   /// [`new`](Ident::new), which always declares the result valid — the same laundering tokora#303
   /// removed from [`map`](Ident::map), reached one door over.
@@ -467,38 +467,14 @@ impl<S, Span, Lang: ?Sized> Ident<S, Span, Lang> {
     Self::with_status(span, source, Status::Valid)
   }
 
-  /// Creates an identifier with an explicitly given recovery status.
+  /// The status-setting constructor, crate-internal.
   ///
-  /// The inverse of [`into_components`](IntoComponents::into_components), and the only
-  /// constructor that can express a state other than valid over a payload the caller chose:
-  /// [`new`](Self::new) always declares the result valid, and
-  /// [`ErrorNode::error`](ErrorNode::error) / [`ErrorNode::missing`](ErrorNode::missing) pick the
-  /// payload themselves. A dialect with its own placeholder spelling needs this one.
-  ///
-  /// # Examples
-  ///
-  /// ```rust
-  /// use tokora::{SimpleSpan, types::{Ident, Status}, utils::IntoComponents};
-  /// use tokora::types::recovery::RecoveryState;
-  /// // Comparing carriers needs the marker to be `PartialEq`: `PartialEq`/`Eq` stay derived
-  /// // so a `const` carrier keeps working in a `match` pattern, and a derive constrains
-  /// // every parameter. `Debug`, `Clone`, `Copy` and `Hash` need nothing of it.
-  /// #[derive(PartialEq)]
-  /// struct MyLang;
-  ///
-  /// let span = SimpleSpan::new(0, 4);
-  /// let recovered = Ident::<&str, SimpleSpan, MyLang>::with_status(span, "name", Status::Missing);
-  ///
-  /// assert!(recovered.is_missing());
-  /// assert_eq!(recovered.source_ref(), &"name");
-  ///
-  /// // Round trip: the three components rebuild the value they came from.
-  /// let (span, source, status) = recovered.into_components();
-  /// let rebuilt = Ident::<&str, SimpleSpan, MyLang>::with_status(span, source, status);
-  /// assert_eq!(rebuilt, recovered);
-  /// ```
+  /// Public construction with a chosen status goes through
+  /// [`FromComponents`](super::recovery::FromComponents), whose argument is an associated
+  /// type rather than a bare `Status` — see that trait for the type-directed inference
+  /// route that made an inherent `with_status` unsafe to ship.
   #[inline(always)]
-  pub const fn with_status(span: Span, source: S, status: Status) -> Self {
+  pub(super) const fn with_status(span: Span, source: S, status: Status) -> Self {
     Self {
       span,
       ident: source,
@@ -565,6 +541,15 @@ impl<S, Span, Lang: ?Sized> Ident<S, Span, Lang> {
       span,
       ident: f(ident),
     }
+  }
+}
+
+impl<S, Span, Lang: ?Sized> super::recovery::FromComponents for Ident<S, Span, Lang> {
+  #[inline(always)]
+  fn from_components(components: Self::Components) -> Self {
+    let (span, source, status) = components;
+
+    Self::with_status(span, source, status)
   }
 }
 

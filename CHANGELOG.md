@@ -86,6 +86,29 @@ and will red until they do.
   `Status` is `#[non_exhaustive]`: a fourth recovery state is admissible later, so a `match` needs
   a wildcard arm and `is_valid()` is deliberately not `!is_error() && !is_missing()`.
 
+- **`types::recovery::FromComponents` — the inverse of `IntoComponents`** (#320).
+  `T::from_components(x.into_components())` rebuilds a carrier with its recovery state intact, and
+  is the door that closes the laundering: rebuilding through `new` would declare a recovered node
+  valid.
+
+  It is a **trait** method, and that is a repair rather than a style. The same job was briefly done
+  by a `pub const fn with_status(span, payload, status)` inherent on each of the nineteen carriers,
+  argued loud because its `Status` parameter is a type no pre-upgrade expression can produce.
+  **That is false for a type-directed expression, and it was measured.** An unchanged
+  `unsafe { core::mem::zeroed() }` in that argument position infers as a consumer's own status enum
+  before the upgrade and as `Status` after; both revisions compile, there is no ambiguity, and
+  dispatch moves from the consumer's trait to tokora's inherent function. With `Status::Valid` at
+  discriminant zero, a consumer's zero-valued *rejection* becomes valid syntax.
+  `transmute::<u8, _>(0)` does the same, and `MaybeUninit::uninit().assume_init()` yields whatever
+  the stack held. Bounded routes were measured too and all fail loudly — `Default::default()`,
+  `x.into()`, an associated constant and a bounded generic call each need an impl or a named type
+  `Status` does not provide. The silent routes are exactly the **unbounded** ones.
+
+  A trait method sits where a consumer's inherent item outranks it, its argument is an associated
+  type rather than a bare `Status`, and `recovery` is not glob-re-exported — so it has to be named.
+  No consumer code depends on the withdrawn spelling: `with_status` is new in this release and
+  never shipped, which is why it goes where `Ident`'s predicates came back.
+
 - **`types::recovery::RecoveryState` and `types::Status`, over all nineteen recovery carriers**
   (#301). `Keyword` and the seventeen literal carriers implemented `ErrorNode` — so
   `error(span)` and `missing(span)` were public and documented as recovery placeholders — while
@@ -2509,18 +2532,18 @@ and will red until they do.
 
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
 
-**`with_status` is a new inherent associated function on all nineteen recovery carriers, and
-`Status` and `RecoveryState` are new public names in `tokora::types`** (#320). `with_status` can
-win the pick over a consumer's extension item and **cannot do so silently** — not because its
-signature differs, which is not sufficient, but because its third parameter is a `Status`, a type
-no code written before this release can produce a value of. Arguments are checked at the call
-rather than chained past, so displacing a consumer's `with_status` is `error[E0308]` there. It is
-also unreachable by method-call syntax, taking no `self`. The fix is UFCS,
-`MyExt::with_status(..)`. The two new type names are a glob exposure: a consumer with
-`use tokora::types::*;` and a `Status` or `RecoveryState` of their own gets an ambiguity at the
-name, resolved by an explicit import or an `as` alias.
+**`Status` is a new public name in `tokora::types`** (#320). A consumer with
+`use tokora::types::*;` and a `Status` of their own gets `error[E0659]` at the name, resolved by an
+explicit import or an `as` alias. `RecoveryState` and `FromComponents` are **not** in that
+namespace — they live in `tokora::types::recovery` and must be named, because a trait behind a
+glob is picked silently where a type is not.
 
-*Two earlier drafts of this release listed more names here, and both are withdrawn.* The first
+*Three earlier drafts of this release listed more names here, and all are withdrawn.* The third
+listed `with_status` as a new inherent associated function that could not be displaced silently,
+because its `Status` parameter is a type no pre-upgrade code can produce. That is true only of
+expressions whose type comes from the expression; an `unsafe { zeroed() }` takes its type from the
+**parameter**, compiles on both revisions, and moves dispatch. There is no inherent `with_status`
+any more — see `FromComponents` under **Added**.* The first
 listed `is_valid`, `is_error` and `is_missing` as new inherent methods on `Keyword` and the
 seventeen `Lit*` types, offering UFCS as the fix; they are on `RecoveryState` and were never
 shipped inherent. The second listed `status` beside `with_status` on the argument that a new

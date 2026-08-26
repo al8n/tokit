@@ -105,8 +105,8 @@ mod to_equivalent;
 /// tokora#320 is that defect: the carriers in [`types`](crate::types) returned `(Span, Payload)`
 /// while holding a recovery status too, so a parse placeholder and a real one decomposed
 /// identically and every rebuild reported the placeholder as valid syntax. Their `Components`
-/// now carries [`Status`](crate::types::Status) as well, and each carrier's `with_status`
-/// constructor is the inverse. A zero-sized marker such as `PhantomData<Lang>` is the one thing
+/// now carries [`Status`](crate::types::Status) as well, and
+/// [`FromComponents`](crate::types::recovery::FromComponents) is the inverse. A zero-sized marker such as `PhantomData<Lang>` is the one thing
 /// a decomposition may leave out, because the rebuild names it in its own type.
 ///
 /// ## Component Ordering Convention

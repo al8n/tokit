@@ -248,7 +248,7 @@ macro_rules! define_literal {
       /// the zero-sized language marker, which the rebuild names in its own type.
       ///
       /// The status is here because this trait promises a complete decomposition and because
-      /// `with_status` is the inverse: without it in both, a consumer who took a literal apart
+      /// `FromComponents` is the inverse: without it in both, a consumer who took a literal apart
       /// and put it back together would have to rebuild through `new`, which always declares the
       /// result valid.
       type Components = (Span, D, Status);
@@ -318,14 +318,11 @@ macro_rules! define_literal {
         Self::with_status(span, data, Status::Valid)
       }
 
-      /// Creates a literal with an explicitly given recovery status.
-      ///
-      /// The inverse of `into_components`, and the only constructor that can express a state
-      /// other than valid over data the caller chose: `new` always declares the result valid,
-      /// and `ErrorNode::error` / `ErrorNode::missing` pick the data themselves. A dialect with
-      /// its own placeholder spelling needs this one.
+      /// The status-setting constructor, crate-internal. Public construction with a chosen
+      /// status goes through `FromComponents`; see that trait for why an inherent
+      /// `with_status` could be re-targeted by a type-directed argument.
       #[inline(always)]
-      pub const fn with_status(span: Span, data: D, status: Status) -> Self {
+      const fn with_status(span: Span, data: D, status: Status) -> Self {
         Self {
           span,
           data,
@@ -343,6 +340,17 @@ macro_rules! define_literal {
         D: Copy,
       {
         self.data
+      }
+    }
+
+    impl<D, Span, Lang: ?::core::marker::Sized> $crate::types::recovery::FromComponents
+      for $name<D, Span, Lang>
+    {
+      #[inline(always)]
+      fn from_components(components: Self::Components) -> Self {
+        let (span, data, status) = components;
+
+        Self::with_status(span, data, status)
       }
     }
 

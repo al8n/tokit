@@ -1,7 +1,7 @@
 use super::*;
 // `RecoveryState` is no longer re-exported into `types`, so `use super::*` does not bring it in —
 // which is the whole repair, and this line is what an ordinary consumer writes instead.
-use super::recovery::RecoveryState;
+use super::recovery::{FromComponents, RecoveryState};
 use std::{
   string::{String, ToString},
   vec,
@@ -756,14 +756,14 @@ macro_rules! assert_status_survives_a_round_trip {
 
       for status in [Status::Valid, Status::Error, Status::Missing] {
         let name = stringify!($carrier);
-        let original = $carrier::<&str>::with_status(span, "payload", status);
+        let original = $carrier::<&str>::from_components((span, "payload", status));
 
         let (sp, payload, st) = IntoComponents::into_components(original);
         assert_eq!(sp, span, "{name} in {status:?}: span");
         assert_eq!(payload, "payload", "{name} in {status:?}: payload");
         assert_eq!(st, status, "{name} in {status:?}: status survives the decomposition");
 
-        let rebuilt = $carrier::<&str>::with_status(sp, payload, st);
+        let rebuilt = $carrier::<&str>::from_components((sp, payload, st));
         assert_eq!(rebuilt, original, "{name} in {status:?}: the round trip is the identity");
         assert_eq!(rebuilt.is_valid(), status.is_valid(), "{name} in {status:?}: is_valid");
         assert_eq!(rebuilt.is_error(), status.is_error(), "{name} in {status:?}: is_error");
@@ -810,7 +810,7 @@ fn keywords_inherent_decomposition_agrees_with_the_trait_one() {
   let span = SimpleSpan::new(1, 5);
 
   for status in [Status::Valid, Status::Error, Status::Missing] {
-    let kw = Keyword::<&str>::with_status(span, "then", status);
+    let kw = Keyword::<&str>::from_components((span, "then", status));
 
     let inherent = Keyword::into_components(kw);
     let via_trait = IntoComponents::into_components(kw);
@@ -821,7 +821,7 @@ fn keywords_inherent_decomposition_agrees_with_the_trait_one() {
       "{status:?}: the inherent door carries the status"
     );
     assert_eq!(
-      Keyword::<&str>::with_status(inherent.0, inherent.1, inherent.2),
+      Keyword::<&str>::from_components((inherent.0, inherent.1, inherent.2)),
       kw,
       "{status:?}: the inherent door's output rebuilds its input",
     );
@@ -850,7 +850,7 @@ fn an_error_node_placeholder_survives_a_decompose_and_rebuild() {
     ),
   ] {
     let (sp, src, st) = IntoComponents::into_components(kw);
-    let rebuilt = Keyword::<&str>::with_status(sp, src, st);
+    let rebuilt = Keyword::<&str>::from_components((sp, src, st));
     assert_eq!(rebuilt, kw, "{label}: keyword round trip");
     assert!(
       !rebuilt.is_valid(),
@@ -858,7 +858,7 @@ fn an_error_node_placeholder_survives_a_decompose_and_rebuild() {
     );
 
     let (sp, data, st) = IntoComponents::into_components(lit);
-    let rebuilt = LitDecimal::<&str>::with_status(sp, data, st);
+    let rebuilt = LitDecimal::<&str>::from_components((sp, data, st));
     assert_eq!(rebuilt, lit, "{label}: literal round trip");
     assert!(
       !rebuilt.is_valid(),
@@ -931,7 +931,7 @@ macro_rules! assert_marker_is_not_a_bound {
       use core::hash::{Hash, Hasher};
 
       let span = SimpleSpan::new(2, 8);
-      let value = $carrier::<&str, SimpleSpan, BareLang>::with_status(span, "x", Status::Error);
+      let value = $carrier::<&str, SimpleSpan, BareLang>::from_components((span, "x", Status::Error));
 
       requires_the_four(&value);
 
@@ -948,7 +948,7 @@ macro_rules! assert_marker_is_not_a_bound {
 
       // The other two, over a marker that carries them — which is what the `PartialEq` derive
       // costs and what `StructuralPartialEq` buys back.
-      let eq_marked = $carrier::<&str, SimpleSpan, EqLang>::with_status(span, "x", Status::Error);
+      let eq_marked = $carrier::<&str, SimpleSpan, EqLang>::from_components((span, "x", Status::Error));
       requires_the_other_two(&eq_marked);
       assert_eq!(eq_marked, eq_marked.clone(), concat!(stringify!($carrier), ": Eq over an Eq marker"));
     })+
@@ -1242,38 +1242,100 @@ mod consumer_scope {
     assert!(ConsumerIdentChecks::is_valid(&missing));
   }
 
-  /// A consumer constructor with the same name and arity as the new inherent `with_status`.
+  /// A consumer's zero-valued **rejection** state, and a constructor taking it.
+  ///
+  /// The discriminants matter: theirs is `Reject = 0`, and tokora's `Status::Valid` is also at
+  /// zero. That is what turns a re-targeted argument into a semantic inversion rather than a
+  /// visible error.
+  #[derive(Debug, Copy, Clone, PartialEq)]
+  #[repr(u8)]
+  enum TheirStatus {
+    Reject = 0,
+    Accept = 1,
+  }
+
   trait ConsumerCtor {
-    fn with_status(span: SimpleSpan, data: &'static str, ok: bool) -> Self;
+    fn with_status(span: SimpleSpan, data: &'static str, status: TheirStatus) -> Self;
   }
 
   impl ConsumerCtor for LitDecimal<&'static str> {
-    fn with_status(span: SimpleSpan, data: &'static str, ok: bool) -> Self {
-      LitDecimal::new(span, if ok { data } else { "" })
+    fn with_status(span: SimpleSpan, data: &'static str, status: TheirStatus) -> Self {
+      // A rejection produces an empty payload, so the outcome is visible at runtime.
+      LitDecimal::new(
+        span,
+        if status == TheirStatus::Accept {
+          data
+        } else {
+          ""
+        },
+      )
     }
   }
 
-  /// `with_status` is a new inherent name on nineteen carriers, and the review grouped it with the
-  /// three questions. It is in the population but not in the *silent* half, and this is the
-  /// argument rather than the assertion.
+  /// **The fifth failure mode: an argument whose type the parameter chooses.**
   ///
-  /// The three questions take no arguments and return `bool`, so a consumer's method of that name
-  /// has an identical signature and a displacement is invisible. `with_status` takes a
-  /// [`Status`](crate::types::Status) — a type that did not exist before tokora#320 — so no method
-  /// a consumer already wrote can have that parameter type. Displacing one is `error[E0308]` at
-  /// the call site: `ConsumerCtor::with_status(span, "42", false)` written unqualified now
-  /// resolves to tokora's and fails to typecheck on the `bool`.
+  /// A draft of this branch shipped `with_status` as a `pub const fn` inherent on all nineteen
+  /// carriers, arguing it could not be displaced silently because its third parameter is a
+  /// [`Status`](crate::types::Status), a type no pre-upgrade expression can produce. That holds
+  /// for expressions whose type comes from the *expression* — `Default::default()`, `x.into()`,
+  /// an associated constant, a bounded generic call — all of which were measured and all of which
+  /// fail with `E0277` or `E0308`.
+  ///
+  /// It is false for expressions whose type comes from the **parameter**. Measured across the two
+  /// revisions: an unchanged `unsafe { core::mem::zeroed() }` infers as the consumer's enum
+  /// before and as tokora's `Status` after, both compile, and dispatch moves from the consumer's
+  /// trait to tokora's inherent function. `Reject = 0` becomes `Status::Valid`, so a rejection
+  /// silently becomes valid syntax. `transmute::<u8, _>(0)` does the same, and
+  /// `MaybeUninit::uninit().assume_init()` is worse — it yields whatever the stack held.
+  ///
+  /// So the constructor is not in the inherent namespace at all: it is
+  /// [`FromComponents::from_components`](crate::types::recovery::FromComponents::from_components),
+  /// a trait method, which a consumer's inherent item outranks. The call below reaches the
+  /// consumer's constructor and must keep doing so.
   #[test]
-  fn with_status_cannot_be_displaced_silently() {
+  fn a_type_directed_argument_still_reaches_the_consumers_constructor() {
     let span = SimpleSpan::new(0, 2);
 
-    // tokora's inherent one wins the unqualified pick, and its third argument is a `Status`.
-    let ours = LitDecimal::<&str>::with_status(span, "42", Status::Missing);
-    assert!(tokora_status(&ours).is_missing());
+    // The precondition that makes a re-targeted argument an inversion rather than a visible
+    // error, pinned rather than described: both zero discriminants mean opposite things.
+    assert_eq!(
+      TheirStatus::Reject as u8,
+      0,
+      "the consumer's rejection is at zero"
+    );
+    assert_eq!(Status::Valid as u8, 0, "tokora's valid is at zero too");
 
-    // The consumer's is still reachable, by name.
-    let theirs = <LitDecimal<&str> as ConsumerCtor>::with_status(span, "42", false);
-    assert_eq!(theirs.data_ref(), &"");
+    // The type-directed expression, unchanged across the upgrade, at an **unqualified** call.
+    // Naming `ConsumerCtor::` here would pin the trait and no inherent item could ever displace
+    // it — which would arrange the cell so the defect could not reach it. This is the spelling a
+    // consumer actually writes, and the one an inherent `with_status` captures.
+    let built = LitDecimal::<&str>::with_status(span, "42", unsafe { core::mem::zeroed() });
+
+    assert_eq!(
+      built.data_ref(),
+      &"",
+      "a zero-valued argument must still mean the consumer's Reject, not tokora's Valid",
+    );
+
+    // The non-vacuity control, and it has to be type-directed too. Naming `TheirStatus::Accept`
+    // here would be `error[E0308]` under the plant — the loud shape — and the build would stop
+    // before the silent line above ever ran. `1` is `Accept` for the consumer and `Error` for
+    // tokora, both valid `#[repr(u8)]` discriminants, so this line compiles and holds either way
+    // while the line above is the one that moves.
+    // The missing target annotation is the subject of this cell, not an oversight: annotating it
+    // would pin the type and remove the very inference the test is about.
+    #[allow(clippy::missing_transmute_annotations)]
+    let accepted =
+      LitDecimal::<&str>::with_status(span, "42", unsafe { core::mem::transmute::<u8, _>(1u8) });
+    assert_eq!(accepted.data_ref(), &"42");
+
+    // tokora's own status-preserving construction is still reachable, by the trait that replaced
+    // the constructor — and it is the exact inverse of the decomposition.
+    use crate::{types::recovery::FromComponents, utils::IntoComponents};
+    let placeholder = LitDecimal::<&str>::error(span);
+    let rebuilt = LitDecimal::<&str>::from_components(placeholder.into_components());
+    assert_eq!(rebuilt, placeholder);
+    assert!(!tokora_status(&rebuilt).is_valid());
   }
 }
 
@@ -1334,7 +1396,7 @@ fn a_const_carrier_is_usable_in_a_match_pattern() {
   // A recovery placeholder is a different value from a hand-spelled one, in a pattern too — the
   // status is part of what the pattern matches.
   assert_eq!(
-    classify_ident(Ident::with_status((), "let", Status::Missing)),
+    classify_ident(Ident::from_components(((), "let", Status::Missing))),
     0,
     "the status participates in structural matching",
   );
