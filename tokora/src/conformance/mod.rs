@@ -13,7 +13,11 @@
 //! **Trait tier** — driving the [`Lexer`] surface directly:
 //!
 //! 1. **Replay identity** — two fresh `L::new(src)` runs produce the identical
-//!    token/error + span + slice sequence, to exhaustion.
+//!    token/error + span + slice sequence, to exhaustion. **Identical by value**: the whole
+//!    [`Token`], the whole [`Token::Error`], never a rendering of either and never the token's
+//!    [`kind`](Token::kind) standing in for the token. That is what
+//!    [`run`](crate::conformance::Harness::run)'s two `PartialEq` bounds buy, and what a green
+//!    from it did not mean before 0.10.0 — see `run`'s own docs for who pays.
 //! 2. **State-resume faithfulness** — for *every* position `k`, capturing the lexer
 //!    [`State`] there and resuming with
 //!    `L::with_state(src, saved)` + [`bump`](crate::Lexer::bump) to `k`'s offset
@@ -42,8 +46,17 @@
 //! **Integration tier** — driving an `Input` session through the machinery itself over
 //! a fixed set of named, deterministic save/peek/drain/restore schedules
 //! (`peek-heavy`, `save-early-restore-late`, `drain-then-restore-across-cache`,
-//! `nested-savepoints`) and requiring the committed token stream to equal the
-//! straight-lex stream. No randomness — the schedules are enumerated.
+//! `nested-savepoints`) and requiring every schedule to observe the layer the way the straight
+//! drain did: the same **committed tokens** and the same **raised lexer errors**, both by value.
+//! The straight drain's tokens are additionally required to equal the raw-lex tokens. No
+//! randomness — the schedules are enumerated.
+//!
+//! The two arms are compared as two sequences rather than as one interleaved stream, and the
+//! error arm is not cross-checked against the raw lexer. Both are facts about the input layer,
+//! not weaker claims: a `peek` reports a refusal the moment it lexes the region, so where an
+//! error sits *between* two committed tokens varies by schedule on a conforming lexer; and the
+//! layer reports each refused region once, so a lexer that errors repeatedly over one span is
+//! conforming while the layer raises one error. See `check_integration`.
 //!
 //! **Partial-input tier** (`run_partial`, a separate entry point for
 //! `usize`-offset `str` / `[u8]` sources) — driving the input in
@@ -72,14 +85,16 @@
 //! refusal leaves no token behind, so a lexer that errors on a truncated prefix and tokenizes the
 //! full input showed up as "nothing yielded yet", which is a legal prefix.
 //!
-//! Both arms are compared on **value**: a token contributes its kind, its span and the **token
-//! itself**; an error contributes that it *was* an error, its span and the **payload itself**. Not
-//! a rendering — `run_partial` asks for `PartialEq` on both and compares the values, because a
-//! `Debug` string is neither injective (two payloads can render alike, so a real drift passes) nor
-//! stable (a rendering carrying an address or a counter fails on a conforming lexer). Comparing
-//! only the token's *kind* had the same shape on the other arm: a payload decided by a byte that
-//! has not arrived kept its kind and its span, so both runs passed while the value a parser
-//! callback receives changed.
+//! Both arms are compared on **value**, and this is the rule for *every* tier rather than for
+//! this one: a token contributes its kind, its span and the **token itself**; an error contributes
+//! that it *was* an error, its span and the **payload itself**. Not a rendering — both
+//! `run` and `run_partial` ask for `PartialEq` on the token and the error and compare the values,
+//! because a `Debug` string is neither injective (two payloads can render alike, so a real drift
+//! passes) nor stable (a rendering carrying an address or a counter fails on a conforming lexer).
+//! Comparing only the token's *kind* had the same shape on the other arm: a payload decided by a
+//! byte that has not arrived kept its kind and its span, so both runs passed while the value a
+//! parser callback receives changed. The trait tier held the weaker key for one release longer
+//! than the partial tier did, and that gap was #269.
 //!
 //! Nothing from the *diagnostic* channel is compared: no rendered message, no
 //! [`Severity`](crate::emitter::Severity), no label stack.
@@ -97,6 +112,49 @@
 //! A failing check is a bug in the *lexer* (or a mismatch with the documented
 //! contract), surfaced loudly. The kit never mutates the lexer's behavior; it only
 //! observes and asserts.
+//!
+//! **The kit reports exactly what it established — no more and no less.** Those are one rule with
+//! two halves, and both halves are enforced in the machinery every comparison is built from
+//! rather than at the sites that draw verdicts from it.
+//!
+//! **No more: it never reports a failure that is a fact about a value type rather than about the
+//! lexer.** Every verdict here rests on an equality the kit does not own. [`PartialEq`] promises
+//! symmetry and transitivity but **not** reflexivity, so a payload holding an `f64` that can be
+//! `NaN` is not equal to itself — and [`Eq`] and [`Ord`] *do* promise reflexivity while nothing
+//! checks the promise, so a `Kind`, a span, an offset or a source slice can break it too. The
+//! guarded population is therefore **every** equality any tier draws a verdict from, and it is
+//! defined by construction rather than by a list: a comparison is built by `compare_by`, its
+//! answer names the **component that decided it**, and building it is the only way to reach either
+//! a verdict or a refusal. Once such a comparison has already failed, the kit asks whether *that*
+//! operation is equal to itself, and a side whose is not gets a refusal tagged
+//! `non-reflexive-payload` naming the component and the obligation, instead of a verdict whose
+//! expected-vs-got renders identically on both sides (#295). The obligation is unchanged and is
+//! the caller's: such a type hand-writes the impl that says what equality means for it.
+//!
+//! **No less: it never withholds a verdict it did establish.** Some differences rest on no caller
+//! equality at all — a difference at the **discriminant** (an item that is a lexer error on one
+//! side and a committed token on the other) or in item **count** — and a component comparison over
+//! two values that each equal themselves is sound too, which is the ordinary case and the whole
+//! population of honest failures. All of those are **conclusive**, and a conclusive difference
+//! outranks an inconclusive one wherever both are available: the first inconclusive difference is
+//! retained as a fallback while the search continues into the remaining components of the item,
+//! the later positions of the stream, the item count, and — where a law is decided by two whole
+//! answers rather than by components — the second arm of the integration tier's observation and
+//! the second half of a prefilled peek's buffer. It is reported only if nothing conclusive is
+//! found anywhere. `Ranking` carries that rule and the argument for it.
+//!
+//! The search is bounded by one **verdict**, and that is the honest edge of it. Two checks under
+//! two different tags are two laws, and the kit keeps its assert-with-context posture across
+//! them: a refusal at replay identity ends the run without asking what state-resume would have
+//! said. Widening that would make the harness accumulate failures instead of stopping at the
+//! first, which is a different tool from the one this module says it is.
+//!
+//! Both halves were learned from the same failure, one direction at a time. Answering `false` and
+//! then scanning the whole item for a non-reflexive value asked a different question from the one
+//! the comparison had asked, and hid the truncation nonconformance the partial tier exists to
+//! report behind a refusal saying the kit had convicted the lexer of nothing. Stopping at the
+//! first difference reached hid a decisive item count behind a `NaN` at position 0, and a
+//! corrupted `L::State` behind a `NaN` in the token beside it.
 
 pub mod cache;
 pub mod emitter;
@@ -113,7 +171,7 @@ use std::{format, rc::Rc, string::String, vec, vec::Vec};
 use crate::{
   Lexer, ReadFrontier, Slice, Source, Span, Token,
   cache::DefaultCache,
-  emitter::{Emitter, Silent},
+  emitter::Emitter,
   error::{Incomplete, MaybeIncomplete, token::UnexpectedTokenOf},
   input::{Complete, Cursor, Input, InputRef, Partial},
   span::Spanned,
@@ -195,7 +253,9 @@ const MAX_BUDGET_MULTIPLE: usize = 1 << 16;
 ///   }
 /// }
 ///
-/// #[derive(Clone, Debug)]
+/// // `PartialEq` because `run` compares the token by VALUE (#269) — this is the one line
+/// // the new bound costs a vocabulary that is plain data, which is nearly all of them.
+/// #[derive(Clone, Debug, PartialEq)]
 /// struct CharTok;
 /// impl Token<'_> for CharTok {
 ///   type Kind = CharKind;
@@ -355,7 +415,87 @@ where
     self
   }
 
+  /// The anti-hang budget for `src`: `budget_multiple * source_units + BUDGET_FLOOR`.
+  ///
+  /// Checked, not saturating. Saturation here would hand back [`usize::MAX`], and the guards built
+  /// out of this number do not all survive that value: [`instance_ceiling`] adds one to it and
+  /// **overflows** — wrapping to a ceiling of `0` in release, which refuses every lexer on its
+  /// first attempt — and the item guards `out.len() > budget` become comparisons no `Vec` length
+  /// can satisfy. (The aggregate tally is unaffected: it derives its own `u128` ceiling from this
+  /// number rather than using it, so it would still fire.) One broken guard is enough, and a
+  /// budget that has stopped describing the source it came from is not a budget in any case.
+  /// [`MAX_BUDGET_MULTIPLE`] already bounds the multiple; this bounds the product, which on a
+  /// 32-bit target the multiple alone does not.
+  ///
+  /// # Panics
+  ///
+  /// Panics when `budget_multiple * source_units + 64` does not fit in a `usize` with room above
+  /// it for the exhaustion probe. Reaching it needs a source of more than `usize::MAX / 65536`
+  /// units — 256 TiB on a 64-bit target — so what this replaces is not a run that used to work: it
+  /// is a budget silently swapped for one the caller never asked for.
+  fn budget(&self, src: &'inp L::Source) -> usize {
+    let units = src.slice(..).map(|s| s.len()).unwrap_or(0);
+    representable_budget(self.budget_multiple, units).unwrap_or_else(|| {
+      panic!(
+        "tokora conformance: the anti-hang budget for a source of {units} units at a multiple of \
+         {} does not fit in a usize. This is a limit of the kit's arithmetic and not a verdict on \
+         the lexer, which has not been run. Lower the multiple with Harness::budget_multiple: an \
+         unrepresentable budget has to be replaced by some other number, and every replacement is \
+         wrong — usize::MAX overflows the per-instance ceiling derived from it and puts the item \
+         guards past any Vec length, and anything smaller certifies a budget you did not ask for.",
+        self.budget_multiple
+      )
+    })
+  }
+}
+
+impl<'inp, L> Harness<'inp, L>
+where
+  L: Lexer<'inp>,
+  // Semantic equality on the two values every trait-tier comparison is drawn from. These are the
+  // only bounds this entry point asks for beyond `Lexer` itself; see `run`'s own docs for who
+  // pays and what the alternatives cost, and `Item::compare` for why a `Debug` rendering and a
+  // `kind` projection are each the wrong key.
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
+{
   /// Runs every check against every input, panicking on the first violation.
+  ///
+  /// # Who pays for `PartialEq`, and what a green means without it
+  ///
+  /// This asks for `L::Token: PartialEq` and `<L::Token as Token>::Error: PartialEq`. Before
+  /// 0.10.0 it asked for nothing beyond [`Lexer`], and **that is what the defect was** (#269):
+  /// check 1 is documented as identity of the item, and with no equality to call the kit
+  /// substituted the two things it could reach — the error's `Debug` rendering and the token's
+  /// [`kind`](Token::kind). Neither is an equality relation. A rendering is not injective, so two
+  /// unequal error values that print alike replayed green; it is not stable either, so a payload
+  /// rendering a counter or an address reddened a *conforming* lexer; and a kind is a projection,
+  /// so a token payload could move between two fresh runs with the kind, the span and the slice
+  /// all holding still. A certificate that says "identical" and checks something weaker is worth
+  /// less than no certificate, because the caller stops looking.
+  ///
+  /// The alternative to the bound is a caller-supplied comparator or key, and
+  /// [`run_partial`](Self::run_partial) already settled that trade for the other tier: a
+  /// hand-written projection is silently escaped by the next field added, which is the failure
+  /// mode the rendering had. The bound is the narrower obligation and the stronger guarantee.
+  ///
+  /// **What it excludes.** A vocabulary whose token or error type cannot be `PartialEq` — a
+  /// payload holding an `Arc<dyn Error>`, a closure, a handle — loses this entry point outright,
+  /// and with it the whole kit, since every tier hangs off `run` or
+  /// [`run_partial`](Self::run_partial) and the latter already required both bounds. Recovering
+  /// it costs a `#[derive(PartialEq)]`, or a hand-written impl where derivation is wrong, or a
+  /// newtype whose equality is the one the vocabulary means. Nothing about the *lexer* has to
+  /// change. There is no in-tree vocabulary among the excluded: this crate ships no concrete
+  /// [`Token`] implementation at all, and the bundled logos adapter is transparent —
+  /// `LogosLexer<T>` takes its `Token` and `Error` from the caller and constrains neither.
+  ///
+  /// One caveat that comes with value equality rather than with this kit, and it is the same one
+  /// [`run_partial`](Self::run_partial) carries: a payload holding an `f64` that can be `NaN` is
+  /// not equal to itself, and such a type must hand-write an impl that says what it means. Until
+  /// it does, this kit will not pretend to have checked it — where nothing conclusive outranks
+  /// that comparison it refuses, tagged `non-reflexive-payload`, rather than reporting the lexer
+  /// as non-conforming. The same holds for a `Kind`, span, slice or offset whose `Eq` or `Ord`
+  /// breaks the reflexivity those traits promise.
   ///
   /// # Panics
   ///
@@ -393,39 +533,6 @@ where
       check_integration::<L>(idx, src, &reference, budget);
     }
   }
-
-  /// The anti-hang budget for `src`: `budget_multiple * source_units + BUDGET_FLOOR`.
-  ///
-  /// Checked, not saturating. Saturation here would hand back [`usize::MAX`], and the guards built
-  /// out of this number do not all survive that value: [`instance_ceiling`] adds one to it and
-  /// **overflows** — wrapping to a ceiling of `0` in release, which refuses every lexer on its
-  /// first attempt — and the item guards `out.len() > budget` become comparisons no `Vec` length
-  /// can satisfy. (The aggregate tally is unaffected: it derives its own `u128` ceiling from this
-  /// number rather than using it, so it would still fire.) One broken guard is enough, and a
-  /// budget that has stopped describing the source it came from is not a budget in any case.
-  /// [`MAX_BUDGET_MULTIPLE`] already bounds the multiple; this bounds the product, which on a
-  /// 32-bit target the multiple alone does not.
-  ///
-  /// # Panics
-  ///
-  /// Panics when `budget_multiple * source_units + 64` does not fit in a `usize` with room above
-  /// it for the exhaustion probe. Reaching it needs a source of more than `usize::MAX / 65536`
-  /// units — 256 TiB on a 64-bit target — so what this replaces is not a run that used to work: it
-  /// is a budget silently swapped for one the caller never asked for.
-  fn budget(&self, src: &'inp L::Source) -> usize {
-    let units = src.slice(..).map(|s| s.len()).unwrap_or(0);
-    representable_budget(self.budget_multiple, units).unwrap_or_else(|| {
-      panic!(
-        "tokora conformance: the anti-hang budget for a source of {units} units at a multiple of \
-         {} does not fit in a usize. This is a limit of the kit's arithmetic and not a verdict on \
-         the lexer, which has not been run. Lower the multiple with Harness::budget_multiple: an \
-         unrepresentable budget has to be replaced by some other number, and every replacement is \
-         wrong — usize::MAX overflows the per-instance ceiling derived from it and puts the item \
-         guards past any Vec length, and anything smaller certifies a budget you did not ask for.",
-        self.budget_multiple
-      )
-    })
-  }
 }
 
 impl<'inp, L> Harness<'inp, L>
@@ -437,9 +544,10 @@ where
   // lexer honest truncations without a growable source.
   L::Source: core::ops::Index<core::ops::RangeTo<usize>, Output = L::Source>,
   <L::Token as Token<'inp>>::Kind: PartialEq + core::fmt::Debug,
-  // Semantic equality on the compared values, and the only two bounds this tier asks for beyond
-  // what `run` needs. See `PartialItem::sig_eq` for why a `Debug` rendering cannot stand in, and
-  // `run_partial`'s own docs for who pays.
+  // Semantic equality on the compared values. Since 0.10.0 `run` asks for these two as well, so
+  // what separates the tiers is the three above and nothing about equality. See
+  // `StreamItem::compare` for why a `Debug` rendering cannot stand in, and `run_partial`'s own
+  // docs for who pays.
   L::Token: PartialEq,
   <L::Token as Token<'inp>>::Error: PartialEq,
 {
@@ -463,9 +571,10 @@ where
   ///
   /// # Who pays for `PartialEq`, and what it buys
   ///
-  /// This entry point requires `L::Token: PartialEq` and `<L::Token as Token>::Error: PartialEq`,
-  /// which [`run`](Self::run) does not. That is a deliberate choice between the two ways to compare
-  /// a value the kit does not own:
+  /// This entry point requires `L::Token: PartialEq` and `<L::Token as Token>::Error: PartialEq`.
+  /// It asked for them one release before [`run`](Self::run) did, which is why the argument is
+  /// written out here; it is a deliberate choice between the two ways to compare a value the kit
+  /// does not own:
   ///
   /// - a **bound**, as here: the caller derives `PartialEq` — one line for the overwhelming
   ///   majority of vocabularies, which are plain data — and the comparison is then *total*. Every
@@ -477,16 +586,19 @@ where
   ///   this closes. That failure mode is the one the `Debug` rendering already had.
   ///
   /// The bound is the narrower of the two obligations in practice and the stronger guarantee, so it
-  /// is what this asks for. It is also the *restricted* entry point already —
-  /// [`Offset = usize`](crate::Lexer::Offset), a prefix-sliceable source and `L::State: Clone` are
-  /// all required here and not by [`run`](Self::run) — so it is the right place to ask.
+  /// is what this asks for. What still separates this entry point from [`run`](Self::run) is
+  /// [`Offset = usize`](crate::Lexer::Offset), a prefix-sliceable source and `L::State: Clone` —
+  /// all required here and not there. Equality is no longer part of that list: `run` compared an
+  /// error's `Debug` rendering and a token's kind until 0.10.0, and reported an identity it had
+  /// not checked for it (#269), so both entry points now ask for the same two bounds.
   ///
-  /// **A vocabulary with neither** loses this tier and keeps everything else: the trait tier and
-  /// the integration tier both run from [`run`](Self::run), whose bounds are unchanged. Recovering
-  /// this tier costs a `#[derive(PartialEq)]`, or a hand-written impl where derivation is wrong.
+  /// **A vocabulary with neither** loses the kit. Recovering it costs a `#[derive(PartialEq)]`,
+  /// or a hand-written impl where derivation is wrong.
   /// One caveat that comes with value equality rather than with this kit: a payload holding a
   /// `f64` that can be `NaN` is not equal to itself, and such a type must hand-write an impl that
-  /// says what it means.
+  /// says what it means. The kit does not silently accept one — a comparison such a value decides,
+  /// and that nothing conclusive outranks, is refused, tagged `non-reflexive-payload`, rather than
+  /// reported as a conformance failure of the lexer (#295, #324).
   ///
   /// This is where a lexer that is not faithful under truncation is caught — one whose item
   /// identity depends on input beyond what it reports having read (lookahead past a token that
@@ -1215,8 +1327,9 @@ fn lex_attempt_ceiling(drains: usize, budget: usize) -> AttemptCeiling {
 
 /// The emitter error the partial check surfaces: the input layer builds it from the frontier
 /// [`Incomplete`] (via [`SurfaceIncomplete`](crate::input::SurfaceIncomplete)), and it is the only
-/// thing that reaches the `Err` channel — [`PartialRecorder`] never rejects a diagnostic. The
+/// thing that reaches the `Err` channel — [`ItemRecorder`] never rejects a diagnostic. The
 /// check never inspects the payload, only that `next` returned `Err` at the frontier.
+#[derive(Debug)]
 enum PartialProbe {
   Incomplete,
 }
@@ -1235,15 +1348,22 @@ impl MaybeIncomplete for PartialProbe {
   }
 }
 
-/// One item of the sequence the partial tier compares — the unit chunked equivalence is a
-/// statement *about*.
+/// One item of a committed stream — the unit **both** tiers that drive an `Input` compare, the
+/// partial one and the integration one.
 ///
 /// A committed **token** and a **lexer error** are both items, because the input layer lexes bytes
 /// and then either commits a token or refuses the region and reports it. Truncation can turn one
 /// into the other, and a comparison over tokens alone cannot see that: a refusal leaves no trace
 /// in the token stream at all. So the error is an item here, and the prefix property is asked of
 /// the interleaved sequence.
-enum PartialItem<'inp, L>
+///
+/// The integration tier holds the same values in the same enum, and reached them a release later:
+/// it reduced every committed token to `(kind, span)` and discarded the `L::Token` its drain loop
+/// already had in hand, which is #269's projection surviving at the one tier neither #269 nor
+/// #295 touched. The two tiers differ in *how* they sequence the arms and not in what an item is
+/// or in how two of them are compared — see [`check_integration`] for the sequencing difference
+/// and why it is a property of the input layer rather than of this type.
+enum StreamItem<'inp, L>
 where
   L: Lexer<'inp>,
 {
@@ -1256,11 +1376,11 @@ where
   /// AST changed. The token is `Clone`, so keeping it costs a clone per item in a test kit.
   Token(L::Token, L::Span),
   /// A lexer error the input layer raised over bytes it lexed and refused: its span and the
-  /// **payload itself** — see [`PartialRecorder`] for what that does and does not assert.
+  /// **payload itself** — see [`ItemRecorder`] for what that does and does not assert.
   LexerError(L::Span, <L::Token as Token<'inp>>::Error),
 }
 
-impl<'inp, L> Clone for PartialItem<'inp, L>
+impl<'inp, L> Clone for StreamItem<'inp, L>
 where
   L: Lexer<'inp>,
 {
@@ -1272,7 +1392,7 @@ where
   }
 }
 
-impl<'inp, L> PartialItem<'inp, L>
+impl<'inp, L> StreamItem<'inp, L>
 where
   L: Lexer<'inp>,
 {
@@ -1284,7 +1404,27 @@ where
   }
 
   /// Whether two items agree on discriminant, span, and **value** — the token itself on one arm,
-  /// the error payload on the other.
+  /// the error payload on the other — and, when they do not, **which of those decided it**.
+  ///
+  /// # The order the components are consulted in, and what rests on it
+  ///
+  /// Discriminant, then the components bounded to a *total* equality ([`kind`](Token::kind) is
+  /// `Eq`, the span is `Ord`), then the payload, whose [`PartialEq`] promises no reflexivity.
+  /// Two sides can differ in several components at once, and this names the first **conclusive**
+  /// one in that order — the first whose own comparison the kit can convict on. A divergence a
+  /// sound total equality settles is therefore never attributed to a partial one, and the answer
+  /// is a true statement about a comparison that really failed either way.
+  ///
+  /// The word doing the work is *conclusive*. `Eq` promises reflexivity and nothing checks the
+  /// promise, so a `Kind` or a span can be as unusable as a `NaN`; when the earlier component is
+  /// the unusable one, [`Ranking`] holds it as a fallback and the payload behind it gets to
+  /// speak. That is not the order failing — it is the order applying to the evidence the kit
+  /// actually has.
+  ///
+  /// Nothing about **correctness** rests on the order, which is the point of stating it. The
+  /// refusal asks its question of whichever component is named, so it fires exactly when nothing
+  /// the kit could convict on was found — under this order or any other. What the order buys is a
+  /// *diagnosis*: the strongest evidence available gets to speak.
   ///
   /// # Semantically, never by rendering
   ///
@@ -1312,22 +1452,32 @@ where
   /// ignores a field [`kind`](Token::kind) reads is coarser than the classification the parser
   /// sees, and this comparison is the only thing standing between that and a silent pass. It can
   /// only ever red *more*.
-  fn sig_eq(&self, other: &Self) -> bool
+  fn compare(&self, other: &Self) -> Comparison
   where
     <L::Token as Token<'inp>>::Kind: PartialEq,
     L::Token: PartialEq,
     <L::Token as Token<'inp>>::Error: PartialEq,
   {
     match (self, other) {
-      (Self::Token(a, sa), Self::Token(b, sb)) => a.kind() == b.kind() && a == b && sa == sb,
-      (Self::LexerError(sa, a), Self::LexerError(sb, b)) => sa == sb && a == b,
-      _ => false,
+      (Self::Token(a, sa), Self::Token(b, sb)) => Comparison::ranked(&[
+        &|| compare_by(Decided::KIND, &a.kind(), &b.kind()),
+        &|| compare_by(Decided::SPAN, sa, sb),
+        &|| compare_by(Decided::TOKEN_PAYLOAD, a, b),
+      ]),
+      (Self::LexerError(sa, a), Self::LexerError(sb, b)) => {
+        Comparison::ranked(&[&|| compare_by(Decided::SPAN, sa, sb), &|| {
+          compare_by(Decided::ERROR_PAYLOAD, a, b)
+        }])
+      }
+      // A committed token against a lexer error. This tier exists to catch exactly that, and no
+      // caller equality was consulted to find it — see [`Decided::Discriminant`].
+      _ => Comparison::Differs(Decided::Discriminant),
     }
   }
 
   /// A human-readable one-line rendering for panic context.
   ///
-  /// `Debug` is the right tool *here* and the wrong one in [`sig_eq`](Self::sig_eq): this text is
+  /// `Debug` is the right tool *here* and the wrong one in [`compare`](Self::compare): this text is
   /// read by a person diagnosing a failure, and nothing is decided from it.
   fn describe(&self) -> String
   where
@@ -1340,18 +1490,24 @@ where
   }
 }
 
-/// The shared, ordered log both partial-tier drains append to: [`PartialRecorder`] pushes each
+/// The shared, ordered log both partial-tier drains append to: [`ItemRecorder`] pushes each
 /// lexer error the input layer reports, the drain loop pushes each token `next` hands back, and
 /// because the layer reports an error during the very `next` call that goes on to find the
 /// following token, the vector ends up being the interleaved item stream in production order.
-type PartialLog<'inp, L> = Rc<RefCell<Vec<PartialItem<'inp, L>>>>;
+type StreamLog<'inp, L> = Rc<RefCell<Vec<StreamItem<'inp, L>>>>;
 
-/// The emitter the partial tier drives, and the reason it is not [`Silent`].
+/// The emitter **both** `Input`-driving tiers run under, and the reason neither is [`Silent`].
 ///
 /// `Silent` discards every lexer error, which made the whole error arm invisible to chunked
 /// equivalence: a lexer could refuse a region on a truncated buffer and tokenize the same region
 /// once the missing bytes arrived, and the check saw an empty token list on one side and a token
 /// on the other — a legal *prefix*, and green.
+///
+/// The integration tier ran under `Silent` for one release longer, and the same sentence applies
+/// to it with "truncated buffer" replaced by "schedule": a refusal raised by the straight drain
+/// and not by `peek-heavy` — or raised by both with a payload that moved — left the two token
+/// streams identical, so the whole error arm of the committed stream was outside every one of
+/// that tier's five comparisons. See [`check_integration`].
 ///
 /// # What it compares, and what it deliberately does not
 ///
@@ -1380,16 +1536,16 @@ type PartialLog<'inp, L> = Rc<RefCell<Vec<PartialItem<'inp, L>>>>;
 /// properties a comparison key has to have, and `Debug` has neither: it is not injective, so a
 /// payload that really does move can render identically and pass; and it is not stable, so a
 /// payload rendering an address or a counter reds on a conforming lexer. See
-/// [`PartialItem::sig_eq`] for the full argument and for what the bound on
+/// [`StreamItem::compare`] for the full argument and for what the bound on
 /// [`run_partial`](Harness::run_partial) buys.
-struct PartialRecorder<'inp, L>
+struct ItemRecorder<'inp, L>
 where
   L: Lexer<'inp>,
 {
-  log: PartialLog<'inp, L>,
+  log: StreamLog<'inp, L>,
 }
 
-impl<'inp, L> Emitter<'inp, L> for PartialRecorder<'inp, L>
+impl<'inp, L> Emitter<'inp, L> for ItemRecorder<'inp, L>
 where
   L: Lexer<'inp>,
 {
@@ -1403,7 +1559,7 @@ where
     self
       .log
       .borrow_mut()
-      .push(PartialItem::LexerError(span, payload));
+      .push(StreamItem::LexerError(span, payload));
     Ok(())
   }
 
@@ -1416,9 +1572,11 @@ where
   }
 
   /// A recording emitter owes the log the same rollback discipline a collecting one does, so the
-  /// mark is the log's length and a rewind truncates to it. Both drains here are straight forward
-  /// drains and never save or restore, so nothing calls this today; implementing it means a later
-  /// schedule that does backtrack cannot silently accumulate phantom items.
+  /// mark is the log's length and a rewind truncates to it. The partial tier's two drains are
+  /// straight forward drains and never save or restore, so this was written for a schedule that
+  /// did not exist yet; three of the integration tier's five now do exactly that, and the
+  /// discipline is what makes their error streams comparable at all — a restore that rewinds the
+  /// dedup watermark without rewinding the log would leave every re-lexed refusal recorded twice.
   fn checkpoint(&mut self) -> u64 {
     self.log.borrow().len() as u64
   }
@@ -1428,8 +1586,14 @@ where
   }
 }
 
-/// The partial-check context: a [`PartialRecorder`] over [`PartialProbe`] and the default cache.
-type PartialConfCtx<'inp, L> = (PartialRecorder<'inp, L>, DefaultCache<'inp, L>);
+/// The context both `Input`-driving tiers parse under: an [`ItemRecorder`] over [`PartialProbe`]
+/// and the default cache.
+///
+/// One alias for both, because the tiers differ in the input's *completeness mode* and in nothing
+/// the context carries. [`PartialProbe`] is uninhabited on the integration tier — its only
+/// constructor is `From<Incomplete>`, which a [`Complete`](crate::input::Complete) input never
+/// raises — so a `next()` there still cannot fail, exactly as it could not under [`Silent`].
+type RecordingCtx<'inp, L> = (ItemRecorder<'inp, L>, DefaultCache<'inp, L>);
 
 /// Seeds the state every drive in this module starts from: the caller's lexer state under the
 /// tier's shared [`LexTally`].
@@ -1456,14 +1620,14 @@ fn partial_stream<'inp, L>(
   is_final: bool,
   budget: usize,
   idx: usize,
-) -> (Vec<PartialItem<'inp, Bud<'inp, L>>>, bool)
+) -> (Vec<StreamItem<'inp, Bud<'inp, L>>>, bool)
 where
   L: Lexer<'inp>,
   L::State: Clone,
 {
-  let log: PartialLog<'inp, Bud<'inp, L>> = Rc::new(RefCell::new(Vec::new()));
+  let log: StreamLog<'inp, Bud<'inp, L>> = Rc::new(RefCell::new(Vec::new()));
   let context = crate::input::InputContext::new(
-    PartialRecorder {
+    ItemRecorder {
       log: Rc::clone(&log),
     },
     DefaultCache::<'inp, Bud<'inp, L>>::default(),
@@ -1472,7 +1636,7 @@ where
   let mut input = Input::<
     'inp,
     Bud<'inp, L>,
-    PartialConfCtx<'inp, Bud<'inp, L>>,
+    RecordingCtx<'inp, Bud<'inp, L>>,
     (),
     Partial,
   >::with_state_and_context(src, state, context);
@@ -1490,7 +1654,7 @@ where
     match ir.next() {
       Ok(Some(spanned)) => {
         let (span, tok) = spanned.into_components();
-        log.borrow_mut().push(PartialItem::Token(tok, span));
+        log.borrow_mut().push(StreamItem::Token(tok, span));
       }
       Ok(None) => break false,
       Err(_) => break true,
@@ -1507,14 +1671,14 @@ fn complete_stream<'inp, L>(
   tally: &Rc<LexTally>,
   budget: usize,
   idx: usize,
-) -> Vec<PartialItem<'inp, Bud<'inp, L>>>
+) -> Vec<StreamItem<'inp, Bud<'inp, L>>>
 where
   L: Lexer<'inp>,
   L::State: Clone,
 {
-  let log: PartialLog<'inp, Bud<'inp, L>> = Rc::new(RefCell::new(Vec::new()));
+  let log: StreamLog<'inp, Bud<'inp, L>> = Rc::new(RefCell::new(Vec::new()));
   let context = crate::input::InputContext::new(
-    PartialRecorder {
+    ItemRecorder {
       log: Rc::clone(&log),
     },
     DefaultCache::<'inp, Bud<'inp, L>>::default(),
@@ -1523,7 +1687,7 @@ where
   let mut input = Input::<
     'inp,
     Bud<'inp, L>,
-    PartialConfCtx<'inp, Bud<'inp, L>>,
+    RecordingCtx<'inp, Bud<'inp, L>>,
     (),
     Complete,
   >::with_state_and_context(src, state, context);
@@ -1540,7 +1704,7 @@ where
     {
       Some(spanned) => {
         let (span, tok) = spanned.into_components();
-        log.borrow_mut().push(PartialItem::Token(tok, span));
+        log.borrow_mut().push(StreamItem::Token(tok, span));
       }
       None => break,
     }
@@ -1627,30 +1791,44 @@ where
 fn assert_partial_stream_eq<'inp, L>(
   idx: usize,
   k: usize,
-  expected: &[PartialItem<'inp, L>],
-  got: &[PartialItem<'inp, L>],
+  expected: &[StreamItem<'inp, L>],
+  got: &[StreamItem<'inp, L>],
 ) where
   L: Lexer<'inp>,
   <L::Token as Token<'inp>>::Kind: PartialEq + core::fmt::Debug,
   L::Token: PartialEq,
   <L::Token as Token<'inp>>::Error: PartialEq,
 {
-  let n = expected.len().min(got.len());
-  for i in 0..n {
-    if !expected[i].sig_eq(&got[i]) {
+  match diverge(expected, got, expected.len() != got.len(), |a, b| {
+    a.compare(b)
+  }) {
+    None => {}
+    Some(Divergence::At(i, decided)) => {
+      // The final leg compares the complete stream against a final drain of the SAME source, so
+      // this is the site #295 arrived through. See `refuse_non_reflexive`: reached only after the
+      // comparison has already failed, so it re-labels a failure and never creates one — and it
+      // is asked about the component that failed, so a divergence the discriminant settled falls
+      // straight through to the verdict below.
+      let at = format!("split k={k}, position {i}");
+      refuse_decided(
+        idx,
+        "partial-equivalence",
+        &at,
+        &decided,
+        &expected[i].describe(),
+        &got[i].describe(),
+      );
       panic!(
         "tokora conformance [input #{idx} partial-equivalence] split k={k}, position {i}: prefix item diverges from the complete prefix: expected {}, got {}",
         expected[i].describe(),
         got[i].describe()
       );
     }
-  }
-  if expected.len() != got.len() {
-    panic!(
+    Some(Divergence::Count) => panic!(
       "tokora conformance [input #{idx} partial-equivalence] split k={k}: prefix item count diverges from the complete prefix: expected {}, got {}",
       expected.len(),
       got.len()
-    );
+    ),
   }
 }
 
@@ -1661,31 +1839,533 @@ fn assert_partial_stream_eq<'inp, L>(
 fn assert_partial_prefix_of<'inp, L>(
   idx: usize,
   k: usize,
-  expected: &[PartialItem<'inp, L>],
-  got: &[PartialItem<'inp, L>],
+  expected: &[StreamItem<'inp, L>],
+  got: &[StreamItem<'inp, L>],
 ) where
   L: Lexer<'inp>,
   <L::Token as Token<'inp>>::Kind: PartialEq + core::fmt::Debug,
   L::Token: PartialEq,
   <L::Token as Token<'inp>>::Error: PartialEq,
 {
-  let n = expected.len().min(got.len());
-  for i in 0..n {
-    if !expected[i].sig_eq(&got[i]) {
+  // `got` longer than `expected` is this leg's cardinality difference and nothing else:
+  // withholding MORE is sound here, so a short `got` is not a divergence to rank at all.
+  match diverge(expected, got, got.len() > expected.len(), |a, b| {
+    a.compare(b)
+  }) {
+    None => {}
+    Some(Divergence::At(i, decided)) => {
+      // The sibling guard to `assert_partial_stream_eq`'s. A guard at one comparison and not the
+      // other is the same defect relocated: this leg compares two different drains, so a payload
+      // that will not equal itself fails here too, and reads as a truncation defect.
+      //
+      // And this is the leg where the whole-item scan cost the most: an error on the truncated
+      // buffer against a token on the full one is what the panic below is *about*, and a scan
+      // that found a `NaN` on either side buried it under a refusal.
+      let at = format!("split k={k}, position {i}");
+      refuse_decided(
+        idx,
+        "partial-equivalence",
+        &at,
+        &decided,
+        &expected[i].describe(),
+        &got[i].describe(),
+      );
       panic!(
         "tokora conformance [input #{idx} partial-equivalence] split k={k}, position {i}: prefix item diverges from the complete prefix: expected {}, got {}. An item that is an ERROR on the truncated buffer and a TOKEN on the full one — or an error whose payload moved — was decided from bytes that had not arrived.",
         expected[i].describe(),
         got[i].describe()
       );
     }
-  }
-  if got.len() > expected.len() {
-    panic!(
+    Some(Divergence::Count) => panic!(
       "tokora conformance [input #{idx} partial-equivalence] split k={k}: a non-final prefix drain yielded {} items but the complete parse has only {} ending strictly before the cut. The extra one was decided from bytes that had not arrived; report a read frontier that reaches the buffer end (Lexer::read_frontier) so it is withheld.",
       got.len(),
       expected.len()
-    );
+    ),
   }
+}
+
+/// The second half of every `non-reflexive-payload` refusal, shared by the trait/partial tiers
+/// here and by the cache kit in [`cache`] so that the two cannot drift apart on what the
+/// diagnosis means or on what it asks the caller to do about it.
+const NON_REFLEXIVE_BODY: &str = "`PartialEq` is partial: it promises symmetry and transitivity, \
+   never reflexivity, and a payload holding an `f64` that can be `NaN` is the case that reaches \
+   this kit. `Eq` and `Ord` DO promise it, and nothing checks that promise — so a component \
+   bounded to a TOTAL equality reaches this line too, and a refusal naming one reports a broken \
+   total-equality promise rather than the partial one a payload carries. Either way, such a type \
+   must hand-write the impl that says what equality means for it — `Harness::run_partial`'s \
+   documentation has carried that obligation since the value comparison landed. Until it does, \
+   this kit cannot tell a value that will not compare from an implementation that diverges, and \
+   the failure it would otherwise report renders expected and got identically.";
+
+/// Whether `value` compares equal to **itself**.
+///
+/// Written as a call rather than as `value == value` because the two read as opposites: the
+/// operator form is a tautology — `clippy::eq_op` refuses it, and rightly, in the code this kit is
+/// made of — while here the answer really can be `false`. [`PartialEq`] is *partial*, and it
+/// promises symmetry and transitivity and **not** reflexivity; a payload holding an `f64` that can
+/// be `NaN` is the case that reaches this kit.
+fn self_equal<T>(value: &T) -> bool
+where
+  T: PartialEq + ?Sized,
+{
+  let mirror = value;
+  value == mirror
+}
+
+/// What a verdict-drawing comparison found: the two sides agreed, or they differed and the
+/// answer says **which operation decided it**.
+///
+/// A `bool` said only *whether*. The refusal below then had to guess *why*, and the only tool it
+/// had was a scan of everything the item holds — a second question, asked of values the
+/// comparison may never have looked at. Nothing linked the two, and the gap is not academic: a
+/// committed token on one side and a lexer error on the other differ at the **discriminant**,
+/// with no caller comparison run at all, and a whole-item scan still found a `NaN` in the payload
+/// and refused. That refusal states a diagnosis the kit did not establish, over exactly the
+/// truncation nonconformance the partial tier exists to report.
+enum Comparison {
+  /// Every component the comparison consults agreed.
+  Equal,
+  /// The two sides differ, and [`Decided`] names the operation the verdict rests on.
+  Differs(Decided),
+}
+
+impl Comparison {
+  /// [`Ranking`] over a fixed list of comparisons, in the caller's declared order: the first
+  /// **conclusive** difference, or — when none of them is conclusive — the first inconclusive
+  /// one, or [`Equal`](Self::Equal).
+  ///
+  /// A thin adapter and deliberately so: the rule lives in [`Ranking`] and this only spells it
+  /// for the sites that need no tag on the step that answered. Each step is a closure because
+  /// **the search short-circuits**: the moment one of them is conclusive the rest are never run,
+  /// so a comparison that agrees, and one that fails the ordinary way, pay exactly what they paid
+  /// before.
+  fn ranked(steps: &[&dyn Fn() -> Self]) -> Self {
+    let mut ranking = Ranking::new();
+    for step in steps {
+      if let Some(((), decided)) = ranking.settle((), step().differs()) {
+        return Self::Differs(decided);
+      }
+    }
+    ranking
+      .refusal()
+      .map_or(Self::Equal, |((), decided)| Self::Differs(decided))
+  }
+
+  /// The difference, when there is one — [`Ranking`]'s input shape. `Equal` and "nothing to
+  /// rank" are the same fact, and this is where the two spellings meet.
+  const fn differs(self) -> Option<Decided> {
+    match self {
+      Self::Equal => None,
+      Self::Differs(decided) => Some(decided),
+    }
+  }
+}
+
+/// One component's equality, asked as a [`Comparison`] so that the answer carries the operation
+/// that produced it.
+///
+/// **Every equality this kit draws a verdict from is built here.** That is what makes the guarded
+/// population a matter of construction rather than of a count in a comment: a comparison that
+/// does not come through this cannot produce a [`Decided`], and so cannot reach either the
+/// verdict or the refusal. Reflexivity is probed only on the failure path — see [`decided_by`].
+fn compare_by<T>(name: &'static str, expected: &T, got: &T) -> Comparison
+where
+  T: PartialEq + ?Sized,
+{
+  if expected == got {
+    Comparison::Equal
+  } else {
+    Comparison::Differs(decided_by(name, expected, got))
+  }
+}
+
+/// The ranked search for the difference a verdict is drawn from: **a conclusive difference
+/// outranks an inconclusive one, wherever both are available.**
+///
+/// # The other half of the rule
+///
+/// [`refuse_non_reflexive`] is the half that says the kit never reports a diagnosis it did not
+/// establish. This is the half that says it never withholds one it did. Without it the first
+/// difference a comparison happens to reach decides everything, and an inconclusive one reached
+/// first buries every conclusive one behind it:
+///
+/// - `[Tok(NaN)]` against `[Tok(NaN), Tok(0.0)]` refused at position 0 over the payload and never
+///   reached the length check — while the **extra item** proves replay divergence with no caller
+///   equality consulted at all.
+/// - A cache that returns the right span and the right token beside a corrupted, perfectly
+///   reflexive `L::State` refused over the token, because `NaN != NaN` came first in
+///   `triple_compare`'s order — while the unexamined state difference convicts the cache on its
+///   own.
+///
+/// So the first inconclusive difference is *retained as a fallback* and the search goes on. It is
+/// reported only if nothing conclusive is found anywhere: in the remaining components of the same
+/// item, at a later position of the same stream, or in the item **count**.
+///
+/// # What counts as conclusive
+///
+/// [`Decided::is_conclusive`] is the test, and it is a question about the two values the
+/// comparison actually ran on rather than about the bound the component carries:
+///
+/// - a difference at the **discriminant** — no caller equality ran at all;
+/// - a difference in item **count** — likewise, which is why it carries no [`Decided`] and is
+///   conclusive by construction (see [`Divergence::Count`]);
+/// - a component whose comparison **is** sound on both sides: each value equals itself. That
+///   covers every component bounded to a total equality whose promise holds, and it covers the
+///   ordinary `PartialEq` case — two self-equal payloads that disagree with each other. The
+///   ordinary case is the whole population of honest failures and is **not** demoted by any of
+///   this.
+///
+/// Inconclusive is the complement and nothing else: a comparison one of whose two values will not
+/// equal itself.
+///
+/// # Ordering still chooses among conclusive answers
+///
+/// Each site declares the order its components are consulted in, and that order still picks which
+/// *conclusive* difference speaks — `triple_compare`'s "span first, always" is unchanged for
+/// every entry whose span comparison is sound. Ranking only ever moves an answer past a step the
+/// kit could not have drawn a verdict from.
+struct Ranking<T, D = Decided> {
+  /// The first inconclusive difference seen, and what the caller calls the step that produced
+  /// it. Never overwritten: "first" is in the site's own declared order.
+  inconclusive: Option<(T, D)>,
+}
+
+impl<T, D> Ranking<T, D>
+where
+  D: Conclusive,
+{
+  /// A search with nothing found yet.
+  const fn new() -> Self {
+    Self { inconclusive: None }
+  }
+
+  /// Feeds the next step's answer, tagged with whatever the caller needs back to render its own
+  /// message — which component of an entry, which position in a stream, which half of a buffer,
+  /// or `()` where the answer already says everything.
+  ///
+  /// `Some` ends the search: this step is conclusive and outranks anything held. `None` means
+  /// keep going, either because the step found nothing or because it is now the fallback.
+  fn settle(&mut self, tag: T, answer: Option<D>) -> Option<(T, D)> {
+    let found = answer?;
+    if found.is_conclusive() {
+      return Some((tag, found));
+    }
+    if self.inconclusive.is_none() {
+      self.inconclusive = Some((tag, found));
+    }
+    None
+  }
+
+  /// The answer once every step has run without one of them being conclusive: the retained
+  /// fallback, which is what the refusal is drawn from, or `None` when nothing differed.
+  fn refusal(self) -> Option<(T, D)> {
+    self.inconclusive
+  }
+}
+
+/// What [`Ranking`] needs of a step's answer, and the only thing it needs: whether the kit may
+/// convict on it.
+///
+/// A trait rather than a method on [`Decided`] because the rule composes. A whole stream's
+/// [`Divergence`] is a step of a bigger search — the two arms of one integration observation, the
+/// two halves of one prefilled peek — and those compositions were the two extra instances round
+/// 5's header audit turned up. One rule, one place, three levels.
+trait Conclusive {
+  /// Whether this difference rests on no equality the kit cannot trust.
+  fn is_conclusive(&self) -> bool;
+}
+
+impl Conclusive for Decided {
+  fn is_conclusive(&self) -> bool {
+    Self::is_conclusive(self)
+  }
+}
+
+impl Conclusive for Divergence {
+  fn is_conclusive(&self) -> bool {
+    match self {
+      // A count is the kit's own `len()`; see [`Divergence::Count`].
+      Self::Count => true,
+      Self::At(_, decided) => decided.is_conclusive(),
+    }
+  }
+}
+
+/// The difference between two item streams a verdict is drawn from — [`Ranking`]'s answer with
+/// the one step a [`Comparison`] cannot express folded in.
+enum Divergence {
+  /// A position differs, and [`Decided`] names the operation that decided it.
+  At(usize, Decided),
+  /// Every shared position agreed, or every difference among them was inconclusive: the two
+  /// streams differ in item **count**.
+  ///
+  /// **Conclusive by construction.** A count is the kit's own `len()`, so no caller equality
+  /// stands behind it and there is nothing here that could fail to equal itself — which is
+  /// exactly why it outranks a retained fallback instead of queueing behind one.
+  Count,
+}
+
+/// [`Ranking`] over two item streams: the first **conclusive** difference among the shared
+/// positions, else a cardinality difference if there is one, else the first inconclusive
+/// position, else `None`.
+///
+/// The four stream comparisons in this module and [`cache`]'s purity comparison all read their
+/// answer from here, so the ordering between a position and a count cannot come to hold at one of
+/// them and not at another — the shape rounds 2 through 4 each hit by repairing a site.
+///
+/// `counts_differ` is the caller's, because the two legs do not agree on what a count difference
+/// *is*: inequality for a stream compared against a stream, and `got` longer than `expected` for
+/// the prefix leg, where withholding more is sound (see [`assert_partial_prefix_of`]).
+fn diverge<T, F>(expected: &[T], got: &[T], counts_differ: bool, compare: F) -> Option<Divergence>
+where
+  F: Fn(&T, &T) -> Comparison,
+{
+  let mut ranking = Ranking::new();
+  for i in 0..expected.len().min(got.len()) {
+    if let Some((i, decided)) = ranking.settle(i, compare(&expected[i], &got[i]).differs()) {
+      return Some(Divergence::At(i, decided));
+    }
+  }
+  if counts_differ {
+    return Some(Divergence::Count);
+  }
+  ranking
+    .refusal()
+    .map(|(i, decided)| Divergence::At(i, decided))
+}
+
+/// The operation a failed comparison was decided by, carrying the reflexivity question asked of
+/// **that** operation — and of nothing else — on each side.
+///
+/// The probe is computed by [`decided_by`] from the same two values the failed comparison was
+/// drawn from, on the same statement. That adjacency is the repair: a refusal can no longer speak
+/// about a component the comparison never consulted, because the only way to build one is from
+/// the comparison that ran.
+enum Decided {
+  /// The kit's own `match` on the two discriminants: a committed token on one side and a lexer
+  /// error on the other.
+  ///
+  /// **No caller comparison ran.** There is no equality behind this to be non-reflexive, so
+  /// there is nothing to refuse and the divergence is reported directly — which is right, since
+  /// an item that is an error on a truncated buffer and a token on the full one is precisely the
+  /// truncation nonconformance the partial tier is for.
+  Discriminant,
+  /// One named component's comparison decided it, and it is sound on whichever side is marked
+  /// reflexive.
+  Component {
+    /// The component, named as the refusal names it.
+    name: &'static str,
+    /// Whether the expected side's `name` compares equal to itself.
+    expected_reflexive: bool,
+    /// Whether the got side's `name` compares equal to itself.
+    got_reflexive: bool,
+  },
+}
+
+impl Decided {
+  /// ``"the token's `Kind`"`` — bounded [`Eq`], so a refusal naming it is a broken **total**
+  /// equality promise rather than the partial one a payload carries.
+  const KIND: &'static str = "the token's `Kind`";
+  /// `"the span"` — [`Lexer::Span`] is bounded `Ord`, so this too is a total promise.
+  const SPAN: &'static str = "the span";
+  /// `"the slice"` — [`Slice`] is bounded `Eq`, so this too is a total promise.
+  const SLICE: &'static str = "the slice";
+  /// `"the token payload"` — the caller's [`PartialEq`] on [`Lexer::Token`], where reflexivity is
+  /// promised by nothing. This is #295's home.
+  const TOKEN_PAYLOAD: &'static str = "the token payload";
+  /// `"the lexer error payload"` — the caller's [`PartialEq`] on [`Token::Error`], the other half
+  /// of that population.
+  const ERROR_PAYLOAD: &'static str = "the lexer error payload";
+  /// ``"the `L::State`"`` — the caller's [`PartialEq`] on [`Lexer::State`], which only the cache
+  /// tier compares.
+  const STATE: &'static str = "the `L::State`";
+  /// `"the span offset"` — [`Lexer::Offset`] is bounded `Ord`, another total promise. The
+  /// endpoint comparisons the tiling and combined-span laws are drawn from name this rather than
+  /// [`SPAN`](Self::SPAN), because a start or an end is what those laws compare and a reader
+  /// looking for the value in the message needs the same noun.
+  const OFFSET: &'static str = "the span offset";
+  /// `"the read frontier"` — [`ReadFrontier`] derives its equality from [`Lexer::Offset`]'s, so
+  /// this is the total promise again, one type further out.
+  const FRONTIER: &'static str = "the read frontier";
+  /// `"the span vector"` — a whole run of spans compared as **one** value, which is what the
+  /// cache kit's order laws do. A slice's equality is elementwise, so one lying [`Lexer::Span`]
+  /// anywhere in the run makes the run unequal to itself and the refusal names the run.
+  const SPANS: &'static str = "the span vector";
+
+  /// Whether the difference this describes is **conclusive**: the kit can convict on it, because
+  /// no equality it cannot trust decided it.
+  ///
+  /// This is [`Ranking`]'s test, written here so it is one statement rather than an inference
+  /// from two `Option`s at each site. `true` exactly when the refusal has nothing to say — at the
+  /// discriminant, where no caller comparison ran, and at a component both of whose values equal
+  /// themselves, which is the ordinary case and the one that must never be demoted.
+  const fn is_conclusive(&self) -> bool {
+    self.expected().is_none() && self.got().is_none()
+  }
+
+  /// The component to refuse over on the **expected** side, and `None` when the operation that
+  /// failed is sound there — or when no caller comparison ran at all.
+  const fn expected(&self) -> Option<&'static str> {
+    match self {
+      Self::Discriminant => None,
+      Self::Component {
+        name,
+        expected_reflexive,
+        ..
+      } => {
+        if *expected_reflexive {
+          None
+        } else {
+          Some(*name)
+        }
+      }
+    }
+  }
+
+  /// [`expected`](Self::expected) on the **got** side.
+  const fn got(&self) -> Option<&'static str> {
+    match self {
+      Self::Discriminant => None,
+      Self::Component {
+        name,
+        got_reflexive,
+        ..
+      } => {
+        if *got_reflexive {
+          None
+        } else {
+          Some(*name)
+        }
+      }
+    }
+  }
+}
+
+/// One component's comparison that **failed**, together with the reflexivity question asked of
+/// that same comparison on both sides.
+///
+/// Every [`Decided::Component`] in the kit is built here, from the two values the caller has just
+/// compared, so the probe and the failure cannot be about different operations. Reached only on
+/// the failure path, so a passing comparison pays for none of it.
+fn decided_by<T>(name: &'static str, expected: &T, got: &T) -> Decided
+where
+  T: PartialEq + ?Sized,
+{
+  Decided::Component {
+    name,
+    expected_reflexive: self_equal(expected),
+    got_reflexive: self_equal(got),
+  }
+}
+
+/// Both sides' [`refuse_non_reflexive`] for one failed item comparison, asked of the operation
+/// that decided it. Shared by every site that compares two items — no count is given, because a
+/// count in a comment is a thing that drifts and this branch has already had to correct one: the
+/// population is whichever sites call this, and calling it is the only way to reach the refusal.
+fn refuse_decided(idx: usize, op: &str, at: &str, decided: &Decided, expected: &str, got: &str) {
+  refuse_component(idx, op, at, "item", decided, expected, got);
+}
+
+/// [`refuse_decided`] where the two sides are not items: one `slice()` against the source, one
+/// `read_frontier()` reading against the next, one span endpoint against another.
+///
+/// `noun` is what the side being refused *is*, and it is a parameter rather than the constant it
+/// used to be because these comparisons draw verdicts from values no item holds. A refusal that
+/// called a source slice an "item" would be describing something the comparison never had.
+fn refuse_component(
+  idx: usize,
+  op: &str,
+  at: &str,
+  noun: &str,
+  decided: &Decided,
+  expected: &str,
+  got: &str,
+) {
+  refuse_non_reflexive(idx, op, at, "expected", noun, decided.expected(), expected);
+  refuse_non_reflexive(idx, op, at, "got", noun, decided.got(), got);
+}
+
+/// Refuses to draw a conformance verdict from a comparison that a value decided by failing to
+/// equal itself, and returns without a word when there is nothing to refuse.
+///
+/// # Why the kit refuses instead of reporting the failure it found
+///
+/// Every tier here decides pass/fail with equality on values it does not own — the token, the
+/// lexer's error payload, the cache kit's lexer state, and, no differently, the token's `Kind`,
+/// the span, the source slice, the span offsets and the read frontier. Reflexivity is the one law
+/// of an equivalence relation that `PartialEq` does not promise, and when a payload breaks it the
+/// comparison fails for a reason that is a **fact about the value type** and not about the lexer,
+/// the cache or the input layer under test.
+///
+/// The components bounded to a *total* equality reach this line too, and that is the round-5
+/// residue rather than an oversight. `Eq` and `Ord` do promise reflexivity — but they are markers,
+/// nothing verifies the promise, and a caller who breaks one has broken a **stronger** contract,
+/// not put themselves outside this kit's reach. Refusing there says the same true thing: the
+/// comparison that failed was the caller's and the kit convicted nobody. The tag stays
+/// `non-reflexive-payload` for every component, because the tag names the *diagnosis* #295
+/// established and every cell and downstream grep keys on it; the component the refusal names is
+/// what says whether a total or a partial promise was the one broken.
+///
+/// The failure that produced is not merely mislabelled, it is unreadable: a final partial drain
+/// compares a stream against itself, so `expected` and `got` are the same item, and the
+/// `partial-equivalence` panic hands the consumer a red accusing their lexer with two values that
+/// **render identically** (`NaN` and `NaN`). That was #295, and 38 corpus queries in one
+/// downstream reached it.
+///
+/// So before a tier reports divergence it asks whether the **operation that decided it** is equal
+/// to itself, and a side whose is not gets this refusal instead — a distinct tag, the component
+/// that will not compare, and the obligation it comes from. The kit says what it cannot check
+/// rather than naming a culprit it has not identified.
+///
+/// # It asks about the comparison that ran, and about nothing else
+///
+/// `component` comes from [`Decided`], which every [`Comparison`] in the kit produces from the
+/// two values whose comparison failed. It is never a scan of the item, and the difference is the
+/// whole of what a scan got wrong: a scan runs afterwards and knows nothing about *why*, so a
+/// divergence settled at the **discriminant** — a committed token on one side, a lexer error on
+/// the other, no caller equality consulted at all — still turned up a `NaN` somewhere in the
+/// payload and was refused. That is a diagnosis stated without having been established, and the
+/// thing it hid is the truncation nonconformance the partial tier is built to report. A
+/// difference at the discriminant, or at a component whose comparison is sound, is therefore
+/// terminal here: this returns without a word and the ordinary verdict follows.
+///
+/// # It can only ever re-label a failure, never create one
+///
+/// Every call site reaches this **after** its own comparison has already failed, so a run that
+/// passes cannot be turned red by it and a run this refuses was already going to be reported as a
+/// failure. That is what keeps the repair from trading a false red for a false green: a
+/// genuinely non-conforming lexer whose payloads *are* reflexive never reaches this line and
+/// still fails the ordinary way, with the ordinary tag.
+///
+/// Since round 5 it is reached later still: only once [`Ranking`] has run every remaining step of
+/// the same search — the rest of the item, the rest of the stream, the item count, the other arm
+/// — and found nothing the kit could convict on. A refusal is now the answer of last resort in
+/// the strict sense, and that is the second half of the same rule.
+///
+/// # This is not a relaxation of the contract
+///
+/// The obligation predates the report: [`Harness::run_partial`]'s documentation has said since
+/// 0.10.0 that a payload holding a `NaN`-capable `f64` must hand-write the impl that says what
+/// equality means for it. Nothing here excuses that. What changes is the *diagnosis* — the kit
+/// stops calling an unmet obligation a lexer defect.
+fn refuse_non_reflexive(
+  idx: usize,
+  op: &str,
+  at: &str,
+  side: &str,
+  noun: &str,
+  component: Option<&'static str>,
+  rendered: &str,
+) {
+  let Some(component) = component else {
+    return;
+  };
+  panic!(
+    "tokora conformance [input #{idx} non-reflexive-payload] {op} {at}: INCONCLUSIVE — \
+     {component} of the {side} {noun} {rendered} is not equal to ITSELF, so the comparison that \
+     just failed was decided by the value type and not by the lexer, which this kit has \
+     therefore not convicted of anything. {NON_REFLEXIVE_BODY}"
+  )
 }
 
 /// One observed lexer item, captured with everything the checks compare or resume from.
@@ -1693,13 +2373,12 @@ struct Item<'inp, L>
 where
   L: Lexer<'inp>,
 {
-  /// `true` if the item was an [`Err`], `false` for a token.
-  is_error: bool,
-  /// The token kind (for a token) or `None` (for an error).
-  kind: Option<<L::Token as Token<'inp>>::Kind>,
-  /// The error's `Debug` rendering (for an error) or empty (for a token). `Token::Error`
-  /// is only `Debug`, not `PartialEq`, so its `Debug` string is the comparison key.
-  err_dbg: String,
+  /// The item **itself**, by value: the token the lexer yielded or the error it raised.
+  ///
+  /// [`Lexer::lex`] hands this back owned, so keeping it costs *less* than the pair it replaced —
+  /// a `format!("{err:?}")` `String` allocated per error item, plus the kind projected out of the
+  /// token. See [`compare`](Self::compare) for why the value and never a rendering of it.
+  item: Result<L::Token, <L::Token as Token<'inp>>::Error>,
   /// The item's span.
   span: L::Span,
   /// The item's slice.
@@ -1714,21 +2393,88 @@ impl<'inp, L> Item<'inp, L>
 where
   L: Lexer<'inp>,
 {
-  /// Whether two items agree on discriminant, kind/error, span, and slice.
-  fn sig_eq(&self, other: &Self) -> bool {
-    self.is_error == other.is_error
-      && self.kind == other.kind
-      && self.err_dbg == other.err_dbg
-      && self.span == other.span
-      && self.slice == other.slice
+  /// Whether two items agree on discriminant, **value**, span and slice — and, when they do not,
+  /// **which of those decided it**.
+  ///
+  /// The components are consulted in [`StreamItem::compare`]'s order and for its reason, with
+  /// the slice — bounded [`Eq`], another total promise — between the span and the payload.
+  ///
+  /// # Semantically, never by rendering
+  ///
+  /// This compared `format!("{err:?}")` on the error arm, and the token's
+  /// [`kind`](Token::kind) alone on the token arm, until 0.10.0 — and both halves reported an
+  /// identity the kit had not checked (#269). The argument is [`StreamItem::compare`]'s,
+  /// verbatim, and it had already been made there for the partial tier:
+  ///
+  /// - `Debug` is not **injective**, so two distinct error payloads may render identically — a
+  ///   hand-written `Debug` printing one label for a family of variants is legal and not rare —
+  ///   and then a lexer whose error *value* changes between two fresh runs passes replay
+  ///   identity.
+  /// - `Debug` is not **stable**, so a rendering carrying an address, a counter or any other
+  ///   incidental differs between the two separately constructed lexers and reds a **conforming**
+  ///   one. Both directions have in-tree cells; a rendering is the wrong key in each of them, and
+  ///   no amount of care with the rendering fixes both, because they run in opposite directions.
+  /// - the token arm compared only the kind, so a payload that moved between two fresh runs kept
+  ///   its kind, its span and its slice — everything this looked at — while the value a parser
+  ///   callback receives changed.
+  ///
+  /// The module header states check 1 as identity of the *item*, and identity of a rendering or
+  /// of a projection is a weaker claim wearing that word. Value equality is the claim, which is
+  /// what [`run`](Harness::run) now asks `PartialEq` for.
+  fn compare(&self, other: &Self) -> Comparison
+  where
+    L::Token: PartialEq,
+    <L::Token as Token<'inp>>::Error: PartialEq,
+  {
+    match (&self.item, &other.item) {
+      // The kind is compared as well as the token, for [`StreamItem::compare`]'s reason: the two
+      // are independent caller code, and a `PartialEq` coarser than the classification the parser
+      // sees is exactly what this comparison stands between.
+      (Ok(a), Ok(b)) => Comparison::ranked(&[
+        &|| compare_by(Decided::KIND, &a.kind(), &b.kind()),
+        &|| self.compare_shared(other),
+        &|| compare_by(Decided::TOKEN_PAYLOAD, a, b),
+      ]),
+      (Err(a), Err(b)) => Comparison::ranked(&[&|| self.compare_shared(other), &|| {
+        compare_by(Decided::ERROR_PAYLOAD, a, b)
+      }]),
+      // A token on one side and a lexer error on the other — see [`Decided::Discriminant`].
+      _ => Comparison::Differs(Decided::Discriminant),
+    }
+  }
+
+  /// The span and the slice — the two components both arms of
+  /// [`compare`](Self::compare) share, consulted in its order and answering in its terms.
+  ///
+  /// Both are bounded to a *total* equality (the span is `Ord`, the slice is `Eq`), which is why
+  /// they are asked before either payload: a divergence one of them can settle is never
+  /// attributed to a `PartialEq` that promises no reflexivity. "Can settle" is
+  /// [`Ranking`]'s test and not the bound — a span whose own `Ord` will not equal itself settles
+  /// nothing, and the payload behind it is then what speaks.
+  fn compare_shared(&self, other: &Self) -> Comparison {
+    Comparison::ranked(&[
+      &|| compare_by(Decided::SPAN, &self.span, &other.span),
+      &|| compare_by(Decided::SLICE, &self.slice, &other.slice),
+    ])
   }
 
   /// A human-readable one-line rendering for panic context.
+  ///
+  /// `Debug` is the right tool *here* and the wrong one in [`compare`](Self::compare): this text is
+  /// read by a person diagnosing a failure, and nothing is decided from it.
   fn describe(&self) -> String {
-    format!(
-      "{{ error={}, kind={:?}, err={:?}, span={:?}, slice={:?} }}",
-      self.is_error, self.kind, self.err_dbg, self.span, self.slice
-    )
+    match &self.item {
+      Ok(tok) => format!(
+        "token {:?}@{:?} (payload {tok:?}, slice {:?})",
+        tok.kind(),
+        self.span,
+        self.slice
+      ),
+      Err(err) => format!(
+        "lexer error {err:?}@{:?} (slice {:?})",
+        self.span, self.slice
+      ),
+    }
   }
 }
 
@@ -1782,9 +2528,24 @@ where
       );
     }
     // 5. slice() equals the source content at span().
+    //
+    // Through `compare_by` for the reason every other verdict-drawing equality here is: the
+    // `Slice` bound is `Eq`, but `Eq` is a marker and nothing checks its promise, so a caller
+    // whose slice comparison answers `false` to everything — itself included — got a red naming
+    // their lexer for a fact about their own `PartialEq`. Same population, same refusal.
     match src.slice(start.clone()..end.clone()) {
       Some(from_source) => {
-        if from_source != slice {
+        if let Comparison::Differs(decided) = compare_by(Decided::SLICE, &from_source, &slice) {
+          let at = format!("position {pos}");
+          refuse_component(
+            idx,
+            "span/slice-coherence",
+            &at,
+            "reading",
+            &decided,
+            &format!("{from_source:?}"),
+            &format!("{slice:?}"),
+          );
           panic!(
             "tokora conformance [input #{idx} span/slice-coherence] position {pos}: slice() disagrees with the source at span {span:?}: source {from_source:?}, slice() {slice:?}"
           );
@@ -1801,27 +2562,41 @@ where
     let frontier = lexer.read_frontier();
     for probe in 0..3 {
       let again = lexer.read_frontier();
-      if again != frontier {
+      if let Comparison::Differs(decided) = compare_by(Decided::FRONTIER, &frontier, &again) {
+        let at = format!("position {pos}");
+        refuse_component(
+          idx,
+          "read-frontier",
+          &at,
+          "reading",
+          &decided,
+          &format!("{frontier:?}"),
+          &format!("{again:?}"),
+        );
         panic!(
           "tokora conformance [input #{idx} read-frontier] position {pos}: read_frontier() changed between calls: first read {frontier:?}, probe #{probe} read {again:?}. It must be a pure read of recorded fact — the input layer's contract lets it be called at most once per item, but nothing may depend on that."
         );
       }
     }
-    if lexer.span() != span {
+    let after = lexer.span();
+    if let Comparison::Differs(decided) = compare_by(Decided::SPAN, &span, &after) {
+      let at = format!("position {pos}");
+      refuse_component(
+        idx,
+        "read-frontier",
+        &at,
+        "reading",
+        &decided,
+        &format!("{span:?}"),
+        &format!("{after:?}"),
+      );
       panic!(
-        "tokora conformance [input #{idx} read-frontier] position {pos}: read_frontier() moved the lexer: span() was {span:?} before the call and {:?} after. It must not advance the lexer or probe new input.",
-        lexer.span()
+        "tokora conformance [input #{idx} read-frontier] position {pos}: read_frontier() moved the lexer: span() was {span:?} before the call and {after:?} after. It must not advance the lexer or probe new input."
       );
     }
 
-    let (is_error, kind, err_dbg) = match res {
-      Ok(tok) => (false, Some(tok.kind()), String::new()),
-      Err(err) => (true, None, format!("{err:?}")),
-    };
     out.push(Item {
-      is_error,
-      kind,
-      err_dbg,
+      item: res,
       span,
       slice,
       end,
@@ -1836,23 +2611,42 @@ where
 fn assert_run_eq<'inp, L>(idx: usize, op: &str, expected: &[Item<'inp, L>], got: &[Item<'inp, L>])
 where
   L: Lexer<'inp>,
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
 {
-  let n = expected.len().min(got.len());
-  for i in 0..n {
-    if !expected[i].sig_eq(&got[i]) {
+  // The item comparisons and the length check are ONE ranked search, and the order they used to
+  // run in was the defect: a `[Tok(NaN)]` against a `[Tok(NaN), Tok(0.0)]` refused at position 0
+  // and never reached the length check, while the extra item proves replay divergence with no
+  // caller equality consulted at all. See `diverge` and `Ranking`.
+  match diverge(expected, got, expected.len() != got.len(), |a, b| {
+    a.compare(b)
+  }) {
+    None => {}
+    Some(Divergence::At(i, decided)) => {
+      // Before naming a culprit, ask whether the comparison that decided this is even comparable
+      // to itself. See `refuse_non_reflexive`: reached only once the comparison has failed, and
+      // only once the search has established that nothing conclusive outranks it, so it can
+      // re-label this failure and can never manufacture one.
+      let at = format!("position {i}");
+      refuse_decided(
+        idx,
+        op,
+        &at,
+        &decided,
+        &expected[i].describe(),
+        &got[i].describe(),
+      );
       panic!(
         "tokora conformance [input #{idx} {op}] position {i}: item mismatch: expected {}, got {}",
         expected[i].describe(),
         got[i].describe()
       );
     }
-  }
-  if expected.len() != got.len() {
-    panic!(
+    Some(Divergence::Count) => panic!(
       "tokora conformance [input #{idx} {op}] length mismatch: expected {} items, got {}",
       expected.len(),
       got.len()
-    );
+    ),
   }
 }
 
@@ -1927,7 +2721,16 @@ where
   }
   for probe in 0..3 {
     let again = lexer.span();
-    if again != span {
+    if let Comparison::Differs(decided) = compare_by(Decided::SPAN, &span, &again) {
+      refuse_component(
+        idx,
+        "span-survives-exhaustion",
+        "after exhaustion",
+        "reading",
+        &decided,
+        &format!("{span:?}"),
+        &format!("{again:?}"),
+      );
       panic!(
         "tokora conformance [input #{idx} span-survives-exhaustion] span() changed after exhaustion: first read {span:?}, probe #{probe} read {again:?}. Repeated reads must agree — the input layer reads it more than once."
       );
@@ -1944,6 +2747,8 @@ fn check_resume<'inp, L>(
   budget: usize,
 ) where
   L: Lexer<'inp>,
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
 {
   for k in 0..=reference.len() {
     // The resume point before item k: for k == 0 the initial state at offset 0, else
@@ -1957,9 +2762,16 @@ fn check_resume<'inp, L>(
     let mut resumed = L::with_state(src, state);
     resumed.bump(&offset);
 
-    let mut produced = 0usize;
+    // Collected and then ranked, rather than compared item-by-item as it is produced. The
+    // streaming shape settled the verdict at the first position that differed, which is the same
+    // ordering defect `assert_run_eq` carried: an inconclusive difference at position 0 buried a
+    // decisive item-count difference the suffix comparison had already established. The cost is
+    // paid only on a failure path — a run that would have stopped early now lexes on to
+    // exhaustion, under the SAME budget the passing path is already bounded by, and holds the
+    // suffix it produced for the length of one `k`.
+    let mut observed: Vec<Item<'inp, L>> = Vec::new();
     loop {
-      if produced > budget {
+      if observed.len() > budget {
         panic!(
           "tokora conformance [input #{idx} state-resume] resume-from k={k}: produced more than the budget of {budget} items without exhausting"
         );
@@ -1967,44 +2779,51 @@ fn check_resume<'inp, L>(
       let Some(res) = resumed.lex() else { break };
       let span = resumed.span();
       let slice = resumed.slice();
-      let (is_error, kind, err_dbg) = match res {
-        Ok(tok) => (false, Some(tok.kind()), String::new()),
-        Err(err) => (true, None, format!("{err:?}")),
-      };
       let end = span.end_ref().clone();
-      let observed = Item::<L> {
-        is_error,
-        kind,
-        err_dbg,
+      observed.push(Item::<L> {
+        item: res,
         span,
         slice,
         end,
         state: resumed.state().clone(),
-      };
-
-      match reference.get(k + produced) {
-        Some(expected) => {
-          if !expected.sig_eq(&observed) {
-            panic!(
-              "tokora conformance [input #{idx} state-resume] resume-from k={k}, position {produced}: resumed item diverges from the original suffix: expected {}, got {}",
-              expected.describe(),
-              observed.describe()
-            );
-          }
-        }
-        None => panic!(
-          "tokora conformance [input #{idx} state-resume] resume-from k={k}, position {produced}: resume produced MORE items than the original suffix ({} remaining)",
-          reference.len() - k
-        ),
-      }
-      produced += 1;
+      });
     }
 
-    if k + produced != reference.len() {
-      panic!(
+    let suffix = &reference[k..];
+    let produced = observed.len();
+    match diverge(suffix, &observed, produced != suffix.len(), |a, b| {
+      a.compare(b)
+    }) {
+      None => {}
+      Some(Divergence::At(i, decided)) => {
+        // The same guard `assert_run_eq` carries, for the same reason and under the same "only
+        // after a failed comparison, and only about the comparison that failed" rule. See
+        // `refuse_non_reflexive`.
+        let at = format!("resume-from k={k}, position {i}");
+        refuse_decided(
+          idx,
+          "state-resume",
+          &at,
+          &decided,
+          &suffix[i].describe(),
+          &observed[i].describe(),
+        );
+        panic!(
+          "tokora conformance [input #{idx} state-resume] resume-from k={k}, position {i}: resumed item diverges from the original suffix: expected {}, got {}",
+          suffix[i].describe(),
+          observed[i].describe()
+        );
+      }
+      // One cardinality difference, reported from the side it fell on so both wordings survive.
+      Some(Divergence::Count) if produced > suffix.len() => panic!(
+        "tokora conformance [input #{idx} state-resume] resume-from k={k}, position {}: resume produced MORE items than the original suffix ({} remaining)",
+        suffix.len(),
+        suffix.len()
+      ),
+      Some(Divergence::Count) => panic!(
         "tokora conformance [input #{idx} state-resume] resume-from k={k}: resume produced FEWER items than the original suffix: expected {}, got {produced}",
-        reference.len() - k
-      );
+        suffix.len()
+      ),
     }
   }
 }
@@ -2018,10 +2837,23 @@ where
   let src_len = src.len();
   let zero = L::Offset::default();
 
+  // Every comparison below is an `L::Offset` equality, and `Lexer::Offset` is bounded `Ord` — a
+  // TOTAL promise, and one nothing checks. So they are drawn through `compare_by` exactly as the
+  // item comparisons are: an offset that will not equal itself is a fact about the caller's `Ord`
+  // impl, and reporting it as a tiling defect names the wrong culprit.
   let Some(first) = reference.first() else {
     // An empty stream is gap-free tiling of an empty source; a non-empty source with
     // no tokens leaves the whole thing untiled.
-    if src_len != zero {
+    if let Comparison::Differs(decided) = compare_by(Decided::OFFSET, &zero, &src_len) {
+      refuse_component(
+        idx,
+        "lossless",
+        "source length",
+        "endpoint",
+        &decided,
+        &format!("{zero:?}"),
+        &format!("{src_len:?}"),
+      );
       panic!(
         "tokora conformance [input #{idx} lossless] the lexer produced no items but the source is non-empty (length {src_len:?}); lossless tiling requires covering the whole source"
       );
@@ -2029,7 +2861,17 @@ where
     return;
   };
 
-  if *first.span.start_ref() != zero {
+  let first_start = first.span.start_ref();
+  if let Comparison::Differs(decided) = compare_by(Decided::OFFSET, &zero, first_start) {
+    refuse_component(
+      idx,
+      "lossless",
+      "position 0",
+      "endpoint",
+      &decided,
+      &format!("{zero:?}"),
+      &format!("{first_start:?}"),
+    );
     panic!(
       "tokora conformance [input #{idx} lossless] position 0: first span {:?} does not start at 0",
       first.span
@@ -2039,7 +2881,17 @@ where
   let mut prev_end = first.span.end_ref().clone();
   for (i, item) in reference.iter().enumerate().skip(1) {
     let start = item.span.start_ref().clone();
-    if start != prev_end {
+    if let Comparison::Differs(decided) = compare_by(Decided::OFFSET, &prev_end, &start) {
+      let at = format!("position {i}");
+      refuse_component(
+        idx,
+        "lossless",
+        &at,
+        "endpoint",
+        &decided,
+        &format!("{prev_end:?}"),
+        &format!("{start:?}"),
+      );
       panic!(
         "tokora conformance [input #{idx} lossless] position {i}: gap or overlap — previous span ended at {prev_end:?} but this span {:?} starts at {start:?}",
         item.span
@@ -2048,47 +2900,120 @@ where
     prev_end = item.span.end_ref().clone();
   }
 
-  if prev_end != src_len {
+  if let Comparison::Differs(decided) = compare_by(Decided::OFFSET, &src_len, &prev_end) {
+    refuse_component(
+      idx,
+      "lossless",
+      "source end",
+      "endpoint",
+      &decided,
+      &format!("{src_len:?}"),
+      &format!("{prev_end:?}"),
+    );
     panic!(
       "tokora conformance [input #{idx} lossless] the last span ends at {prev_end:?} but the source ends at {src_len:?}; lossless tiling must reach the source end"
     );
   }
 }
 
-/// The parse context the integration tier drives the input machinery under: a
-/// [`Silent`] emitter (so a lexer error never aborts a run) over the default cache.
-type ConfCtx<'inp, L> = (
-  Silent<<<L as Lexer<'inp>>::Token as Token<'inp>>::Error>,
-  DefaultCache<'inp, L>,
-);
-
-/// Builds a fresh `Input` session over `src` and hands its [`InputRef`] to `f`.
-fn drive<'inp, L, R>(
-  src: &'inp L::Source,
-  tally: &Rc<LexTally>,
-  f: impl FnOnce(&mut InputRef<'inp, '_, Bud<'inp, L>, ConfCtx<'inp, Bud<'inp, L>>, ()>) -> R,
-) -> R
+/// One integration schedule's observation of the input layer: the **committed token** stream it
+/// drained and the **lexer errors** the layer raised underneath it, both as [`StreamItem`]s and
+/// both compared by value.
+///
+/// Two vectors rather than one interleaved log, and that is a fact about the input layer rather
+/// than a weaker claim. The layer emits a refusal the moment it *lexes* the region — a
+/// `peek` that fills the cache past the drain position reports the errors it finds there
+/// immediately, so a peek-and-stop caller never loses them (see the input layer's
+/// `emit_lexer_error_deduped`). The interleaving is therefore schedule-dependent **by design**:
+/// on `"a?b"` the straight drain records `token, error, token` and `peek-heavy` records
+/// `error, token, token`, and both are conforming. What is *not* schedule-dependent is either
+/// sequence taken on its own — the dedup watermark makes the recorded refusals strictly
+/// increasing in span end under every schedule, and a restore rewinds the watermark and the log
+/// together. Comparing the interleaving would red a conforming lexer, which is the failure
+/// direction this module refuses to trade for reach.
+struct Observed<'inp, L>
 where
   L: Lexer<'inp>,
 {
+  /// The committed tokens `next()` handed back, in drain order.
+  ///
+  /// Bounded by the drain loop's own `budget` guard, as it always was.
+  tokens: Vec<StreamItem<'inp, L>>,
+  /// The lexer errors the layer raised, in the order it raised them.
+  ///
+  /// Bounded by [`LexTally`] and by nothing else, which is the tier's own rule rather than an
+  /// omission: no drain loop counts this vector, and it grows at one site — the layer's refusal,
+  /// which the layer reaches only by *lexing* the region it refuses. Every push therefore charges
+  /// an attempt to the tally first, so the length is at most the tier's attempt ceiling, and the
+  /// tally is the boundary because it is the one counter a checkpoint restore cannot refund.
+  errors: Vec<StreamItem<'inp, L>>,
+}
+
+/// Builds a fresh `Input` session over `src`, hands its [`InputRef`] to `f`, and returns `f`'s
+/// value beside the lexer errors the layer raised while it ran.
+///
+/// The errors come back from the emitter rather than from `f` because `f` cannot see them: the
+/// layer commits or refuses on its own, and a refusal is reported to the emitter and leaves no
+/// trace in what `next()` hands back. That is the whole reason [`Silent`](crate::emitter::Silent)
+/// was the wrong choice here — a discarded arm is not an arm a schedule comparison can check.
+fn drive<'inp, L, R>(
+  src: &'inp L::Source,
+  tally: &Rc<LexTally>,
+  f: impl FnOnce(&mut InputRef<'inp, '_, Bud<'inp, L>, RecordingCtx<'inp, Bud<'inp, L>>, ()>) -> R,
+) -> (R, Vec<StreamItem<'inp, Bud<'inp, L>>>)
+where
+  L: Lexer<'inp>,
+{
+  let log: StreamLog<'inp, Bud<'inp, L>> = Rc::new(RefCell::new(Vec::new()));
   let context = crate::input::InputContext::new(
-    Silent::<<L::Token as Token<'inp>>::Error>::new(),
+    ItemRecorder {
+      log: Rc::clone(&log),
+    },
     DefaultCache::<'inp, Bud<'inp, L>>::default(),
   );
   let state = seeded::<L>(src, tally);
   let mut input =
-    Input::<'inp, Bud<'inp, L>, ConfCtx<'inp, Bud<'inp, L>>, ()>::with_state_and_context(
+    Input::<'inp, Bud<'inp, L>, RecordingCtx<'inp, Bud<'inp, L>>, ()>::with_state_and_context(
       src, state, context,
     );
-  let mut input_ref = input.as_ref();
-  f(&mut input_ref)
+  let out = {
+    let mut input_ref = input.as_ref();
+    f(&mut input_ref)
+  };
+  let errors = core::mem::take(&mut *log.borrow_mut());
+  (out, errors)
 }
 
-/// Drives `next()` to exhaustion, collecting the committed (kind, span) token stream.
+/// One integration schedule, run: [`drive`] with a drain that collects the committed tokens, both
+/// arms returned together.
+fn observe<'inp, L>(
+  src: &'inp L::Source,
+  tally: &Rc<LexTally>,
+  f: impl FnOnce(
+    &mut InputRef<'inp, '_, Bud<'inp, L>, RecordingCtx<'inp, Bud<'inp, L>>, ()>,
+  ) -> Vec<StreamItem<'inp, Bud<'inp, L>>>,
+) -> Observed<'inp, Bud<'inp, L>>
+where
+  L: Lexer<'inp>,
+{
+  let (tokens, errors) = drive::<L, _>(src, tally, f);
+  Observed { tokens, errors }
+}
+
+/// Drives `next()` to exhaustion, collecting the committed token stream — **the tokens
+/// themselves**, never a projection of them.
+///
+/// This collected `(kind, span)` until 0.11.0, on streams whose `L::Token` values `next()` had
+/// just handed over: the kind is a projection, so a payload could move between two schedules of
+/// the same input while the kind, the span and the item count all held still, and the tier that
+/// exists to compare the committed stream reported them equal. That is #269's defect at the one
+/// tier #269 did not reach — see [`StreamItem::compare`] for the argument, which is unchanged.
+/// Retention is free here: `next()` yields the token owned, [`Token`] is bounded `Clone`, and the
+/// pair being replaced was itself built by cloning the span.
 fn drain_all<'inp, L>(
-  input_ref: &mut InputRef<'inp, '_, L, ConfCtx<'inp, L>, ()>,
+  input_ref: &mut InputRef<'inp, '_, L, RecordingCtx<'inp, L>, ()>,
   budget: usize,
-) -> Vec<(<L::Token as Token<'inp>>::Kind, L::Span)>
+) -> Vec<StreamItem<'inp, L>>
 where
   L: Lexer<'inp>,
 {
@@ -2097,13 +3022,10 @@ where
     if out.len() > budget {
       panic!("tokora conformance integration: next() exceeded the budget of {budget} tokens");
     }
-    match input_ref
-      .next()
-      .expect("the conformance kit's Silent emitter never returns Err")
-    {
+    match input_ref.next().expect(NEVER_ERRS) {
       Some(spanned) => {
         let (span, tok) = spanned.into_components();
-        out.push((tok.kind(), span));
+        out.push(StreamItem::Token(tok, span));
       }
       None => break,
     }
@@ -2111,8 +3033,30 @@ where
   out
 }
 
+/// The `expect` every integration drain carries. [`ItemRecorder`] answers `Ok` on every door, and
+/// its [`PartialProbe`] error has no constructor a [`Complete`](crate::input::Complete) input can
+/// reach — see [`RecordingCtx`].
+const NEVER_ERRS: &str = "the conformance kit's recording emitter never returns Err";
+
 /// Integration tier: the committed stream from each named schedule must equal the
-/// straight-lex stream, and the straight stream must equal the raw-lex tokens.
+/// straight-lex stream, and the straight stream must equal the raw-lex items.
+///
+/// **Both arms, both compared by value.** A committed token contributes the token itself and a
+/// raised refusal contributes its payload, which is the module header's rule for every tier —
+/// and until 0.11.0 this tier kept neither. It reduced each token to `(kind, span)` and ran under
+/// [`Silent`], so the token arm was compared through a projection and the error arm was not
+/// compared at all. See [`drain_all`] for the first half and [`ItemRecorder`] for the second.
+///
+/// The two arms are compared as two sequences rather than as one interleaved stream. That is
+/// [`Observed`]'s statement and it is a property of the input layer: a `peek` reports the
+/// refusals it finds while filling the cache immediately, so where an error sits *between* two
+/// tokens is schedule-dependent on a conforming lexer, while each sequence on its own is not.
+///
+/// The arms also differ in **what they can be compared against**. The token stream is checked
+/// both against the raw lexer and across the schedules; the error stream is checked across the
+/// schedules only, because the layer deduplicates a refusal per region and the raw lexer does
+/// not, so the two sequences are legitimately different lengths. The cross-check that would have
+/// asserted otherwise was written, run, and removed by a positive cell.
 fn check_integration<'inp, L>(
   idx: usize,
   src: &'inp L::Source,
@@ -2120,6 +3064,11 @@ fn check_integration<'inp, L>(
   budget: usize,
 ) where
   L: Lexer<'inp>,
+  // The same two `run` already asks for, reached through `StreamItem::compare` — this tier adds
+  // no obligation of its own. Retaining the values costs no bound at all: [`Token`] is bounded
+  // `Clone` and [`Token::Error`] is bounded `Clone`, both by the trait.
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
 {
   use generic_arraydeque::typenum::U3;
 
@@ -2133,8 +3082,8 @@ fn check_integration<'inp, L>(
   // Sized for five schedules; the per-drain multiple carries the re-lexing their restores and peek
   // refills cost.
   //
-  // Wrapping is invisible to the comparison: `Bud<'inp, L>` carries L's `Token` and `Span`, so the
-  // streams collected here are the same type as `raw_tokens` below.
+  // Wrapping is invisible to the comparison: `Bud<'inp, L>` carries L's `Token`, `Span` and error
+  // type, so the streams collected here are the same type as `raw_tokens` below.
   let units = src.slice(..).map(|s| s.len()).unwrap_or(0);
   let tally = LexTally::new(
     idx,
@@ -2145,81 +3094,93 @@ fn check_integration<'inp, L>(
   );
 
   // The straight-lex reference: `next()` to exhaustion, no backtracking.
-  let straight = drive::<L, _>(src, &tally, |ir| drain_all::<Bud<'inp, L>>(ir, budget));
+  let straight = observe::<L>(src, &tally, |ir| drain_all::<Bud<'inp, L>>(ir, budget));
 
-  // Cross-check: the input layer's `next()` stream must equal the raw-lex tokens
-  // (errors are skipped by `next()`, so filter the reference to its Ok items).
-  let raw_tokens: Vec<(<L::Token as Token<'inp>>::Kind, L::Span)> = reference
+  // Cross-check: the input layer's committed TOKEN stream must equal the raw-lex tokens.
+  //
+  // The token arm only, and the error arm is left out on purpose rather than forgotten. Raw
+  // `lex()` errors and the refusals the layer raises are not the same sequence and are not
+  // supposed to be: the layer reports each refused *region* exactly once, keyed on the error
+  // span's end against a high-water mark (`emit_lexer_error_deduped`), so a lexer that errors
+  // eighty times over one span is conforming and the layer raises one. Asking for equality here
+  // would red it — the in-tree `RepeatErrLexer` is exactly that lexer, and it is a positive cell.
+  // What the dedup does NOT vary with is the schedule, which is where the error arm is compared
+  // below.
+  let raw_tokens: Vec<StreamItem<'inp, Bud<'inp, L>>> = reference
     .iter()
-    .filter_map(|it| it.kind.map(|k| (k, it.span.clone())))
+    .filter_map(|it| {
+      it.item
+        .as_ref()
+        .ok()
+        .map(|tok| StreamItem::Token(tok.clone(), it.span.clone()))
+    })
     .collect();
-  assert_stream_eq::<L>(idx, "raw-lex-vs-next", &raw_tokens, &straight);
+  assert_stream_eq::<Bud<'inp, L>>(
+    idx,
+    "raw-lex-vs-next",
+    COMMITTED,
+    &raw_tokens,
+    &straight.tokens,
+  );
 
   // peek-heavy: fill the cache before every consume; the drain path re-serves cached
   // tokens and re-lexes past the window.
-  let peek_heavy = drive::<L, _>(src, &tally, |ir| {
+  let peek_heavy = observe::<L>(src, &tally, |ir| {
     let mut out = Vec::new();
     loop {
       if out.len() > budget {
         panic!("tokora conformance [input #{idx} integration/peek-heavy] exceeded budget");
       }
-      let _ = ir
-        .peek::<U3>()
-        .expect("the conformance kit's Silent emitter never returns Err");
-      match ir
-        .next()
-        .expect("the conformance kit's Silent emitter never returns Err")
-      {
+      let _ = ir.peek::<U3>().expect(NEVER_ERRS);
+      match ir.next().expect(NEVER_ERRS) {
         Some(spanned) => {
           let (span, tok) = spanned.into_components();
-          out.push((tok.kind(), span));
+          out.push(StreamItem::Token(tok, span));
         }
         None => break,
       }
     }
     out
   });
-  assert_stream_eq::<L>(idx, "peek-heavy", &straight, &peek_heavy);
+  assert_observed_eq::<Bud<'inp, L>>(idx, "peek-heavy", &straight, &peek_heavy);
 
   // save-early-restore-late: save at 0, consume a prefix, abandon it, then drain the
   // whole stream — which must re-lex the rewound prefix identically.
-  let save_early = drive::<L, _>(src, &tally, |ir| {
+  //
+  // EVERY restoring schedule saves at position 0, and the two arms are aligned by that rather
+  // than by a shared rewind. The abandoned prefix's tokens are dropped by never being collected;
+  // its errors are dropped by `ItemRecorder::rewind`, which truncates to the log length the save
+  // captured — zero here, because nothing has been raised yet. A schedule that saved MID-stream
+  // would keep the errors before its save and start its token vector empty, and the two arms
+  // would no longer describe the same suffix; such a schedule owes the drain loop the same
+  // rewind, and this is the note that says so.
+  let save_early = observe::<L>(src, &tally, |ir| {
     let ckp = ir.save();
     for _ in 0..3 {
-      if ir
-        .next()
-        .expect("the conformance kit's Silent emitter never returns Err")
-        .is_none()
-      {
+      if ir.next().expect(NEVER_ERRS).is_none() {
         break;
       }
     }
     ir.restore(ckp);
     drain_all::<Bud<'inp, L>>(ir, budget)
   });
-  assert_stream_eq::<L>(idx, "save-early-restore-late", &straight, &save_early);
+  assert_observed_eq::<Bud<'inp, L>>(idx, "save-early-restore-late", &straight, &save_early);
 
   // drain-then-restore-across-cache: fill the cache, drain it and lex past it, then
   // restore to a save that predates the cache — the post-save cache is dropped and the
   // region re-lexes on demand.
-  let across_cache = drive::<L, _>(src, &tally, |ir| {
+  let across_cache = observe::<L>(src, &tally, |ir| {
     let ckp = ir.save();
-    let _ = ir
-      .peek::<U3>()
-      .expect("the conformance kit's Silent emitter never returns Err");
+    let _ = ir.peek::<U3>().expect(NEVER_ERRS);
     for _ in 0..4 {
-      if ir
-        .next()
-        .expect("the conformance kit's Silent emitter never returns Err")
-        .is_none()
-      {
+      if ir.next().expect(NEVER_ERRS).is_none() {
         break;
       }
     }
     ir.restore(ckp);
     drain_all::<Bud<'inp, L>>(ir, budget)
   });
-  assert_stream_eq::<L>(
+  assert_observed_eq::<Bud<'inp, L>>(
     idx,
     "drain-then-restore-across-cache",
     &straight,
@@ -2228,49 +3189,165 @@ fn check_integration<'inp, L>(
 
   // nested-savepoints: outer save, consume, inner save, consume, restore inner (LIFO),
   // consume, restore outer, drain. Exercises nested last-in-first-out restores.
-  let nested = drive::<L, _>(src, &tally, |ir| {
+  let nested = observe::<L>(src, &tally, |ir| {
     let outer = ir.save();
-    let _ = ir
-      .next()
-      .expect("the conformance kit's Silent emitter never returns Err");
+    let _ = ir.next().expect(NEVER_ERRS);
     let inner = ir.save();
-    let _ = ir
-      .next()
-      .expect("the conformance kit's Silent emitter never returns Err");
+    let _ = ir.next().expect(NEVER_ERRS);
     ir.restore(inner);
-    let _ = ir
-      .next()
-      .expect("the conformance kit's Silent emitter never returns Err");
+    let _ = ir.next().expect(NEVER_ERRS);
     ir.restore(outer);
     drain_all::<Bud<'inp, L>>(ir, budget)
   });
-  assert_stream_eq::<L>(idx, "nested-savepoints", &straight, &nested);
+  assert_observed_eq::<Bud<'inp, L>>(idx, "nested-savepoints", &straight, &nested);
 }
 
-/// Asserts two committed (kind, span) token streams are identical, with position context.
+/// Which arm of a committed stream a divergence was found on, in the two places the report names
+/// it: the noun the verdict uses, and the position label the refusal is asked at.
+///
+/// The arm is carried rather than inferred because both arms hold the same [`StreamItem`] type —
+/// each sequence is homogeneous, so the value cannot say which sequence it came from, and a
+/// verdict that called a raised refusal a "committed token" would be describing the wrong half of
+/// the layer's behavior.
+#[derive(Clone, Copy)]
+struct Arm {
+  /// The stream's noun, as in "committed token stream diverges".
+  noun: &'static str,
+  /// What a position on this arm is called, so a `non-reflexive-payload` refusal names the arm
+  /// the failed comparison was drawn from.
+  at: &'static str,
+}
+
+/// The tokens `next()` handed back.
+const COMMITTED: Arm = Arm {
+  noun: "committed token",
+  at: "position",
+};
+
+/// The lexer errors the input layer raised underneath the drain.
+const RAISED: Arm = Arm {
+  noun: "raised lexer-error",
+  at: "error position",
+};
+
+/// Asserts two schedules observed the input layer identically — the same committed tokens and the
+/// same raised lexer errors, both by value.
+///
+/// # The two arms are ONE verdict, and the ranking runs across them
+///
+/// They were two `assert` calls in a fixed order, and the second could not be reached until the
+/// first had returned — so an inconclusive divergence on the committed arm withheld a conclusive
+/// one on the raised-error arm, which is round 5's finding one level above the position/count
+/// ordering [`diverge`] repairs. Both arms carry the same tag and describe one schedule's one
+/// observation of the layer; the header splits them into two sequences for a documented reason
+/// about *where* an error sits, not because they are two laws. So [`Ranking`] composes here too,
+/// over whole [`Divergence`]s rather than over components, and the committed arm is still run and
+/// still reported first whenever it settles anything conclusively.
+fn assert_observed_eq<'inp, L>(
+  idx: usize,
+  sched: &str,
+  expected: &Observed<'inp, L>,
+  got: &Observed<'inp, L>,
+) where
+  L: Lexer<'inp>,
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
+{
+  let mut ranking = Ranking::new();
+  for (arm, expected_arm, got_arm) in [
+    (COMMITTED, &expected.tokens, &got.tokens),
+    (RAISED, &expected.errors, &got.errors),
+  ] {
+    let found = diverge(
+      expected_arm,
+      got_arm,
+      expected_arm.len() != got_arm.len(),
+      |a, b| a.compare(b),
+    );
+    if let Some(((arm, e, g), divergence)) = ranking.settle((arm, expected_arm, got_arm), found) {
+      report_stream_divergence::<L>(idx, sched, arm, e, g, &divergence);
+    }
+  }
+  if let Some(((arm, e, g), divergence)) = ranking.refusal() {
+    report_stream_divergence::<L>(idx, sched, arm, e, g, &divergence);
+  }
+}
+
+/// Asserts one item stream matches another, with position context — the single-arm form, for the
+/// raw-lex cross-check that has no second arm to be ranked against.
 fn assert_stream_eq<'inp, L>(
   idx: usize,
   sched: &str,
-  expected: &[(<L::Token as Token<'inp>>::Kind, L::Span)],
-  got: &[(<L::Token as Token<'inp>>::Kind, L::Span)],
+  arm: Arm,
+  expected: &[StreamItem<'inp, L>],
+  got: &[StreamItem<'inp, L>],
 ) where
   L: Lexer<'inp>,
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
 {
-  let n = expected.len().min(got.len());
-  for i in 0..n {
-    if expected[i] != got[i] {
+  if let Some(divergence) = diverge(expected, got, expected.len() != got.len(), |a, b| {
+    a.compare(b)
+  }) {
+    report_stream_divergence::<L>(idx, sched, arm, expected, got, &divergence);
+  }
+}
+
+/// Reports one arm's [`Divergence`], with position context. Never returns.
+///
+/// The comparison behind it is [`StreamItem::compare`] — the same component-aware,
+/// reflexivity-aware path the partial tier draws its verdicts from, and the reason this tier has
+/// no comparison of its own. It replaced a local `(kind, span)` one, which was both a projection
+/// of the item (#269 at this tier) and a second implementation of a rule that already existed:
+/// the two could drift, and the older one already had, since it could not see the arm at all.
+///
+/// Reporting is separated from comparing because [`assert_observed_eq`] ranks the two arms
+/// against each other before either of them may speak — see its own docs.
+fn report_stream_divergence<'inp, L>(
+  idx: usize,
+  sched: &str,
+  arm: Arm,
+  expected: &[StreamItem<'inp, L>],
+  got: &[StreamItem<'inp, L>],
+  divergence: &Divergence,
+) -> !
+where
+  L: Lexer<'inp>,
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
+{
+  match divergence {
+    Divergence::At(i, decided) => {
+      let i = *i;
+      // `Token::Kind` is bounded `Eq`, `Lexer::Span` is bounded `Ord` and the two payloads are
+      // bounded only `PartialEq`, so a refusal here is drawn from whichever of those decided it —
+      // exactly as it is at every other comparison this kit draws a verdict from. Guarding some
+      // and not the rest is the defect relocated, and this one costs a call on a path already
+      // panicking.
+      let op = format!("integration/{sched}");
+      let at = format!("{} {i}", arm.at);
+      refuse_decided(
+        idx,
+        &op,
+        &at,
+        decided,
+        &expected[i].describe(),
+        &got[i].describe(),
+      );
       panic!(
-        "tokora conformance [input #{idx} integration/{sched}] position {i}: committed token stream diverges: expected {:?}, got {:?}",
-        expected[i], got[i]
+        "tokora conformance [input #{idx} integration/{sched}] {} {i}: {} stream diverges: expected {}, got {}",
+        arm.at,
+        arm.noun,
+        expected[i].describe(),
+        got[i].describe()
       );
     }
-  }
-  if expected.len() != got.len() {
-    panic!(
-      "tokora conformance [input #{idx} integration/{sched}] committed token stream length differs: straight-lex has {}, schedule has {}",
+    Divergence::Count => panic!(
+      "tokora conformance [input #{idx} integration/{sched}] {} stream length differs: straight-lex has {}, schedule has {}",
+      arm.noun,
       expected.len(),
       got.len()
-    );
+    ),
   }
 }
 

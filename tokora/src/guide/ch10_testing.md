@@ -24,7 +24,9 @@ over a corpus with [`new`](crate::conformance::Harness::new) or
 [`over`](crate::conformance::Harness::over), then call
 [`run`](crate::conformance::Harness::run). It checks:
 
-1. **replay identity** — two fresh runs produce the identical token/span/slice sequence;
+1. **replay identity** — two fresh runs produce the identical token/span/slice sequence, and
+   identical means **by value**: the whole token, the whole error payload, never a rendering of
+   either and never the token's kind standing in for it;
 2. **state-resume faithfulness** — at *every* position, saving the state and resuming there
    reproduces the rest of the run. This is the prefix-replay assumption, verbatim;
 3. **monotone progress** — spans advance, none is empty, and the run terminates;
@@ -54,12 +56,31 @@ run still passes, and it still catches an item that *changes* — a token whose 
 **value** moved, a token that became an error, an error whose payload moved. See
 [`Lexer::read_frontier`](crate::Lexer::read_frontier) for what declaring the class buys back.
 
-Comparing the *value* is why this tier — and only this tier — asks for `PartialEq` on your token
-and on its error type. It is one derive on a data type, and it is what makes the comparison
-total: every field participates, including the one you add next year. The alternative, a
-comparison key written by hand, is a projection, and the field it forgets is exactly the field
-that drifts. Calc's `Tok` and `LexError` already derive it; a vocabulary that cannot keeps
-[`run`](crate::conformance::Harness::run) and loses this tier.
+Comparing the *value* is why the kit asks for `PartialEq` on your token and on its error type. It
+is one derive on a data type, and it is what makes the comparison total: every field
+participates, including the one you add next year. The alternative, a comparison key written by
+hand, is a projection, and the field it forgets is exactly the field that drifts. Calc's `Tok`
+and `LexError` already derive it. Both entry points ask for it:
+[`run`](crate::conformance::Harness::run) compared an error's `Debug` rendering and a token's
+*kind* until 0.10.0, so its replay-identity green meant less than the word said — two unequal
+error values that print alike passed, and a payload rendering a counter reddened a conforming
+lexer. A vocabulary whose token or error genuinely cannot be `PartialEq` loses the kit and
+recovers it with a hand-written impl or a newtype.
+
+One thing `PartialEq` does *not* promise is reflexivity, and a payload holding an `f64` that can
+be `NaN` is not equal to itself. `Eq` and `Ord` *do* promise it — but they are markers, and
+nothing checks the promise, so a `Kind`, a span, an offset or a source slice can break it too.
+Either way it is your obligation, not the kit's — hand-write the impl that says what equality
+means for such a type — and either way the kit will not misreport it: a comparison decided by a
+value that will not equal itself is refused, tagged `non-reflexive-payload` and naming the
+component, instead of being reported as a conformance failure of your lexer.
+
+The kit refuses only when it has nothing better to say. A difference it *can* convict on — one at
+the discriminant, one in item count, or one between two values that each equal themselves —
+outranks a comparison it cannot use, wherever both are available: two runs yielding `[Tok(NaN)]`
+and `[Tok(NaN), Tok(0.0)]` are reported as a length mismatch, because the extra item proves the
+divergence whatever `NaN` does. The refusal is the answer of last resort, and it means the kit
+searched and found nothing it could stand behind.
 
 ```rust
 # use tokora::{Token as TokenT, logos::{self, Logos}};

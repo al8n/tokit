@@ -969,6 +969,30 @@ and will red until they do.
 
 ### Changed (breaking)
 
+- **`conformance::Harness::run` requires `L::Token: PartialEq` and `<L::Token as Token>::Error:
+  PartialEq`** (#269). It required nothing beyond `Lexer` before, and that is what the defect was:
+  check 1 is documented as identity of the *item*, and with no equality to call the kit
+  substituted the two things it could reach — the error's `Debug` rendering and the token's
+  `kind`. `run_partial` has asked for both bounds since 0.10.0, so this is the same obligation on
+  the other entry point rather than a new one, and the two tiers now differ only in `Offset =
+  usize`, a prefix-sliceable source and `State: Clone`.
+
+  **Who this excludes.** A vocabulary whose token or error type genuinely cannot be `PartialEq` —
+  one holding an `Arc<dyn Error>`, a closure, a handle — loses the kit, since every tier runs from
+  `run` or `run_partial`. Recovering it costs a `#[derive(PartialEq)]`, a hand-written impl where
+  derivation is wrong, or a newtype whose equality is the one the vocabulary means; nothing about
+  the lexer changes. There is no in-tree vocabulary among the excluded — this crate ships no
+  concrete `Token` implementation at all — and the bundled logos adapter is transparent:
+  `LogosLexer<T>` takes its `Token` and `Error` from the caller and constrains neither.
+
+  The alternative to a bound is a caller-supplied comparator or key, and `run_partial` settled
+  that trade already: a hand-written projection is silently escaped by the next field added, which
+  is the failure mode the rendering had.
+
+  `Item`'s private fields move with it — the kit keeps the `Result` `lex()` already handed it
+  instead of a `kind` plus a `format!("{err:?}")` `String`, so the repair costs an allocation per
+  error item less than what it replaces.
+
 - **`PrattRHS` gains a variant, so an exhaustive `match` on it stops compiling** (#274). The new
   arm is `Adjacent(Precedenced<L, Power>)` — see **Added**. Every in-tree `match` on `PrattRHS`
   was a driver's; grammar code builds these values rather than reading them, so the expected
@@ -1759,6 +1783,197 @@ and will red until they do.
   lookahead while every one of them consumes what it reports.
 
 ### Fixed
+
+- **`conformance::Harness::run` compares the item and not a rendering of it** (#269). Two fresh
+  runs were held to agree on the error's `Debug` string and the token's `kind`, which the module
+  header called identity of the token/error sequence. `Debug` is neither **injective** — two
+  unequal error variants may render identically, and a hand-written `Debug` printing one label for
+  a family of variants is legal and not rare, so a lexer whose error *value* changed between fresh
+  runs was certified — nor **stable**: a rendering carrying an address or a counter differs
+  between the two separately constructed lexers and reddened a lexer with no defect at all. The
+  two run in opposite directions, so no amount of care with the rendering fixes both, and
+  correcting the documentation to describe rendering-equality would have kept the false red.
+  `kind` had the third failure of the same shape: a payload that moved between fresh runs kept its
+  kind, its span and its slice, which was the whole comparison.
+
+  The partial tier made this repair in 0.10.0 and the trait tier did not, so the argument, the
+  bound and now the cells are the same on both. Three plants: an alternating error value behind one
+  `Debug` spelling, an alternating token payload behind one kind, and the same error drift through
+  a `with_state` resume, which is `check_resume`'s own comparison and not `assert_run_eq`'s. The
+  control is `TickingErrLexer` — conforming, unstable `Debug` — now driven through `run` as well
+  as `run_partial`.
+
+- **The integration tier compares the committed item, and it compares both of its arms** (#269).
+  The last tier still holding the key #269 removed. Its five schedules reduced every committed
+  token to `(kind, span)` and threw the `L::Token` the drain loop had just been handed away, and
+  they ran under `Silent`, which discards a lexer error outright. So a token payload that moved
+  between two schedules of the same input — same kind, same span, same item count — was certified,
+  and the whole error arm of the committed stream sat outside all five comparisons: a refusal
+  leaves no token behind, so a lexer whose refusal payload moved between schedules produced five
+  identical (empty) token streams.
+
+  Both halves are the same defect the trait tier had, at the one tier neither #269 nor #295
+  reached, and the fix is to stop projecting rather than to compare harder: the streams now hold
+  `StreamItem` — the partial tier's own item type, renamed because it now serves both tiers that
+  drive an `Input` — and every verdict is drawn from `StreamItem::compare`, the component-aware,
+  reflexivity-aware path that already existed. The tier's local `(kind, span)` comparison is gone;
+  a second implementation of one rule is what let the two drift in the first place. **This costs
+  no new bound.** `run` already asks for the two `PartialEq`s, and retention is free: `Token` is
+  bounded `Clone` and `Token::Error` is bounded `Clone`, both by the `Token` trait, so the tier
+  excludes nobody it did not already exclude.
+
+  **The two arms are compared as two sequences, not as one interleaved stream, and the error arm
+  is not cross-checked against the raw lexer.** Both are facts about the input layer that a
+  stronger-looking check would have gotten wrong, and both were written, run, and rejected by an
+  existing positive cell rather than reasoned about. A `peek` reports a refusal the moment it
+  lexes the region, so on `"a?b"` the straight drain observes `token, error, token` and
+  `peek-heavy` observes `error, token, token` — both conforming, and an interleaved comparison
+  reds `error_yielding_lexer_passes_every_check`. The layer also reports each refused region
+  exactly once, keyed on a high-water mark, while the raw lexer may error over one span
+  repeatedly: `RepeatErrLexer<80>` raises eighty and the layer raises one, and requiring equality
+  there reds three positive cells. What survives both is what the tier now asserts — each arm's
+  own sequence, per schedule, against the straight drain's.
+
+  The emitter is now the partial tier's `ItemRecorder` rather than `Silent`, which is what puts a
+  refusal in front of a comparison at all; its `checkpoint`/`rewind` was written for "a later
+  schedule that does backtrack" and three of these five are it, so a restore rewinds the recorded
+  errors in the same operation that rewinds the layer's dedup watermark. Two plants, one per arm:
+  a token payload and an error payload, each keyed to the `Lexer::new` instance the drive was
+  seeded from, so every trait-tier check passes and the straight drain and `peek-heavy` disagree.
+
+- **The conformance kits report exactly what they established — no more and no less** (#324).
+  #295 gave the kits one half of that rule: never state a diagnosis you did not establish. This is
+  the other half, and the two are one rule. Every verdict-drawing comparison settled at the
+  **first** difference it happened to reach, so an inconclusive one reached first buried every
+  conclusive one behind it.
+
+  Two instances, at two of the shared functions. `assert_run_eq` inspected shared items before
+  checking stream length, so two fresh runs producing `[Tok(NaN)]` and `[Tok(NaN), Tok(0.0)]` —
+  identical kind, span and slice at position 0 — reported `non-reflexive-payload` at position 0
+  and never reached the length check, while the **extra item** proves replay divergence with no
+  caller equality consulted at all. And `triple_compare` returned at the token, so a cache that
+  accepts a push, hands back the correct span and the correct token and corrupts a perfectly
+  **reflexive** `L::State` was called INCONCLUSIVE because `NaN != NaN` came first in its order,
+  while the unexamined state mismatch convicts the cache on its own.
+
+  **A conclusive difference outranks an inconclusive one, wherever both are available.** The first
+  inconclusive difference is retained as a fallback and the search continues — into the remaining
+  components of the same item, the later positions of the same stream, the item **count**, and the
+  second arm of a two-arm law — and it is reported only if nothing conclusive is found anywhere.
+  What counts as conclusive is a question about the two values the comparison ran on and not about
+  the bound the component carries: a difference at the discriminant or in item count consults no
+  caller equality at all, and a component comparison over two values that **each equal themselves**
+  is sound — which is the ordinary case, the whole population of honest failures, and is not
+  demoted by any of this.
+
+  The rule lives in one place. `Ranking` carries it, `Comparison::ranked` spells it over a
+  component list and `diverge` over two item streams; the cache kit's `PurityDecided` is gone,
+  because it said exactly what `Divergence` says and two spellings of one answer are two places for
+  the ordering between a position and a count to be decided wrongly — it was wrong in both.
+  `Ranking` is generic over what a step answers, so the same rule composes over whole answers a
+  level up: the integration tier's committed and raised-error arms were two `assert` calls in a
+  fixed order, and `prefilled_purity` took the first half that diverged, and both carried the
+  finding again. Nine plants, one per decision point.
+
+  **What it costs.** On the passing path, nothing: every step short-circuits at the first
+  conclusive difference, so a comparison whose components agree runs exactly what it ran before,
+  and so does one that fails the ordinary way. On a **failure** path the kit runs more of the
+  caller's `PartialEq` — the components behind an inconclusive one, the positions after it, the
+  other arm — which is the same code the same run would have called had the earlier component
+  agreed, over values the kit is already holding. A caller `eq` that panics can therefore panic
+  where it was previously unreachable; that run was already going to abort, and no comparison here
+  can turn a passing run red. `check_resume` is the one place where more of the *subject* runs: it
+  collects its suffix before comparing, so a divergent resume lexes on to exhaustion under the same
+  budget the passing path is already bounded by.
+
+- **The kits owe a broken `Eq` the same answer they owe a broken `PartialEq`** (#324). A second
+  population of verdict-drawing comparisons had no refusal at all — span/slice coherence,
+  read-frontier purity, the span after exhaustion, gap-free tiling, and the cache kit's eleven
+  span-valued laws — classified as settled by *total* equalities and therefore outside the guarded
+  population. But `Eq` and `Ord` are markers and nothing checks the promise they make, so a lexer
+  over a `Slice` whose `PartialEq` answers `false` to everything, itself included, got
+  `span/slice-coherence`: a red naming their lexer, with `source LyingSlice("a"), slice()
+  LyingSlice("a")` — two values that render identically. That is #295 verbatim at a site called
+  exempt, and the exemption was not even self-consistent, since the same lying `L::Span` reaches an
+  entry comparison a few lines below several of the cache sites and is refused there. Breaking `Eq`
+  is a **stronger** caller defect than a `NaN`-capable `PartialEq`, not a defect outside this kit's
+  reach; either way the comparison that failed was the caller's and the kit convicted nobody.
+
+  Every equality any tier draws a verdict from is now built by one function, so the guarded
+  population is a matter of construction rather than of a count in a comment: a comparison that
+  does not come through it cannot produce the answer a verdict or a refusal is drawn from. The
+  refusal keeps the `non-reflexive-payload` tag whatever the component, because the tag names the
+  diagnosis #295 established and every cell and downstream grep keys on it; the component it names
+  is what says whether a total or a partial promise was the one broken.
+
+- **The conformance kits diagnose a payload that is not equal to itself instead of convicting the
+  lexer or the cache** (#295). `PartialEq` promises symmetry and transitivity and **not**
+  reflexivity, so a token payload holding an `f64` that can be `NaN` is not equal to itself. The
+  partial tier's final leg compares the complete stream against a final drain of the *same*
+  source, so such a payload failed a stream against itself: the kit raised `partial-equivalence`
+  — a red naming the consumer's lexer — with an expected-vs-got in which both sides render
+  `FTok(NaN)`. Two things that look the same, and a verdict about the wrong thing. 38 corpus
+  queries in one downstream reached it.
+
+  The obligation is unchanged and is the caller's: `run_partial`'s documentation has said since
+  0.10.0 that such a type must hand-write the impl that says what equality means for it, and value
+  equality is deliberate. What moves is the **diagnosis**. Every comparison any tier draws a
+  verdict from now answers with the **component that decided it** rather than with a `bool`, and
+  asks, once it has already failed, whether *that* operation is equal to itself; a side whose is
+  not gets a refusal tagged `non-reflexive-payload` naming the component — the token payload, the
+  error payload, the `Kind`, the `L::State`, the span, the slice — and the obligation.
+
+  **The refusal is asked about the comparison that ran, and about nothing else.** The first draft
+  of this repair answered `bool` and then scanned the whole item for a non-reflexive value, which
+  is a different question: the scan runs afterwards and knows nothing about *why*. So a divergence
+  settled at the **discriminant** — an item that is a lexer error on the truncated buffer and a
+  committed token on the full one, where no caller equality is consulted at all — still turned up
+  a `NaN` in the payload beside it and was refused, and the refusal said the kit had convicted the
+  lexer of nothing. It had: that is precisely the truncation nonconformance the partial tier
+  exists to report, and the panic one line below says so. The fix for a false red had produced a
+  false green. A difference at the discriminant or in item **count** is now terminal, because
+  neither consults a caller equality at all. A component bounded to a *total* equality is terminal
+  too whenever its own comparison is sound, which is every case a kept `Eq` promise produces — and
+  the entry below is what the kit does when the promise is not kept.
+
+  **And no site collapses those comparisons into a `bool` before deciding.** That rule was applied
+  inside each comparison and not to the composition above them, and the cache kit's prefilled
+  purity law is composed: it compares the prefix `peek` was handed *and* the run `peek` appended
+  behind that prefix. `||` over the two answers a `bool` that does not record which half fired, so
+  the failure path re-ran both refusals — and the half that decided nothing was probed too. A
+  prefix impurity settled by a span or by a length says nothing, and a `NaN` the second peek
+  fabricated in the *appended* run then withheld a verdict the kit had established. That is the
+  same `bool` one level up. The comparison now answers which half failed to reproduce, that half's
+  two runs and what decided them — a **length** included, which an `Option<(position, component)>`
+  could not distinguish from agreement — and the branch condition and the failure path consume
+  that one result. The four purity sites take the same shape, so no `!=` over two peeked runs is
+  left in the kit to compose.
+
+  The failure names the half, and that is the one thing it can no longer say: it prints the
+  deciding half's two runs where it used to print both pairs. A cache impure in *both* halves is
+  reported at the prefix and its appended defect is seen on the next run — the same cost
+  "span first, always" already pays at the entry comparison, and for the same reason.
+
+  **The sweep is the population and not the reported site.** Six comparisons: `assert_run_eq` and
+  `check_resume` in the trait tier, `assert_partial_stream_eq` and `assert_partial_prefix_of` in
+  the partial tier, the committed-stream comparison in the integration tier, and the cache kit's
+  entry and purity comparisons, whose observable is the `(span, token, state)` triple and which
+  asks `PartialEq` of two of the three. A guard at one and not the others is the same defect one
+  relocation away — and so is a component-aware rule at one and a whole-item scan at another, so
+  all of them decide from what failed at that site. `Token::Kind` is bounded `Eq`, `Lexer::Span`
+  is bounded `Ord` and `Source::Slice` is bounded `Eq`, so a refusal drawn from any of those three
+  is a broken *total*-equality promise rather than a partial one; each still gets a probe when it
+  is the component that decided, because a component that can decide a verdict and cannot be
+  refused is a component whose failure is reported as a defect of the thing under test.
+
+  **It can only ever re-label a failure, never create one.** Every guard sits on a path its own
+  comparison has already taken to failure, so a reflexive value never reaches one. That is what
+  keeps the repair from trading a false red for a false green, and it is pinned by two controls
+  that pull in opposite directions: a genuinely non-conforming lexer over the same float payload
+  type, never `NaN`, still reds `partial-equivalence` with two distinguishable values in the
+  message; and a `NaN` payload that is what decided its comparison is still refused. The
+  discriminant counterexample is a third: the same truncation defect with a `NaN` error payload
+  and with a reflexive one now report identically.
 
 - **A borrowed token keeps its punctuation and pratt capabilities** (#268). `Token`,
   `IdentifierToken`, `KeywordToken` and every `LitToken` predicate forward from `T` to `&'a T`;
