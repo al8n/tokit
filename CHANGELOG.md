@@ -990,8 +990,9 @@ and will red until they do.
   tier drives the `Lexer` surface (`with_state` + `bump`) directly. `check_resume`'s signature is
   one `src` and its loop runs over that source's own reference items. And `run` deliberately asks
   nothing of the offset type or the source, so folding this in would narrow `run` for every lexer
-  that cannot reach the defect; the tier goes where the bounds already are, beside `run_partial`,
-  and asks for exactly its bounds minus the redundant `Kind` ones.
+  that cannot reach the defect; the tier sits beside `run_partial` and asks for less than it does —
+  `Offset = usize` and the two equalities, and **not** a prefix-sliceable source, because making a
+  buffer is the driver's obligation and the bound lives on the drivers that need it.
 
   **What it drives.** For every cut of every input — every position the source can be sliced at and
   the driver can end a chunk at, so a cut inside a token, at a token boundary, inside trivia, at

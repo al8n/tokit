@@ -5460,7 +5460,7 @@ fn every_conforming_hand_rolled_fixture_passes_the_refill_tier() {
   Harness::<NanPayloadLexer<'_>>::over(nan).run_refill(&OwnedChunks::over(nan));
 }
 
-// ── [high] The legs have to change buffer, not just length ──────────────────────────
+// ── A leg has to change buffer, not just length ─────────────────────────────────────
 
 /// The state of [`PointerStateLexer`]: where the buffer it was born over lives.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -5574,7 +5574,7 @@ const POINTER_CORPUS: [&str; 2] = ["ab cd", "one two"];
 
 #[test]
 fn same_allocation_certifies_a_lexer_that_keys_on_the_buffer_address() {
-  // The [high], executable. Every leg is `&src[..k]`, so every leg shares one base address and the
+  // The reduction, executable. Every leg is `&src[..k]`, so every leg shares one base address and the
   // buffer never changes — only its length does. This lexer survives all of it, and fails on the
   // first refill any real driver performs.
   Harness::<PointerStateLexer<'_>>::over(POINTER_CORPUS).run();
@@ -5610,7 +5610,7 @@ fn owned_chunks_relocate_every_cut_they_exercise() {
   assert_eq!(coverage.exercised_at(7), None);
 }
 
-// ── [medium] The source's boundaries are not necessarily the driver's ────────────────
+// ── A source's boundaries are not necessarily the driver's ──────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum BKind {
@@ -5772,7 +5772,7 @@ fn a_utf8_byte_lexer_passes_the_two_tiers_that_never_carry_a_state() {
 #[test]
 #[should_panic(expected = "[input #0 refill-equivalence] refills [1, 2, 4], position 1")]
 fn every_byte_index_reds_a_lexer_whose_driver_never_cuts_there() {
-  // The [medium], executable. `Source::is_boundary` for `[u8]` is `k <= len`, so the derived cuts
+  // The false red, executable. `Source::is_boundary` for `[u8]` is `k <= len`, so the derived cuts
   // include one **inside** the two-byte `é` — a buffer a UTF-8-validating driver never delivers.
   // The lexer is convicted on a schedule its driver cannot produce, which is the one thing a kit
   // must not do (#295).

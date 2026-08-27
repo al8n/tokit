@@ -720,10 +720,12 @@ where
   ///   wearing the same name.
   /// - **[`run`](Self::run)'s bounds are deliberately weaker.** It asks nothing of the offset type
   ///   and nothing of the source beyond [`Lexer`]. This tier needs
-  ///   [`Offset = usize`](crate::Lexer::Offset) and a prefix-sliceable source, so folding it into
-  ///   `run` would narrow `run` for every lexer that cannot even reach this defect. The narrowing
-  ///   is where the cost would land, so the tier goes where the bounds already are — beside
-  ///   [`run_partial`](Self::run_partial).
+  ///   [`Offset = usize`](crate::Lexer::Offset), and it takes a [`RefillDriver`] besides, so
+  ///   folding it into `run` would narrow `run` and change its signature for every lexer that
+  ///   cannot even reach this defect. The narrowing is where the cost would land, so the tier sits
+  ///   beside [`run_partial`](Self::run_partial). It does **not** inherit that entry point's
+  ///   prefix-sliceable source: making a buffer is the driver's obligation now, so the bound lives
+  ///   on the drivers that need it.
   ///
   /// # The buffers, and the one thing the caller supplies
   ///
@@ -1089,9 +1091,9 @@ impl RefillCoverage {
   /// backing `&Self` addresses the pointer variable and not the bytes, so an inequality there
   /// proves nothing and the crate refuses to read one anywhere else either.
   ///
-  /// A run under [`SameAllocation`] reports `Some(0)` over such a source. That is the [high] the
-  /// number exists to make visible: every leg shared one base address, so nothing about a *change*
-  /// of buffer was tested.
+  /// A run under [`SameAllocation`] reports `Some(0)` over such a source, and that zero is the
+  /// whole point of the number: every leg shared one base address, so nothing about a *change* of
+  /// buffer was tested.
   #[must_use]
   pub fn relocated(&self) -> Option<usize> {
     self
