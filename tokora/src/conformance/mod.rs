@@ -70,14 +70,14 @@
 //! [`SCAN_LOOKAHEAD`](crate::Token::SCAN_LOOKAHEAD) claim behind the logos
 //! adapter.
 //!
-//! **Refill tier** (`run_refill`, the same `usize`-offset, prefix-sliceable sources) — carrying
-//! `(`[`State`](crate::state::State)`, offset)` from the end of one buffer into a **grown** buffer
-//! and lexing on there, which is what a refilling driver does and what neither tier above covers.
+//! **Refill tier** (`run_refill`, the same `usize`-offset, prefix-sliceable sources) — carrying a
+//! `(state, offset)` pair — the [lexer state](crate::state::State) and the position it was left at
+//! — from the end of one buffer into a **grown** buffer and lexing on there, which is what a
+//! refilling driver does and what neither tier above covers.
 //! `run_partial` drives every prefix with a **fresh** lexer, so no `L::State` ever crosses a cut;
 //! check 2 above carries state but resumes over the **same** source. The distinction is not *does
 //! state survive* but ***does state survive a change of buffer***, and that is the mode
-//! [`Incomplete`](crate::error::Incomplete) exists for. It drives the [`Lexer`] surface
-//! directly —
+//! `Incomplete` exists for. It drives the [`Lexer`] surface directly —
 //! [`with_state`](crate::Lexer::with_state) + [`bump`](crate::Lexer::bump) over a longer source —
 //! because the input layer has no offset-resuming constructor to hand a carried state to, and each
 //! leg is bounded by the same per-loop item budget the trait-tier checks carry, for the same
