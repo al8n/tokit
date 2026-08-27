@@ -1841,6 +1841,71 @@ and will red until they do.
   a token payload and an error payload, each keyed to the `Lexer::new` instance the drive was
   seeded from, so every trait-tier check passes and the straight drain and `peek-heavy` disagree.
 
+- **The conformance kits report exactly what they established — no more and no less** (#324).
+  #295 gave the kits one half of that rule: never state a diagnosis you did not establish. This is
+  the other half, and the two are one rule. Every verdict-drawing comparison settled at the
+  **first** difference it happened to reach, so an inconclusive one reached first buried every
+  conclusive one behind it.
+
+  Two instances, at two of the shared functions. `assert_run_eq` inspected shared items before
+  checking stream length, so two fresh runs producing `[Tok(NaN)]` and `[Tok(NaN), Tok(0.0)]` —
+  identical kind, span and slice at position 0 — reported `non-reflexive-payload` at position 0
+  and never reached the length check, while the **extra item** proves replay divergence with no
+  caller equality consulted at all. And `triple_compare` returned at the token, so a cache that
+  accepts a push, hands back the correct span and the correct token and corrupts a perfectly
+  **reflexive** `L::State` was called INCONCLUSIVE because `NaN != NaN` came first in its order,
+  while the unexamined state mismatch convicts the cache on its own.
+
+  **A conclusive difference outranks an inconclusive one, wherever both are available.** The first
+  inconclusive difference is retained as a fallback and the search continues — into the remaining
+  components of the same item, the later positions of the same stream, the item **count**, and the
+  second arm of a two-arm law — and it is reported only if nothing conclusive is found anywhere.
+  What counts as conclusive is a question about the two values the comparison ran on and not about
+  the bound the component carries: a difference at the discriminant or in item count consults no
+  caller equality at all, and a component comparison over two values that **each equal themselves**
+  is sound — which is the ordinary case, the whole population of honest failures, and is not
+  demoted by any of this.
+
+  The rule lives in one place. `Ranking` carries it, `Comparison::ranked` spells it over a
+  component list and `diverge` over two item streams; the cache kit's `PurityDecided` is gone,
+  because it said exactly what `Divergence` says and two spellings of one answer are two places for
+  the ordering between a position and a count to be decided wrongly — it was wrong in both.
+  `Ranking` is generic over what a step answers, so the same rule composes over whole answers a
+  level up: the integration tier's committed and raised-error arms were two `assert` calls in a
+  fixed order, and `prefilled_purity` took the first half that diverged, and both carried the
+  finding again. Nine plants, one per decision point.
+
+  **What it costs.** On the passing path, nothing: every step short-circuits at the first
+  conclusive difference, so a comparison whose components agree runs exactly what it ran before,
+  and so does one that fails the ordinary way. On a **failure** path the kit runs more of the
+  caller's `PartialEq` — the components behind an inconclusive one, the positions after it, the
+  other arm — which is the same code the same run would have called had the earlier component
+  agreed, over values the kit is already holding. A caller `eq` that panics can therefore panic
+  where it was previously unreachable; that run was already going to abort, and no comparison here
+  can turn a passing run red. `check_resume` is the one place where more of the *subject* runs: it
+  collects its suffix before comparing, so a divergent resume lexes on to exhaustion under the same
+  budget the passing path is already bounded by.
+
+- **The kits owe a broken `Eq` the same answer they owe a broken `PartialEq`** (#324). A second
+  population of verdict-drawing comparisons had no refusal at all — span/slice coherence,
+  read-frontier purity, the span after exhaustion, gap-free tiling, and the cache kit's eleven
+  span-valued laws — classified as settled by *total* equalities and therefore outside the guarded
+  population. But `Eq` and `Ord` are markers and nothing checks the promise they make, so a lexer
+  over a `Slice` whose `PartialEq` answers `false` to everything, itself included, got
+  `span/slice-coherence`: a red naming their lexer, with `source LyingSlice("a"), slice()
+  LyingSlice("a")` — two values that render identically. That is #295 verbatim at a site called
+  exempt, and the exemption was not even self-consistent, since the same lying `L::Span` reaches an
+  entry comparison a few lines below several of the cache sites and is refused there. Breaking `Eq`
+  is a **stronger** caller defect than a `NaN`-capable `PartialEq`, not a defect outside this kit's
+  reach; either way the comparison that failed was the caller's and the kit convicted nobody.
+
+  Every equality any tier draws a verdict from is now built by one function, so the guarded
+  population is a matter of construction rather than of a count in a comment: a comparison that
+  does not come through it cannot produce the answer a verdict or a refusal is drawn from. The
+  refusal keeps the `non-reflexive-payload` tag whatever the component, because the tag names the
+  diagnosis #295 established and every cell and downstream grep keys on it; the component it names
+  is what says whether a total or a partial promise was the one broken.
+
 - **The conformance kits diagnose a payload that is not equal to itself instead of convicting the
   lexer or the cache** (#295). `PartialEq` promises symmetry and transitivity and **not**
   reflexivity, so a token payload holding an `f64` that can be `NaN` is not equal to itself. The
@@ -1866,9 +1931,10 @@ and will red until they do.
   a `NaN` in the payload beside it and was refused, and the refusal said the kit had convicted the
   lexer of nothing. It had: that is precisely the truncation nonconformance the partial tier
   exists to report, and the panic one line below says so. The fix for a false red had produced a
-  false green. A difference at the discriminant, at a component bounded to a *total* equality, or
-  in item **count** is now terminal, because none of those is a partial equality that could fail
-  against itself.
+  false green. A difference at the discriminant or in item **count** is now terminal, because
+  neither consults a caller equality at all. A component bounded to a *total* equality is terminal
+  too whenever its own comparison is sound, which is every case a kept `Eq` promise produces — and
+  the entry below is what the kit does when the promise is not kept.
 
   **And no site collapses those comparisons into a `bool` before deciding.** That rule was applied
   inside each comparison and not to the composition above them, and the cache kit's prefilled
