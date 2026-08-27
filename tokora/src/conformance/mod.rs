@@ -182,7 +182,7 @@ use core::cell::RefCell;
 // `std` is `alloc` on a no-std build (`extern crate alloc as std`), and that is exactly the
 // configuration `conformance` selects — the feature enables `alloc`, not `std`. So `Rc` comes
 // through this alias and `RefCell` cannot: `cell` lives in `core`.
-use std::{format, rc::Rc, string::String, vec, vec::Vec};
+use std::{borrow::ToOwned, format, rc::Rc, string::String, vec, vec::Vec};
 
 use crate::{
   Lexer, ReadFrontier, Slice, Source, Span, Token,
@@ -660,12 +660,14 @@ where
 impl<'inp, L> Harness<'inp, L>
 where
   L: Lexer<'inp, Offset = usize>,
-  // A prefix of the source is itself a `&L::Source` — the same bound
-  // [`run_partial`](Self::run_partial) carries, and for the same reason: it is what lets a leg lex
-  // an honest truncation without a growable source. tokora has none, deliberately; the caller owns
-  // the buffer and grows it (see the [`input`](crate::input) module docs), which is why this tier
-  // models the driver rather than asking the input layer to hold one.
-  L::Source: core::ops::Index<core::ops::RangeTo<usize>, Output = L::Source>,
+  // NOT `L::Source: Index<RangeTo<usize>>`, which this block carried while the tier sliced its own
+  // legs. It no longer does: a leg's buffer comes from the caller's [`RefillDriver`], so being able
+  // to make one is that driver's obligation and the bound sits on the drivers that need it
+  // ([`SameAllocation`] slices, [`OwnedChunks`] copies). Left here it would deny the tier to a
+  // source that cannot be prefix-sliced but can hand over a buffer. tokora owns no growable source
+  // deliberately — the caller owns the buffer and grows it (see the [`input`](crate::input) module
+  // docs), and that is the shape this tier models.
+  //
   // The two equalities every verdict in this kit is drawn from. See `run`'s docs for who pays and
   // `Item::compare` for why a `Debug` rendering and a `kind` projection are each the wrong key.
   L::Token: PartialEq,
@@ -711,9 +713,38 @@ where
   ///   is where the cost would land, so the tier goes where the bounds already are — beside
   ///   [`run_partial`](Self::run_partial).
   ///
-  /// It takes no arguments, and the cuts are **derived** rather than supplied. A caller-chosen cut
-  /// is a caller-chosen exemplar, and a checker that passes its own exemplar is the failure this
-  /// tier exists to end.
+  /// # The buffers, and the one thing the caller supplies
+  ///
+  /// The cuts stay **derived**: the kit walks every position [`Source::is_boundary`] admits and
+  /// builds every schedule shape itself. A caller-chosen cut would be a caller-chosen exemplar, and
+  /// a checker that passes its own exemplar is the failure this tier exists to end.
+  ///
+  /// What the caller supplies is the [`RefillDriver`] — the **backing** each leg lexes over, and,
+  /// as the same answer, which cuts that driver's chunks can end at. The kit cannot supply it:
+  /// [`L::Source`](Lexer::Source) is `?Sized`, so the kit cannot own one, and every item a leg
+  /// produces borrows its [`slice`](Lexer::slice) for `'inp`, so a buffer allocated per leg could
+  /// not outlive the leg that made it. Both are the wall the whole tier rests on — the caller owns
+  /// the buffer — so the driver is an argument rather than a mode.
+  ///
+  /// It is a **required** argument, and that is the point. The two shipped drivers cover different
+  /// amounts of ground:
+  ///
+  /// | driver | what a leg gets | what it can catch |
+  /// |---|---|---|
+  /// | [`OwnedChunks`] | a separately allocated copy of the prefix | the whole subject: state carried across a **change of buffer** |
+  /// | [`SameAllocation`] | `&src[..k]`, one allocation throughout | state carried across a change of **length** |
+  ///
+  /// `SameAllocation` is the weaker one and it is not a default anybody inherits, for
+  /// [`Budget`](crate::input::Budget)'s reason: a reduction in what a run certifies has to be
+  /// *written* so that it surfaces in review. A lexer whose `State` carries anything derived from
+  /// where the bytes are — a raw pointer, an interner keyed by address, a cached slice — passes
+  /// under `SameAllocation` and fails on the first real refill, and a kit that chose that mode for
+  /// you would be certifying less than this paragraph claims.
+  ///
+  /// The return value is the [`RefillCoverage`] the run actually reached: how many cut positions it
+  /// drove schedules from, how many the source offered, and how many legs really did change
+  /// allocation. A driver that admits **no** cut below the source length certifies nothing about
+  /// any change of buffer, and is refused rather than passed.
   ///
   /// # The oracle, and the comparison it is drawn with
   ///
@@ -751,34 +782,322 @@ where
   ///
   /// # What it covers, and what it does not
   ///
-  /// Covered, by derivation rather than by example: every cut position the source admits (which
-  /// necessarily includes a cut inside a token, at a token boundary, inside trivia, at end of
-  /// input and at offset zero), a tail delivered in one refill, a tail delivered one unit at a
-  /// time, a two-refill schedule from every cut, and a refill that **adds nothing**.
+  /// Covered, by derivation rather than by example: every cut position the source admits **and the
+  /// driver can end a chunk at** (which for the default rule includes a cut inside a token, at a
+  /// token boundary, inside trivia, at end of input and at offset zero), a tail delivered in one
+  /// refill, a tail delivered one unit at a time, a two-refill schedule from every cut, and a
+  /// refill that **adds nothing**.
   ///
-  /// Not covered, deliberately: a cut that is not a source-unit boundary (no such buffer exists —
-  /// `str[..k]` is not a `str` mid-code-point); a buffer that *shrinks* or whose delivered bytes
-  /// change (that is not a refill; a refill appends); a driver that commits an item the frontier
-  /// withheld (not a driver the contract admits); and the diagnostic channel, which no tier here
-  /// compares.
+  /// Not covered, deliberately: a cut the source itself cannot be sliced at (`str[..k]` is not a
+  /// `str` mid-code-point, and the kit never asks a driver about such a position); a cut the driver
+  /// answered `None` for, which is the caller's stated fact about their own chunks and is counted
+  /// in [`RefillCoverage`] rather than assumed away; a buffer that *shrinks* or whose delivered
+  /// bytes change (that is not a refill; a refill appends, and a driver that returns different
+  /// bytes is refused); a driver that commits an item the frontier withheld (not a driver the
+  /// contract admits); and the diagnostic channel, which no tier here compares.
   ///
   /// # Panics
   ///
   /// Panics — tagged `refill-equivalence`, with the input index, the schedule, the position and
-  /// expected-vs-got — on the first divergence. Returns normally on full conformance.
-  pub fn run_refill(&self) {
+  /// expected-vs-got — on the first divergence. Returns the run's [`RefillCoverage`] on full
+  /// conformance.
+  ///
+  /// Two further panics are the kit refusing to draw a verdict rather than reporting one, and are
+  /// worded as such: `refill-buffer`, when the driver hands back something that is not a
+  /// content-preserving prefix of the source, and `refill-coverage`, when the driver admits no cut
+  /// below the source length while the source offers one — a run that certified nothing.
+  pub fn run_refill<D>(&self, driver: D) -> RefillCoverage
+  where
+    D: RefillDriver<'inp, L::Source>,
+  {
     assert!(
       !self.inputs.is_empty(),
       "tokora conformance: Harness has no inputs; construct it with `new`/`over` over at least one source"
     );
+    let mut coverage = RefillCoverage::default();
     for (idx, &src) in self.inputs.iter().enumerate() {
       let budget = self.budget(src);
       // The oracle, and the same reference `run` captures — so a lexer that reaches this entry
       // point without having passed `run` still meets the always-on trait-tier invariants
       // `lex_run` enforces inline, instead of having its refill verdict decided by a broken span.
       let reference = lex_run::<L>(idx, src, budget);
-      check_refill::<L>(idx, src, &reference, budget);
+      coverage
+        .per_input
+        .push(check_refill::<L, D>(idx, src, &reference, budget, &driver));
     }
+    coverage
+  }
+}
+
+/// The refilling **driver** a [`run_refill`](Harness::run_refill) run models: where one of its
+/// chunks may end, and the buffer that chunk lives in.
+///
+/// # Why those two questions are one method
+///
+/// The thing that produces chunks is the thing that knows where a chunk may end, and the buffer for
+/// a cut a driver can never produce is a buffer it would never hold. [`buffer`](Self::buffer)
+/// therefore answers both at once: `Some(buf)` is *this is what I hold once `k` units have
+/// arrived*, `None` is *no chunk of mine ends at `k`*. Splitting them into a predicate and a
+/// factory would create a state — a cut admitted with no buffer behind it — that the tier has no
+/// action for, and a second place for the two answers to disagree.
+///
+/// # Why the kit cannot supply this itself
+///
+/// [`L::Source`](Lexer::Source) is `?Sized` (`str`, `[u8]`), so the kit cannot own one; and every
+/// item a leg produces borrows its [`slice`](Lexer::slice) for `'inp`, so a buffer the kit
+/// allocated for the duration of a leg could not outlive the leg that made it. Both are the wall
+/// the whole tier rests on: tokora has no growable source, deliberately, and the caller owns the
+/// buffer and grows it.
+///
+/// # What the kit checks about what you hand back
+///
+/// A returned buffer must be a **content-preserving prefix** — exactly `k` units long, equal unit
+/// for unit to the first `k` units of `src`. A driver that returns different bytes turns every
+/// verdict downstream of it into noise, so the kit refuses one, tagged `refill-buffer` and worded
+/// as the kit's refusal rather than as the lexer's failure.
+///
+/// The kit asks **only** at positions [`Source::is_boundary`] already admits, and it asks about
+/// each of them **once** per input. So a driver can narrow the cut set and can never widen it, and
+/// an implementation that answered differently on a second call could not change what was driven.
+///
+/// The kit does not ask for the buffer at the source length: a schedule's last leg is the source
+/// itself, sealed, because that is what makes the oracle comparison an equality over the value the
+/// oracle lexed rather than over one that merely equals it.
+pub trait RefillDriver<'inp, S>
+where
+  S: Source<usize> + ?Sized,
+{
+  /// The buffer this driver holds once the first `k` units of the corpus's input `idx` have
+  /// arrived, or `None` when no chunk of this driver's can end at `k`.
+  ///
+  /// `idx` is the input's position in the [`Harness`]'s corpus, counting from zero, which is what
+  /// lets a driver keep per-input storage; `src` is that input.
+  fn buffer(&self, idx: usize, src: &'inp S, k: usize) -> Option<&'inp S>;
+}
+
+/// The driver that hands back **prefixes of the caller's one buffer**: `&src[..k]`, at every cut
+/// the source admits.
+///
+/// This is what the tier drove before there was a driver, and it is the weaker of the two shipped
+/// modes — so it is a value you write and never a default you inherit, for
+/// [`Budget`](crate::input::Budget)'s reason: a reduction in what a run certifies has to surface in
+/// review. Every leg of every schedule shares one allocation and one base address, so what changes
+/// between legs is the buffer's **length** and not the buffer. A lexer whose
+/// [`State`](crate::state::State) carries anything derived from *where* the bytes are — a raw
+/// pointer, an interner keyed by address, a cached slice — passes this and fails on the first
+/// refill a real driver performs.
+///
+/// Reach for it when [`L::Source`](Lexer::Source) has no owned form to copy into, or when the
+/// deployment genuinely re-uses one buffer and never relocates it. Otherwise reach for
+/// [`OwnedChunks`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SameAllocation;
+
+impl<'inp, S> RefillDriver<'inp, S> for SameAllocation
+where
+  S: Source<usize> + ?Sized + core::ops::Index<core::ops::RangeTo<usize>, Output = S>,
+{
+  fn buffer(&self, _idx: usize, src: &'inp S, k: usize) -> Option<&'inp S> {
+    // No filtering: the kit asks only where `is_boundary` already said yes, and this driver's
+    // whole claim is that it narrows nothing.
+    Some(&src[..k])
+  }
+}
+
+/// A driver that **owns** its buffers: one separately allocated copy of every prefix its cut rule
+/// admits, for every input in the corpus.
+///
+/// This is the driver a refilling caller actually is. Each leg is handed a buffer whose bytes live
+/// in storage of the driver's own, so the address a leg lexes at is not the address the leg before
+/// it lexed at and is not the source's — which is what makes ***does state survive a change of
+/// buffer*** the thing under test rather than *does state survive a change of length*.
+///
+/// The buffers are keyed by the input's **position in the corpus**, so build this from the same
+/// inputs, in the same order, as the [`Harness`].
+///
+/// # Cost
+///
+/// One copy per admitted cut, so Θ(n²) bytes for an input of n units, held for as long as the
+/// driver lives. A conformance corpus is small by construction — every tier here is already Θ(n²)
+/// in lexing for the same reason.
+pub struct OwnedChunks<S>
+where
+  S: ToOwned + ?Sized,
+{
+  /// `bufs[idx][k]` is the buffer for cut `k` of input `idx`, or `None` where the cut rule refused
+  /// it. Only `k < len` is stored: the last leg of a schedule is the source itself.
+  bufs: Vec<Vec<Option<S::Owned>>>,
+}
+
+impl<S> core::fmt::Debug for OwnedChunks<S>
+where
+  S: ToOwned + ?Sized,
+{
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    // The buffers themselves are the corpus repeated Θ(n) times; what a reader wants is the shape.
+    f.debug_struct("OwnedChunks")
+      .field("inputs", &self.bufs.len())
+      .field(
+        "buffers",
+        &self
+          .bufs
+          .iter()
+          .map(|per| per.iter().filter(|b| b.is_some()).count())
+          .sum::<usize>(),
+      )
+      .finish()
+  }
+}
+
+impl<S> OwnedChunks<S>
+where
+  S: Source<usize> + ToOwned + ?Sized + core::ops::Index<core::ops::RangeTo<usize>, Output = S>,
+{
+  /// Copies every prefix of every input that the source admits a cut at — the widest rule there is,
+  /// and the one to use unless the driver being modelled genuinely cannot end a chunk somewhere.
+  #[must_use]
+  pub fn over<'a, I>(inputs: I) -> Self
+  where
+    I: IntoIterator<Item = &'a S>,
+    S: 'a,
+  {
+    Self::over_cuts(inputs, |_, _| true)
+  }
+
+  /// Copies every prefix of every input that the source admits a cut at **and** `admits` accepts.
+  ///
+  /// # A cut rule is an exemption, and it is one you write
+  ///
+  /// [`Source::is_boundary`] answers *where can this source be sliced*, which for `[u8]` is every
+  /// byte index — including one inside a UTF-8 code point. A driver whose chunks are always code
+  /// point aligned never delivers that buffer, so a lexer written for it can be reported diverging
+  /// on a schedule its driver cannot produce: the kit convicting a lexer of something that is not
+  /// the lexer's, which is the one failure a test kit can least afford (#295). This is the channel
+  /// for saying which cuts are real.
+  ///
+  /// It is also, unavoidably, a channel for saying *do not test the cut where I am broken*. The kit
+  /// narrows that as far as it can and no further: the rule sees only `(src, k)` and never the
+  /// lexer, it can only remove cuts the source already admits, a rule that admits nothing below the
+  /// source length is **refused** rather than certified, and [`RefillCoverage`] hands back the
+  /// number of cuts the run actually drove against the number the source offered, so a suspiciously
+  /// small one is a number rather than a silence. What no kit can do is tell a driver's real chunk
+  /// rule from a convenient one. That is why this is a value in the caller's own source, reviewable
+  /// the way [`Budget::Unbounded`](crate::input::Budget::Unbounded) is, rather than a knob with a
+  /// permissive default.
+  #[must_use]
+  pub fn over_cuts<'a, I, F>(inputs: I, admits: F) -> Self
+  where
+    I: IntoIterator<Item = &'a S>,
+    S: 'a,
+    F: Fn(&S, usize) -> bool,
+  {
+    Self {
+      bufs: inputs
+        .into_iter()
+        .map(|src| {
+          let len = <S as Source<usize>>::len(src);
+          (0..len)
+            .map(|k| (src.is_boundary(k) && admits(src, k)).then(|| src[..k].to_owned()))
+            .collect()
+        })
+        .collect(),
+    }
+  }
+}
+
+impl<'inp, S> RefillDriver<'inp, S> for &'inp OwnedChunks<S>
+where
+  S: Source<usize> + ToOwned + ?Sized,
+{
+  fn buffer(&self, idx: usize, _src: &'inp S, k: usize) -> Option<&'inp S> {
+    // Copied out of `&self` first: `Self` is itself a `&'inp _`, and a field read through the outer
+    // borrow would hand back the outer borrow's lifetime rather than `'inp`.
+    let owner: &'inp OwnedChunks<S> = self;
+    owner
+      .bufs
+      .get(idx)?
+      .get(k)?
+      .as_ref()
+      .map(core::borrow::Borrow::borrow)
+  }
+}
+
+/// What a [`run_refill`](Harness::run_refill) run actually reached: the cut positions it drove
+/// schedules from, the positions the sources offered it, and the legs that really did change
+/// allocation.
+///
+/// This exists because a [`RefillDriver`] is allowed to narrow the cut set and the kit cannot tell
+/// a driver's real chunk rule from a convenient one. What it can do is hand the numbers back, so a
+/// run that covered three cuts out of ninety is a fact in the caller's test rather than a silence.
+///
+/// # What is and is not counted
+///
+/// A **cut** here is a position `k` strictly below the source length. The source length itself is
+/// every schedule's last leg unconditionally — it is what the oracle comparison is against — so
+/// counting it would add one to every input and distinguish nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RefillCoverage {
+  /// One entry per corpus input, in corpus order.
+  per_input: Vec<InputCoverage>,
+}
+
+/// One input's share of a [`RefillCoverage`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct InputCoverage {
+  exercised: usize,
+  admissible: usize,
+  relocated: Option<usize>,
+}
+
+impl RefillCoverage {
+  /// The number of corpus inputs the run covered.
+  #[must_use]
+  pub fn inputs(&self) -> usize {
+    self.per_input.len()
+  }
+
+  /// Cut positions the run drove schedules from, over the whole corpus.
+  #[must_use]
+  pub fn exercised(&self) -> usize {
+    self.per_input.iter().map(|i| i.exercised).sum()
+  }
+
+  /// Cut positions the **sources** offered, over the whole corpus: what a driver that narrows
+  /// nothing would have reached, and the number [`exercised`](Self::exercised) is read against.
+  #[must_use]
+  pub fn admissible(&self) -> usize {
+    self.per_input.iter().map(|i| i.admissible).sum()
+  }
+
+  /// Exercised cuts whose buffer sat at a **different address** from the source's — the number that
+  /// separates a change of buffer from a change of length.
+  ///
+  /// `None` when [`L::Source`](Lexer::Source) cannot answer an address comparison honestly, which
+  /// is every source whose [`REFERENT_IS_BYTES`](Source::REFERENT_IS_BYTES) is `false`: for a sized
+  /// backing `&Self` addresses the pointer variable and not the bytes, so an inequality there
+  /// proves nothing and the crate refuses to read one anywhere else either.
+  ///
+  /// A run under [`SameAllocation`] reports `Some(0)` over such a source. That is the [high] the
+  /// number exists to make visible: every leg shared one base address, so nothing about a *change*
+  /// of buffer was tested.
+  #[must_use]
+  pub fn relocated(&self) -> Option<usize> {
+    self
+      .per_input
+      .iter()
+      .try_fold(0, |acc, i| Some(acc + i.relocated?))
+  }
+
+  /// [`exercised`](Self::exercised) for one input, by corpus position.
+  #[must_use]
+  pub fn exercised_at(&self, idx: usize) -> Option<usize> {
+    self.per_input.get(idx).map(|i| i.exercised)
+  }
+
+  /// [`admissible`](Self::admissible) for one input, by corpus position.
+  #[must_use]
+  pub fn admissible_at(&self, idx: usize) -> Option<usize> {
+    self.per_input.get(idx).map(|i| i.admissible)
   }
 }
 
@@ -2977,56 +3296,168 @@ fn check_resume<'inp, L>(
   }
 }
 
-/// The refill tier for one source: derive the cut schedules and drive every one of them.
+/// The refill tier for one source: resolve the driver's buffers, derive the cut schedules over the
+/// cuts it admitted, and drive every one of them.
 ///
 /// # The shapes are derived, and this is the list
 ///
-/// A cut is any position a buffer can honestly end at, which is every source-unit boundary — so
-/// the named shapes (inside a token, at a token boundary, inside trivia, at end of input, at
-/// offset zero) are covered by construction rather than by being listed. What is enumerated here
-/// is the *schedule* around a cut, because a schedule is not derivable from a position:
+/// A cut is any position the source can be sliced at **and** the driver can end a chunk at — so the
+/// named shapes (inside a token, at a token boundary, inside trivia, at end of input, at offset
+/// zero) are covered by construction rather than by being listed, for a driver that narrows
+/// nothing. What is enumerated here is the *schedule* around a cut, because a schedule is not
+/// derivable from a position:
 ///
 /// | schedule | what only it reaches |
 /// |---|---|
 /// | `[k, len]` | one refill delivering the whole tail — the shape a driver takes on the last chunk |
 /// | `[k, k, len]` | a refill that **adds nothing**: a driver handed a zero-byte chunk re-drives a buffer that grew by nothing, so the carried pair has to survive being spent on it |
-/// | `[k, k', len]` | a minimal refill of one source unit and then the rest: two carries from one cut, the first landing a single unit further on |
-/// | every boundary | the tail one unit at a time, from the empty buffer to the whole source — the state crossing as many buffers as the source has boundaries |
+/// | `[k, k', len]` | a minimal refill of one admitted cut and then the rest: two carries from one cut, the first landing at the driver's next legal chunk end |
+/// | every admitted cut | the tail one chunk at a time, from the first admitted buffer to the whole source — the state crossing as many buffers as the driver has legal chunk ends |
 ///
 /// Every schedule ends at the source length and that leg is **final**, so each one reaches the
 /// same equality against the complete-input parse.
 ///
 /// The cost is one leg per cut per schedule shape, and a leg lexes at most the source: Θ(n²) raw
 /// lexing per input, the order [`check_partial`] and [`check_resume`] already cost.
-fn check_refill<'inp, L>(
+fn check_refill<'inp, L, D>(
   idx: usize,
   src: &'inp L::Source,
   reference: &[Item<'inp, L>],
   budget: usize,
-) where
+  driver: &D,
+) -> InputCoverage
+where
   L: Lexer<'inp, Offset = usize>,
-  L::Source: core::ops::Index<core::ops::RangeTo<usize>, Output = L::Source>,
   L::Token: PartialEq,
   <L::Token as Token<'inp>>::Error: PartialEq,
+  D: RefillDriver<'inp, L::Source>,
 {
   let len = src.len();
-  // A cut that is not a source-unit boundary is not a buffer anybody can hold — `str[..k]` does
-  // not exist mid-code-point — so it is not a cut. [`check_partial`] skips the same positions.
-  let cuts: Vec<usize> = (0..=len).filter(|k| src.is_boundary(*k)).collect();
+  let (buffers, coverage) = resolve_buffers::<L, D>(idx, src, driver);
+  // The source length closes every schedule and is not a cut anybody chose, so it is appended here
+  // rather than counted in the coverage above.
+  let mut cuts: Vec<usize> = (0..len).filter(|k| buffers[*k].is_some()).collect();
+  cuts.push(len);
 
   for (i, &k) in cuts.iter().enumerate() {
     if k < len {
-      refill_schedule::<L>(idx, src, reference, &[k, len], budget);
+      refill_schedule::<L>(idx, src, reference, &buffers, &[k, len], budget);
     }
-    refill_schedule::<L>(idx, src, reference, &[k, k, len], budget);
+    refill_schedule::<L>(idx, src, reference, &buffers, &[k, k, len], budget);
     if let Some(&next) = cuts.get(i + 1)
       && next < len
     {
-      refill_schedule::<L>(idx, src, reference, &[k, next, len], budget);
+      refill_schedule::<L>(idx, src, reference, &buffers, &[k, next, len], budget);
     }
   }
 
-  refill_schedule::<L>(idx, src, reference, &cuts, budget);
+  refill_schedule::<L>(idx, src, reference, &buffers, &cuts, budget);
+  coverage
+}
+
+/// Asks the driver for every buffer this input's schedules can be built out of, once per cut, and
+/// refuses anything that is not a content-preserving prefix.
+///
+/// # Why the driver is consulted here and never again
+///
+/// A schedule reaches the same cut from several shapes, so asking per leg would ask the same
+/// question up to four times and let a driver whose answer drifts between calls put two different
+/// buffers into one comparison. Resolving the whole table first makes "the driver is a function of
+/// `(idx, src, k)`" a property of the kit rather than an obligation on the implementor.
+///
+/// # Why `is_boundary` is checked before the driver is asked and not after
+///
+/// A driver can then only ever *narrow* the cut set. If the source cannot be sliced at `k` there is
+/// no buffer for the kit to compare against, so a driver answering `Some` there could not be
+/// checked — and an unverifiable buffer is exactly what turns every later verdict into noise.
+fn resolve_buffers<'inp, L, D>(
+  idx: usize,
+  src: &'inp L::Source,
+  driver: &D,
+) -> (Vec<Option<&'inp L::Source>>, InputCoverage)
+where
+  L: Lexer<'inp, Offset = usize>,
+  D: RefillDriver<'inp, L::Source>,
+{
+  let len = src.len();
+  let mut buffers: Vec<Option<&'inp L::Source>> = vec![None; len];
+  let mut admissible = 0usize;
+  let mut exercised = 0usize;
+  let mut relocated = 0usize;
+
+  for k in 0..len {
+    // A cut that is not a source-unit boundary is not a buffer anybody can hold — `str[..k]` does
+    // not exist mid-code-point — so it is not a cut. [`check_partial`] skips the same positions.
+    if !src.is_boundary(k) {
+      continue;
+    }
+    admissible += 1;
+    let Some(buf) = driver.buffer(idx, src, k) else {
+      continue;
+    };
+    assert_supplied_prefix::<L>(idx, src, k, buf);
+    // Sound only where `&Self` addresses the bytes; see `RefillCoverage::relocated` for why the
+    // count is `None` rather than zero everywhere else.
+    if !core::ptr::addr_eq(core::ptr::from_ref(buf), core::ptr::from_ref(src)) {
+      relocated += 1;
+    }
+    buffers[k] = Some(buf);
+    exercised += 1;
+  }
+
+  assert!(
+    admissible == 0 || exercised > 0,
+    "tokora conformance [input #{idx} refill-coverage] the RefillDriver admitted none of the \
+     {admissible} cut positions this source offers, so every schedule is the whole source in one \
+     sealed leg and no lexer state ever crosses a change of buffer. This input certified nothing, \
+     and the kit refuses rather than report a pass it did not earn — it is not a verdict on the \
+     lexer, which has not been convicted of anything. Widen the cut rule, or take this input out \
+     of the refill corpus."
+  );
+
+  let relocated = <L::Source as Source<usize>>::REFERENT_IS_BYTES.then_some(relocated);
+  (
+    buffers,
+    InputCoverage {
+      exercised,
+      admissible,
+      relocated,
+    },
+  )
+}
+
+/// Refuses a supplied buffer that is not exactly the first `k` units of the source.
+///
+/// This is the kit declining to draw a verdict, in [`refuse_non_reflexive`]'s posture and for the
+/// same reason: everything downstream would be a comparison against bytes the oracle never lexed,
+/// so reporting the divergence it produces would convict the lexer of the driver's mistake.
+fn assert_supplied_prefix<'inp, L>(
+  idx: usize,
+  src: &'inp L::Source,
+  k: usize,
+  buf: &'inp L::Source,
+) where
+  L: Lexer<'inp, Offset = usize>,
+{
+  let got_len = <L::Source as Source<usize>>::len(buf);
+  assert!(
+    got_len == k,
+    "tokora conformance [input #{idx} refill-buffer] the RefillDriver returned a buffer of \
+     {got_len} units for cut k={k}. A buffer for cut k is the first k units of the source and \
+     nothing else — the kit refuses it rather than lex it, because a leg over the wrong bytes \
+     makes every comparison after it meaningless. This is not a verdict on the lexer."
+  );
+  let want: <L::Source as Source<usize>>::Slice<'inp> = src
+    .slice(..k)
+    .expect("the kit asks only at positions `Source::is_boundary` admitted");
+  let got: <L::Source as Source<usize>>::Slice<'inp> = buf.as_slice();
+  assert!(
+    got == want,
+    "tokora conformance [input #{idx} refill-buffer] the RefillDriver returned a buffer for cut \
+     k={k} whose contents differ from the source: expected {want:?}, got {got:?}. A refill \
+     appends; it never rewrites what has already arrived. The kit refuses it rather than lex it — \
+     this is not a verdict on the lexer."
+  );
 }
 
 /// Drives one refill schedule end to end and asserts the committed items against the oracle.
@@ -3039,11 +3470,11 @@ fn refill_schedule<'inp, L>(
   idx: usize,
   src: &'inp L::Source,
   reference: &[Item<'inp, L>],
+  buffers: &[Option<&'inp L::Source>],
   schedule: &[usize],
   budget: usize,
 ) where
   L: Lexer<'inp, Offset = usize>,
-  L::Source: core::ops::Index<core::ops::RangeTo<usize>, Output = L::Source>,
   L::Token: PartialEq,
   <L::Token as Token<'inp>>::Error: PartialEq,
 {
@@ -3055,7 +3486,7 @@ fn refill_schedule<'inp, L>(
   );
   let last = schedule.len() - 1;
   let mut carried = (
-    L::new(refill_buffer::<L>(src, len, schedule[0])).into_state(),
+    L::new(refill_buffer::<L>(src, buffers, len, schedule[0])).into_state(),
     0usize,
   );
   let mut committed: Vec<Item<'inp, L>> = Vec::new();
@@ -3065,7 +3496,7 @@ fn refill_schedule<'inp, L>(
       idx,
       schedule,
       leg,
-      refill_buffer::<L>(src, len, k),
+      refill_buffer::<L>(src, buffers, len, k),
       // The driver states the end of the stream on the last chunk, and it is the last chunk that
       // makes the holdback inert — the same seal a `Partial` input gets from `Input::seal`.
       leg == last,
@@ -3079,18 +3510,30 @@ fn refill_schedule<'inp, L>(
   assert_refill_eq::<L>(idx, schedule, reference, &committed);
 }
 
-/// The driver's buffer at `k`: the first `k` units of `src`, and `src` **itself** once `k` reaches
-/// its length.
+/// The buffer a leg lexes at `k`: what the [`RefillDriver`] handed over for that cut, and `src`
+/// **itself** once `k` reaches its length.
 ///
-/// The identity matters at the last leg only, and there it is [`check_partial`]'s: the final leg
-/// lexes the value the oracle lexed rather than a slice that merely equals it, so an exotic
-/// [`Source`] whose `[..len]` is not itself cannot make the last comparison mean something else.
-fn refill_buffer<'inp, L>(src: &'inp L::Source, len: usize, k: usize) -> &'inp L::Source
+/// The identity at the last leg is [`check_partial`]'s: the final leg lexes the value the oracle
+/// lexed rather than a copy that merely equals it, so an exotic [`Source`] whose prefix at its own
+/// length is not itself cannot make the last comparison mean something else. It is also why the
+/// driver is never asked about the source length — there is one right answer and the kit already
+/// holds it.
+fn refill_buffer<'inp, L>(
+  src: &'inp L::Source,
+  buffers: &[Option<&'inp L::Source>],
+  len: usize,
+  k: usize,
+) -> &'inp L::Source
 where
   L: Lexer<'inp, Offset = usize>,
-  L::Source: core::ops::Index<core::ops::RangeTo<usize>, Output = L::Source>,
 {
-  if k == len { src } else { &src[..k] }
+  if k == len {
+    return src;
+  }
+  buffers[k].expect(
+    "tokora conformance: a refill schedule is built only out of cuts the RefillDriver supplied a \
+     buffer for",
+  )
 }
 
 /// One buffer of a refill schedule: resume from the carried pair, commit what a partial driver

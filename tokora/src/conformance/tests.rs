@@ -4,7 +4,7 @@
 
 use core::convert::Infallible;
 
-use super::Harness;
+use super::{Harness, OwnedChunks, SameAllocation};
 use crate::{Lexer, SimpleSpan, Token};
 
 // ── Shared single-kind token for the hand-rolled fixtures ──────────────────────────
@@ -2325,7 +2325,7 @@ fn a_conforming_per_byte_lexer_over_100kb_outruns_a_32_bit_counter() {
 
 #[cfg(feature = "logos_0_16")]
 mod logos_adapter {
-  use super::Harness;
+  use super::{Harness, OwnedChunks};
   use crate::Token;
   use crate::lexer::LogosLexer;
 
@@ -2450,8 +2450,10 @@ mod logos_adapter {
   fn the_logos_adapter_passes_the_refill_tier() {
     // The adapter's `State` is the vocabulary's logos `Extras` plus the probe channel, so a
     // carried state is a real value here rather than a `()`.
-    Harness::<SynLexer<'_>>::over(["ab 12 cd", "one two three", "42", "  x  ", ""]).run_refill();
-    Harness::<TileLogosLexer<'_>>::over(["ab 12 cd", "one two", "42"]).run_refill();
+    let syn = ["ab 12 cd", "one two three", "42", "  x  ", ""];
+    Harness::<SynLexer<'_>>::over(syn).run_refill(&OwnedChunks::over(syn));
+    let tile = ["ab 12 cd", "one two", "42"];
+    Harness::<TileLogosLexer<'_>>::over(tile).run_refill(&OwnedChunks::over(tile));
   }
 }
 
@@ -2470,7 +2472,7 @@ mod logos_adapter {
 // committed it. Append the missing byte and the complete parse says `Float@0..3`.
 #[cfg(feature = "logos_0_16")]
 mod prefix_backtracking {
-  use super::Harness;
+  use super::{Harness, OwnedChunks};
   use crate::Token;
   use crate::lexer::LogosLexer;
 
@@ -2600,10 +2602,11 @@ mod prefix_backtracking {
     // schedule re-enters at the pair it left and the tier's verdict rests entirely on the final,
     // sealed buffer. That is sound and vacuous in equal measure, and worth having as a cell: an
     // `Unbounded` claim must not be able to red.
-    Harness::<DefaultLexer<'_>>::over(["1.5", "5e-3", "1.", "5e", "5ex"]).run_refill();
+    let corpus = ["1.5", "5e-3", "1.", "5e", "5ex"];
+    Harness::<DefaultLexer<'_>>::over(corpus).run_refill(&OwnedChunks::over(corpus));
     // And the corpus-shaped limitation is the same here as it is for `run_partial`: the same lie,
     // on the corpus that omits the source it diverges on, is not falsified by this tier either.
-    Harness::<LyingLexer<'_>>::over(["1."]).run_refill();
+    Harness::<LyingLexer<'_>>::over(["1."]).run_refill(&OwnedChunks::over(["1."]));
   }
 }
 
@@ -2623,7 +2626,7 @@ mod prefix_backtracking {
 // `State::take_probe` puts on the recorder, and the two cells below are the check on it.
 #[cfg(feature = "logos_0_16")]
 mod recorded_value {
-  use super::Harness;
+  use super::{Harness, OwnedChunks};
   use crate::lexer::LogosLexer;
   use crate::{Probe, State, Token};
 
@@ -2741,7 +2744,8 @@ mod recorded_value {
 
   #[test]
   fn an_honest_recorded_value_passes_the_refill_tier() {
-    Harness::<HonestLexer<'_>>::over(["1.5", "1.", "12 34", "1.5 2.5"]).run_refill();
+    let corpus = ["1.5", "1.", "12 34", "1.5 2.5"];
+    Harness::<HonestLexer<'_>>::over(corpus).run_refill(&OwnedChunks::over(corpus));
   }
 
   #[test]
@@ -5355,12 +5359,20 @@ type LosesTheFact<'a> = CommentLexer<'a, true>;
 
 /// The two pql witnesses, and every source around them.
 const REFILL_CORPUS: [&str; 7] = ["x #c\n0b1", "x #cd", "x #c", "#", "a 0b10 b", "", "0b"];
+/// The buffer table one schedule cell drives over: exactly what the tier resolves for itself,
+/// asked for here because these cells drive a single schedule rather than the entry point.
+fn refill_table<'a, L>(src: &'a str, chunks: &'a OwnedChunks<str>) -> Vec<Option<&'a str>>
+where
+  L: Lexer<'a, Offset = usize, Source = str>,
+{
+  super::resolve_buffers::<L, &'a OwnedChunks<str>>(0, src, &chunks).0
+}
 
 #[test]
 fn the_comment_lexer_that_keeps_the_fact_passes_every_tier() {
   Harness::<KeepsTheFact<'_>>::over(REFILL_CORPUS).run();
   Harness::<KeepsTheFact<'_>>::over(REFILL_CORPUS).run_partial();
-  Harness::<KeepsTheFact<'_>>::over(REFILL_CORPUS).run_refill();
+  Harness::<KeepsTheFact<'_>>::over(REFILL_CORPUS).run_refill(&OwnedChunks::over(REFILL_CORPUS));
 }
 
 #[test]
@@ -5381,7 +5393,16 @@ fn witness_one_a_guarded_arm_that_fails_on_a_stale_reader() {
   let src = "x #c\n0b1";
   let budget = 8 * src.len() + 64;
   let reference = super::lex_run::<LosesTheFact<'_>>(0, src, budget);
-  super::refill_schedule::<LosesTheFact<'_>>(0, src, &reference, &[4, src.len()], budget);
+  let chunks = OwnedChunks::over([src]);
+  let buffers = refill_table::<LosesTheFact<'_>>(src, &chunks);
+  super::refill_schedule::<LosesTheFact<'_>>(
+    0,
+    src,
+    &reference,
+    &buffers,
+    &[4, src.len()],
+    budget,
+  );
 }
 
 #[test]
@@ -5393,7 +5414,16 @@ fn witness_two_an_ident_lexed_out_of_comment_text() {
   let src = "x #cd";
   let budget = 8 * src.len() + 64;
   let reference = super::lex_run::<LosesTheFact<'_>>(0, src, budget);
-  super::refill_schedule::<LosesTheFact<'_>>(0, src, &reference, &[4, src.len()], budget);
+  let chunks = OwnedChunks::over([src]);
+  let buffers = refill_table::<LosesTheFact<'_>>(src, &chunks);
+  super::refill_schedule::<LosesTheFact<'_>>(
+    0,
+    src,
+    &reference,
+    &buffers,
+    &[4, src.len()],
+    budget,
+  );
 }
 
 #[test]
@@ -5401,7 +5431,7 @@ fn witness_two_an_ident_lexed_out_of_comment_text() {
 fn the_refill_tier_reds_the_defect_from_its_own_entry_point() {
   // The cells above drive one schedule each so the witness is exactly the pql probe. The entry
   // point derives its cuts, so it reaches the same defect without being told where it is.
-  Harness::<LosesTheFact<'_>>::over(REFILL_CORPUS).run_refill();
+  Harness::<LosesTheFact<'_>>::over(REFILL_CORPUS).run_refill(&OwnedChunks::over(REFILL_CORPUS));
 }
 
 #[test]
@@ -5411,19 +5441,613 @@ fn a_refill_that_adds_nothing_is_not_a_verdict() {
   let src = "x #c\n0b1";
   let budget = 8 * src.len() + 64;
   let reference = super::lex_run::<KeepsTheFact<'_>>(0, src, budget);
-  super::refill_schedule::<KeepsTheFact<'_>>(0, src, &reference, &[4, 4, 4, src.len()], budget);
+  let chunks = OwnedChunks::over([src]);
+  let buffers = refill_table::<KeepsTheFact<'_>>(src, &chunks);
+  super::refill_schedule::<KeepsTheFact<'_>>(
+    0,
+    src,
+    &reference,
+    &buffers,
+    &[4, 4, 4, src.len()],
+    budget,
+  );
 }
 
 #[test]
 fn every_conforming_hand_rolled_fixture_passes_the_refill_tier() {
   // The other half of the acceptance: the tier must not be stricter than the contract. Every
-  // hand-rolled fixture this file certifies elsewhere is driven through it over the same corpus.
-  Harness::<TileLexer<'_>>::over(["hello world", "a", "", "x y  z", "café"]).run_refill();
-  Harness::<SyntacticLexer<'_>>::over(["ab cd ef", "one  two", "solo", ""]).run_refill();
-  Harness::<FaithfulErrLexer<'_>>::over(["a?b", "??", "?", "", "ab?cd"]).run_refill();
-  Harness::<OwnBytePayloadLexer<'_>>::over(["abz", "a", "", "café"]).run_refill();
-  Harness::<TickingErrLexer<'_>>::over(["a?b", "??", "?", ""]).run_refill();
-  Harness::<RepeatErrLexer<'_, 72>>::new("a").run_refill();
-  Harness::<RepeatErrLexer<'_, 100>>::new("abcdefgh").run_refill();
-  Harness::<NanPayloadLexer<'_>>::over(["ab", "a", ""]).run_refill();
+  // hand-rolled fixture this file certifies elsewhere is driven through it over the same corpus,
+  // and over REAL buffers — the same corpus under `SameAllocation` was what round 1 shipped.
+  let tile = ["hello world", "a", "", "x y  z", "café"];
+  Harness::<TileLexer<'_>>::over(tile).run_refill(&OwnedChunks::over(tile));
+  let syntactic = ["ab cd ef", "one  two", "solo", ""];
+  Harness::<SyntacticLexer<'_>>::over(syntactic).run_refill(&OwnedChunks::over(syntactic));
+  let faithful = ["a?b", "??", "?", "", "ab?cd"];
+  Harness::<FaithfulErrLexer<'_>>::over(faithful).run_refill(&OwnedChunks::over(faithful));
+  let own_byte = ["abz", "a", "", "café"];
+  Harness::<OwnBytePayloadLexer<'_>>::over(own_byte).run_refill(&OwnedChunks::over(own_byte));
+  let ticking = ["a?b", "??", "?", ""];
+  Harness::<TickingErrLexer<'_>>::over(ticking).run_refill(&OwnedChunks::over(ticking));
+  Harness::<RepeatErrLexer<'_, 72>>::new("a").run_refill(&OwnedChunks::over(["a"]));
+  Harness::<RepeatErrLexer<'_, 100>>::new("abcdefgh").run_refill(&OwnedChunks::over(["abcdefgh"]));
+  let nan = ["ab", "a", ""];
+  Harness::<NanPayloadLexer<'_>>::over(nan).run_refill(&OwnedChunks::over(nan));
+}
+
+// ── [high] The legs have to change buffer, not just length ──────────────────────────
+
+/// The state of [`PointerStateLexer`]: where the buffer it was born over lives.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct BaseAddr {
+  base: Option<usize>,
+}
+
+impl crate::state::State for BaseAddr {
+  type Error = Infallible;
+
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+}
+
+/// A lexer whose `State` carries something derived from **where** the bytes are, and which reports
+/// a carried state arriving over a different allocation as an error.
+///
+/// It is not exotic: an interner keyed by address, a cached slice, or a raw pointer held for a
+/// fast path all have this shape, and every one of them is a real defect under a driver whose
+/// `String` reallocated on growth. It is the defect the tier's own subject sentence names, and
+/// round 1 certified it — see the cell below.
+struct PointerStateLexer<'a> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: BaseAddr,
+  moved: bool,
+}
+
+impl<'a> Lexer<'a> for PointerStateLexer<'a> {
+  type State = BaseAddr;
+  type Source = str;
+  type Token = RTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: BaseAddr {
+        base: Some(src.as_ptr() as usize),
+      },
+      moved: false,
+    }
+  }
+  fn with_state(src: &'a str, state: BaseAddr) -> Self {
+    let here = src.as_ptr() as usize;
+    let moved = matches!(state.base, Some(b) if b != here);
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: BaseAddr { base: Some(here) },
+      moved,
+    }
+  }
+  fn check(&self) -> Result<(), RErr> {
+    Ok(())
+  }
+  fn state(&self) -> &BaseAddr {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut BaseAddr {
+    &mut self.state
+  }
+  fn into_state(self) -> BaseAddr {
+    self.state
+  }
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<RTok, RErr>> {
+    let b = self.src.as_bytes();
+    let len = b.len();
+    self.start = self.end;
+    while self.start < len && b[self.start] == b' ' {
+      self.start += 1;
+    }
+    if self.start >= len {
+      self.end = self.start;
+      return None;
+    }
+    let mut e = self.start;
+    while e < len && b[e] != b' ' {
+      e += 1;
+    }
+    self.end = e;
+    if self.moved {
+      return Some(Err(RErr::Unexpected));
+    }
+    Some(Ok(RTok::Ident))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+const POINTER_CORPUS: [&str; 2] = ["ab cd", "one two"];
+
+#[test]
+fn same_allocation_certifies_a_lexer_that_keys_on_the_buffer_address() {
+  // The [high], executable. Every leg is `&src[..k]`, so every leg shares one base address and the
+  // buffer never changes — only its length does. This lexer survives all of it, and fails on the
+  // first refill any real driver performs.
+  Harness::<PointerStateLexer<'_>>::over(POINTER_CORPUS).run();
+  Harness::<PointerStateLexer<'_>>::over(POINTER_CORPUS).run_partial();
+  let coverage = Harness::<PointerStateLexer<'_>>::over(POINTER_CORPUS).run_refill(SameAllocation);
+  // And the reduction is a number rather than a footnote: every cut exercised, not one relocated.
+  assert_eq!(coverage.exercised(), coverage.admissible());
+  assert_eq!(coverage.relocated(), Some(0));
+}
+
+#[test]
+#[should_panic(expected = "refill-equivalence")]
+fn owned_chunks_red_a_lexer_that_keys_on_the_buffer_address() {
+  // The other half of the same cell: the identical lexer, the identical corpus, the identical
+  // cuts. The only thing that changed is that a leg's bytes live in the driver's storage, so the
+  // pair really does cross a change of buffer.
+  Harness::<PointerStateLexer<'_>>::over(POINTER_CORPUS)
+    .run_refill(&OwnedChunks::over(POINTER_CORPUS));
+}
+
+#[test]
+fn owned_chunks_relocate_every_cut_they_exercise() {
+  let coverage = Harness::<KeepsTheFact<'_>>::over(REFILL_CORPUS)
+    .run_refill(&OwnedChunks::over(REFILL_CORPUS));
+  // The corpus is ASCII, so every position below each source's length is a cut, and the driver
+  // narrows none of them: 8 + 5 + 4 + 1 + 8 + 0 + 2.
+  assert_eq!(coverage.inputs(), 7);
+  assert_eq!(coverage.admissible(), 28);
+  assert_eq!(coverage.exercised(), 28);
+  assert_eq!(coverage.relocated(), Some(28));
+  assert_eq!(coverage.exercised_at(0), Some(8));
+  assert_eq!(coverage.admissible_at(5), Some(0));
+  assert_eq!(coverage.exercised_at(7), None);
+}
+
+// ── [medium] The source's boundaries are not necessarily the driver's ────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum BKind {
+  Char,
+  Word,
+}
+
+impl core::fmt::Display for BKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    match self {
+      Self::Char => f.write_str("char"),
+      Self::Word => f.write_str("word"),
+    }
+  }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum BTok {
+  Char,
+  Word,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct BStray;
+
+impl Token<'_> for BTok {
+  type Kind = BKind;
+  type Error = BStray;
+
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::WithinSpan;
+
+  fn kind(&self) -> BKind {
+    match self {
+      Self::Char => BKind::Char,
+      Self::Word => BKind::Word,
+    }
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// How many bytes the UTF-8 sequence starting with `lead` occupies, or `0` when `lead` cannot
+/// start one.
+fn utf8_len(lead: u8) -> usize {
+  match lead {
+    0x00..=0x7f => 1,
+    0xc2..=0xdf => 2,
+    0xe0..=0xef => 3,
+    0xf0..=0xf4 => 4,
+    _ => 0,
+  }
+}
+
+/// Whether `k` is a UTF-8 code point boundary of `src` — the cut rule of a driver that validates
+/// what it appends, which is the only kind of driver a UTF-8-decoding byte lexer ever meets.
+fn utf8_aligned(src: &[u8], k: usize) -> bool {
+  k == 0 || k >= src.len() || (src[k] & 0xc0) != 0x80
+}
+
+/// A `[u8]` lexer that decodes UTF-8 code points, written for a driver whose chunks are always
+/// code point aligned: a buffer that ends mid-sequence is a state it was never built to be in, so
+/// it treats the stump as consumed and stops.
+///
+/// Every item it emits reports an honest read frontier, so a partial driver withholds everything
+/// it decided against the buffer end. What it cannot report — because the trait has no channel for
+/// it — is *I could not decide, and I consumed nothing*: the post-exhaustion span is the only thing
+/// it hands a resuming driver, and the contract lets that span cover bytes it consumed and skipped.
+struct Utf8ByteLexer<'a> {
+  src: &'a [u8],
+  start: usize,
+  end: usize,
+  frontier: usize,
+  state: (),
+}
+
+impl<'a> Lexer<'a> for Utf8ByteLexer<'a> {
+  type State = ();
+  type Source = [u8];
+  type Token = BTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a [u8]) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      frontier: 0,
+      state: (),
+    }
+  }
+  fn with_state(src: &'a [u8], (): ()) -> Self {
+    Self::new(src)
+  }
+  fn check(&self) -> Result<(), BStray> {
+    Ok(())
+  }
+  fn state(&self) -> &() {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut () {
+    &mut self.state
+  }
+  fn into_state(self) -> () {
+    self.state
+  }
+  fn source(&self) -> &'a [u8] {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a [u8] {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<BTok, BStray>> {
+    let b = self.src;
+    let len = b.len();
+    self.start = self.end;
+    if self.start >= len {
+      self.end = self.start;
+      return None;
+    }
+    let n = utf8_len(b[self.start]);
+    if n == 0 {
+      // A byte that cannot start a sequence, decided from that byte alone.
+      self.end = self.start + 1;
+      self.frontier = self.start;
+      return Some(Err(BStray));
+    }
+    if self.start + n > len {
+      // The buffer ended inside a code point. This lexer's driver never delivers that, so the
+      // stump is consumed and the scan is over.
+      self.end = len;
+      return None;
+    }
+    self.end = self.start + n;
+    self.frontier = self.end - 1;
+    Some(Ok(BTok::Char))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::ReadTo(self.frontier)
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+const BYTE_CORPUS: [&[u8]; 3] = ["aéb".as_bytes(), "é".as_bytes(), "a€b".as_bytes()];
+
+#[test]
+fn a_utf8_byte_lexer_passes_the_two_tiers_that_never_carry_a_state() {
+  Harness::<Utf8ByteLexer<'_>>::over(BYTE_CORPUS).run();
+  Harness::<Utf8ByteLexer<'_>>::over(BYTE_CORPUS).run_partial();
+}
+
+#[test]
+#[should_panic(expected = "[input #0 refill-equivalence] refills [1, 2, 4], position 1")]
+fn every_byte_index_reds_a_lexer_whose_driver_never_cuts_there() {
+  // The [medium], executable. `Source::is_boundary` for `[u8]` is `k <= len`, so the derived cuts
+  // include one **inside** the two-byte `é` — a buffer a UTF-8-validating driver never delivers.
+  // The lexer is convicted on a schedule its driver cannot produce, which is the one thing a kit
+  // must not do (#295).
+  Harness::<Utf8ByteLexer<'_>>::over(BYTE_CORPUS).run_refill(&OwnedChunks::over(BYTE_CORPUS));
+}
+
+#[test]
+fn the_driver_states_where_its_chunks_end_and_the_false_red_goes() {
+  let chunks = OwnedChunks::over_cuts(BYTE_CORPUS, utf8_aligned);
+  let coverage = Harness::<Utf8ByteLexer<'_>>::over(BYTE_CORPUS).run_refill(&chunks);
+  // And what the rule cost is a number: `[u8]` offers every byte index, the driver ends a chunk at
+  // 3 of "aéb"'s 4, 1 of "é"'s 2, and 3 of "a€b"'s 5.
+  assert_eq!(coverage.admissible(), 11);
+  assert_eq!(coverage.exercised(), 7);
+  assert_eq!(coverage.exercised_at(1), Some(1));
+  assert_eq!(coverage.relocated(), Some(7));
+}
+
+/// Whether the scanner is inside a `#` comment — the one fact [`ByteCommentLexer`] can lose.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct InComment(bool);
+
+impl crate::state::State for InComment {
+  type Error = Infallible;
+
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+}
+
+/// The pql shape over a **byte** source: `#` comments that at end of input either keep the
+/// in-comment fact (`DEFECT == false`) or forget it.
+///
+/// ASCII throughout, so every cut it diverges at is also a UTF-8 code point boundary. That is what
+/// makes it the control for the cell above: a cut rule that admits only code point boundaries must
+/// not be able to save it.
+struct ByteCommentLexer<'a, const DEFECT: bool> {
+  src: &'a [u8],
+  start: usize,
+  end: usize,
+  state: InComment,
+}
+
+impl<'a, const DEFECT: bool> Lexer<'a> for ByteCommentLexer<'a, DEFECT> {
+  type State = InComment;
+  type Source = [u8];
+  type Token = BTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a [u8]) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: InComment(false),
+    }
+  }
+  fn with_state(src: &'a [u8], state: InComment) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), BStray> {
+    Ok(())
+  }
+  fn state(&self) -> &InComment {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut InComment {
+    &mut self.state
+  }
+  fn into_state(self) -> InComment {
+    self.state
+  }
+  fn source(&self) -> &'a [u8] {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a [u8] {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<BTok, BStray>> {
+    let b = self.src;
+    let len = b.len();
+    self.start = self.end;
+
+    if self.state.0 {
+      while self.start < len && b[self.start] != b'\n' {
+        self.start += 1;
+      }
+      if self.start >= len {
+        self.end = self.start;
+        return None;
+      }
+      self.state.0 = false;
+    }
+
+    loop {
+      while self.start < len && (b[self.start] == b' ' || b[self.start] == b'\n') {
+        self.start += 1;
+      }
+      if self.start < len && b[self.start] == b'#' {
+        let mut i = self.start + 1;
+        while i < len && b[i] != b'\n' {
+          i += 1;
+        }
+        if i >= len {
+          // End of input inside a comment: the fork this fixture exists for.
+          self.start = i;
+          self.end = i;
+          if !DEFECT {
+            self.state.0 = true;
+          }
+          return None;
+        }
+        self.start = i;
+        continue;
+      }
+      break;
+    }
+
+    if self.start >= len {
+      self.end = self.start;
+      return None;
+    }
+    let mut e = self.start;
+    while e < len && b[e].is_ascii_lowercase() {
+      e += 1;
+    }
+    if e == self.start {
+      self.end = self.start + 1;
+      return Some(Err(BStray));
+    }
+    self.end = e;
+    Some(Ok(BTok::Word))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+const BYTE_COMMENT_CORPUS: [&[u8]; 3] = [
+  "x #cd".as_bytes(),
+  "x #c\nab".as_bytes(),
+  "ab cd".as_bytes(),
+];
+
+#[test]
+fn a_byte_comment_lexer_that_keeps_the_fact_passes_the_aligned_cut_rule() {
+  let chunks = OwnedChunks::over_cuts(BYTE_COMMENT_CORPUS, utf8_aligned);
+  Harness::<ByteCommentLexer<'_, false>>::over(BYTE_COMMENT_CORPUS).run();
+  Harness::<ByteCommentLexer<'_, false>>::over(BYTE_COMMENT_CORPUS).run_partial();
+  let coverage =
+    Harness::<ByteCommentLexer<'_, false>>::over(BYTE_COMMENT_CORPUS).run_refill(&chunks);
+  // Pure ASCII, so the aligned rule takes nothing away: 5 + 7 + 5.
+  assert_eq!(coverage.admissible(), 17);
+  assert_eq!(coverage.exercised(), 17);
+}
+
+#[test]
+#[should_panic(expected = "refill-equivalence")]
+fn the_aligned_cut_rule_does_not_save_a_byte_lexer_that_forgets() {
+  // The control for the cell above. A cut rule narrow enough to remove the false red must still be
+  // wide enough to keep the true one, or the trade was a false red for a false green.
+  Harness::<ByteCommentLexer<'_, true>>::over(BYTE_COMMENT_CORPUS)
+    .run_refill(&OwnedChunks::over_cuts(BYTE_COMMENT_CORPUS, utf8_aligned));
+}
+
+// ── What the kit checks about a driver, and what it refuses ──────────────────────────
+
+/// A driver that hands back a prefix one unit short of the one it was asked for.
+struct ShortBuffer;
+
+impl<'inp> super::RefillDriver<'inp, str> for ShortBuffer {
+  fn buffer(&self, _idx: usize, src: &'inp str, k: usize) -> Option<&'inp str> {
+    Some(&src[..k.saturating_sub(1)])
+  }
+}
+
+/// A driver whose buffers are the right length and the wrong bytes.
+struct OtherBytes;
+
+impl<'inp> super::RefillDriver<'inp, str> for OtherBytes {
+  fn buffer(&self, _idx: usize, _src: &'inp str, k: usize) -> Option<&'inp str> {
+    Some(&"zzzzzzzz"[..k])
+  }
+}
+
+/// A driver that can never end a chunk anywhere.
+struct NoChunkEnds;
+
+impl<'inp> super::RefillDriver<'inp, str> for NoChunkEnds {
+  fn buffer(&self, _idx: usize, _src: &'inp str, _k: usize) -> Option<&'inp str> {
+    None
+  }
+}
+
+#[test]
+#[should_panic(expected = "[input #0 refill-buffer] the RefillDriver returned a buffer of 0 units")]
+fn a_buffer_of_the_wrong_length_is_refused_and_not_lexed() {
+  Harness::<TileLexer<'_>>::new("ab cd").run_refill(ShortBuffer);
+}
+
+#[test]
+#[should_panic(expected = "[input #0 refill-buffer] the RefillDriver returned a buffer for cut")]
+fn a_buffer_of_the_wrong_bytes_is_refused_and_not_lexed() {
+  Harness::<TileLexer<'_>>::new("ab cd").run_refill(OtherBytes);
+}
+
+#[test]
+#[should_panic(expected = "[input #0 refill-coverage] the RefillDriver admitted none of the 5 cut")]
+fn a_driver_that_admits_no_cut_certifies_nothing_and_is_refused() {
+  Harness::<TileLexer<'_>>::new("ab cd").run_refill(NoChunkEnds);
+}
+
+#[test]
+fn a_source_with_no_interior_cut_is_not_refused() {
+  // The floor is "the driver narrowed everything away", not "the source is short". A one-unit
+  // source offers exactly one cut, `k = 0`, and a driver that takes it has certified the only
+  // change of buffer there is.
+  let coverage = Harness::<TileLexer<'_>>::over(["a", ""]).run_refill(&OwnedChunks::over(["a", ""]));
+  assert_eq!(coverage.exercised_at(0), Some(1));
+  assert_eq!(coverage.admissible_at(1), Some(0));
+}
+
+/// A driver that records whether the kit ever asked it about a position the source cannot be
+/// sliced at.
+struct AskWatch {
+  non_boundary: core::cell::Cell<bool>,
+}
+
+impl<'inp> super::RefillDriver<'inp, str> for &AskWatch {
+  fn buffer(&self, _idx: usize, src: &'inp str, k: usize) -> Option<&'inp str> {
+    if !src.is_char_boundary(k) {
+      self.non_boundary.set(true);
+      return None;
+    }
+    Some(&src[..k])
+  }
+}
+
+#[test]
+fn a_driver_can_narrow_the_cut_set_and_can_never_widen_it() {
+  // `is_boundary` is checked BEFORE the driver is asked, so there is no position a driver could
+  // answer `Some` at that the kit could not verify a buffer for. The watch proves the ordering
+  // rather than restating it: "café" has two positions inside its `é` and neither is ever offered.
+  let watch = AskWatch {
+    non_boundary: core::cell::Cell::new(false),
+  };
+  let coverage = Harness::<TileLexer<'_>>::over(["café"]).run_refill(&watch);
+  assert!(!watch.non_boundary.get());
+  // 5 bytes, one of which is a continuation byte: `c`, `a`, `f`, the `é` lead, and offset 0.
+  assert_eq!(coverage.admissible(), 4);
+  assert_eq!(coverage.exercised(), 4);
 }
