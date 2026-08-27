@@ -2570,8 +2570,16 @@ where
   L: Lexer<'inp>,
 {
   /// The committed tokens `next()` handed back, in drain order.
+  ///
+  /// Bounded by the drain loop's own `budget` guard, as it always was.
   tokens: Vec<StreamItem<'inp, L>>,
   /// The lexer errors the layer raised, in the order it raised them.
+  ///
+  /// Bounded by [`LexTally`] and by nothing else, which is the tier's own rule rather than an
+  /// omission: no drain loop counts this vector, and it grows at one site — the layer's refusal,
+  /// which the layer reaches only by *lexing* the region it refuses. Every push therefore charges
+  /// an attempt to the tally first, so the length is at most the tier's attempt ceiling, and the
+  /// tally is the boundary because it is the one counter a checkpoint restore cannot refund.
   errors: Vec<StreamItem<'inp, L>>,
 }
 
@@ -2772,6 +2780,14 @@ fn check_integration<'inp, L>(
 
   // save-early-restore-late: save at 0, consume a prefix, abandon it, then drain the
   // whole stream — which must re-lex the rewound prefix identically.
+  //
+  // EVERY restoring schedule saves at position 0, and the two arms are aligned by that rather
+  // than by a shared rewind. The abandoned prefix's tokens are dropped by never being collected;
+  // its errors are dropped by `ItemRecorder::rewind`, which truncates to the log length the save
+  // captured — zero here, because nothing has been raised yet. A schedule that saved MID-stream
+  // would keep the errors before its save and start its token vector empty, and the two arms
+  // would no longer describe the same suffix; such a schedule owes the drain loop the same
+  // rewind, and this is the note that says so.
   let save_early = observe::<L>(src, &tally, |ir| {
     let ckp = ir.save();
     for _ in 0..3 {
