@@ -615,6 +615,14 @@ where
   /// and that nothing conclusive outranks, is refused, tagged `non-reflexive-payload`, rather than
   /// reported as a conformance failure of the lexer (#295, #324).
   ///
+  /// # What it does not cover, and where that went
+  ///
+  /// **No `L::State` crosses a cut here.** Every prefix is driven with a *fresh* lexer, so a
+  /// lexer that loses at end of input what it was in the middle of — a comment, a string, a
+  /// multi-byte prefix — is certified by this entry point and fails on the first refill a real
+  /// driver performs. That is [`run_refill`](Self::run_refill)'s tier, and it is a separate one
+  /// because the input layer cannot be handed a state to resume at an offset.
+  ///
   /// This is where a lexer that is not faithful under truncation is caught — one whose item
   /// identity depends on input beyond what it reports having read (lookahead past a token that
   /// [`read_frontier`](crate::Lexer::read_frontier) does not admit to, or a
@@ -3039,6 +3047,11 @@ fn refill_schedule<'inp, L>(
   <L::Token as Token<'inp>>::Error: PartialEq,
 {
   let len = src.len();
+  assert!(
+    schedule.last() == Some(&len),
+    "tokora conformance: a refill schedule ends at the source length — its last buffer is the \
+     whole source, sealed, and that is what the oracle comparison is against"
+  );
   let last = schedule.len() - 1;
   let mut carried = (
     L::new(refill_buffer::<L>(src, len, schedule[0])).into_state(),

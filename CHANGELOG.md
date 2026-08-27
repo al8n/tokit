@@ -967,6 +967,57 @@ and will red until they do.
   the hoisted descent baseline in `tokora/tests/root_loop_trip_witness.rs`, the per-element scanner
   baseline in `input::input_ref::tests`.
 
+- **`conformance::Harness::run_refill` — the tier for state that has to survive a change of
+  buffer** (#292). `run_partial` drives every prefix with a **fresh** lexer, so no `L::State` ever
+  crosses a cut, and `run`'s state-resume check carries a state but resumes it over the **same**
+  source. Neither is what a refilling driver does — carry `(State, offset)` from the end of one
+  buffer into a **grown** buffer and continue — and that is the mode `Incomplete` exists for. The
+  distinction is not *does state survive* but ***does state survive a change of buffer***.
+
+  **What lived in that gap.** al8n/pql#39: a LogQL lexer that, on a nonempty `#` comment reaching
+  end of input, advanced to `bytes.len()` and retained only its lookahead offset, losing that the
+  scanner was still inside the comment. Lex `x #c`, carry the state into `x #c\n0b1`, resume, and
+  the guarded `0b` arm fails on the stale reader: `Err(MalformedNumber)` where lexing the whole
+  source yields a number. Carry it into `x #cd` instead and the resume emits an identifier out of
+  bytes the complete parse reads as comment text. Present from that module's first commit, through
+  several rounds of adversarial review, with the kit green throughout — and the silence was
+  verified rather than inferred, with both sources in the harness corpus and a direct probe
+  failing beside it.
+
+  **A new entry point rather than an assertion inside one, for three reasons and each is somebody's
+  cost.** An `Input` is constructed at offset `0` and derives its own resume pair, so nothing can
+  hand the layer a carried state — which is what the consumer reported when it tried, and why the
+  tier drives the `Lexer` surface (`with_state` + `bump`) directly. `check_resume`'s signature is
+  one `src` and its loop runs over that source's own reference items. And `run` deliberately asks
+  nothing of the offset type or the source, so folding this in would narrow `run` for every lexer
+  that cannot reach the defect; the tier goes where the bounds already are, beside `run_partial`,
+  and asks for exactly its bounds minus the redundant `Kind` ones.
+
+  **What it drives.** For every cut of every input — every source-unit boundary, so a cut inside a
+  token, at a token boundary, inside trivia, at end of input and at zero are covered by
+  construction rather than by a list — it runs four schedule shapes: one refill delivering the
+  whole tail, a refill that **adds nothing**, a minimal one-unit refill and then the rest, and the
+  tail one unit at a time from the empty buffer up. A leg commits only what a partial `Input`
+  would (an item whose effective read frontier reaches the non-final buffer end is withheld), and
+  where nothing is withheld and the lexer runs out of bytes it carries the lexer's own
+  post-exhaustion position and the state there — the offset the frontier reports, covering the
+  bytes a lexer *skips* without emitting an item. The committed items across the whole schedule
+  must equal the complete-input lex, exactly.
+
+  **The withholding is what keeps it from being stricter than the contract**, and the plant says so
+  rather than the sentence: with the holdback removed, every conforming fixture in the tree reds —
+  `"ab"` cut out of `"abc"` commits a truncated token and resumes behind the `c`. **The
+  post-exhaustion carry is what catches the defect**, and that plant is the sharper one: carry the
+  last-committed pair instead and all three witness cells go green while every conforming fixture
+  stays green, which is precisely the tier that would have missed pql.
+
+  Nothing about *what counts as equal* is decided here. The items are compared by `Item::compare`
+  through `diverge` — the same ranked search `run`, `check_resume` and both partial-tier asserts
+  read their verdicts from, with the same `non-reflexive-payload` refusal in front of it (#295,
+  #324). A second implementation of that rule would be a second place for it to be wrong.
+
+  Cost is Θ(n²) raw lexing per input, the order `run_partial` and `check_resume` already carry.
+
 ### Changed (breaking)
 
 - **`conformance::Harness::run` requires `L::Token: PartialEq` and `<L::Token as Token>::Error:
