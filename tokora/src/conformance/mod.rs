@@ -2901,11 +2901,12 @@ fn assert_stream_eq<'inp, L>(
   let n = expected.len().min(got.len());
   for i in 0..n {
     if let Comparison::Differs(decided) = expected[i].compare(&got[i]) {
-      // The third member of the same population. `Token::Kind` is bounded `Eq`, `Lexer::Span` is
-      // bounded `Ord` and the two payloads are bounded only `PartialEq`, so a refusal here is
-      // drawn from whichever of those decided it — exactly as it is on the other four
-      // comparisons. Guarding four and not the fifth is the defect relocated, and this one costs
-      // a call on a path already panicking.
+      // Two more members of the same population, and with them the population is closed: the two
+      // in the trait tier, the two in the partial tier, these two, and the two in `cache`.
+      // `Token::Kind` is bounded `Eq`, `Lexer::Span` is bounded `Ord` and the two payloads are
+      // bounded only `PartialEq`, so a refusal here is drawn from whichever of those decided it —
+      // exactly as it is at the other six. Guarding some and not the rest is the defect
+      // relocated, and this one costs a call on a path already panicking.
       let op = format!("integration/{sched}");
       let at = format!("{} {i}", arm.at);
       refuse_decided(
