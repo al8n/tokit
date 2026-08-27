@@ -28,6 +28,13 @@
 //! acceptance *is* the commit of one nonzero-width token, and its infix fold is handed a real
 //! token. Neither survives a zero-token operator, so `InputRef::pratt` diagnoses the report on
 //! the RHS channel rather than parking it and ending the expression with a silent `Ok`.
+//!
+//! **Section four — a report variant chosen by lookahead** (tokora#202's optional-RHS shape).
+//! `/` is infix when an operand follows and postfix when one does not; at the left edge it is a
+//! prefix when an operand follows and a bare operand when one does not. All four reports consume
+//! the `/` they name, so "consume what you report" holds in each, and the variant itself is the
+//! thing the lookahead decides. This is r-a's `Restrictions`-gated `0..` / `..b` case, and it
+//! needs nothing from the driver but the freedom `ParsePrattRHS` already documents.
 
 mod common;
 
@@ -700,4 +707,126 @@ fn the_token_engine_still_serves_a_spelled_operator() {
   let (returned, recorded) = token_engine("1 + 2");
   assert_eq!(returned, Some(Token::Num(2)), "folded to the right operand");
   assert_eq!(recorded, 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Section four — a report variant chosen by lookahead (tokora#202, optional-RHS)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// `/` is r-a's `..`: infix in `1 / 2`, postfix in `1 /`, prefix in `/ 2`, and a bare operand in
+// `/`. The driver contributes nothing to this and is not asked to — every one of the four reports
+// consumes the `/` it names, so the report boundary holds in each. What the shape is here to
+// demonstrate is that the *variant* may be decided by lookahead the channel takes for itself,
+// which is the sub-case r-a gates with `Restrictions` and the one tokora#202 left unwitnessed.
+
+const P_RANGE: i64 = 4;
+
+fn range_lhs<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<PrattLHS<String, &'static str, i64>, AdjError>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = AdjError>,
+{
+  match inp.next()? {
+    Some(tok) => match tok.into_data() {
+      Token::Num(n) => Ok(PrattLHS::Operand(n.to_string())),
+      // Both arms have already consumed the `/`; only the variant is still open, and one token
+      // of lookahead closes it.
+      Token::Slash => {
+        if operand_can_begin(inp.peek_kind()?) {
+          Ok(PrattLHS::Prefix(Precedenced::new("/", P_RANGE)))
+        } else {
+          Ok(PrattLHS::Operand("(/)".to_owned()))
+        }
+      }
+      _ => Err(AdjError::Other),
+    },
+    None => Err(AdjError::Other),
+  }
+}
+
+fn range_rhs<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<PrattRHS<&'static str, &'static str, &'static str, &'static str, i64>, AdjError>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = AdjError>,
+{
+  match inp.next()? {
+    Some(tok) => match tok.into_data() {
+      Token::Slash => {
+        if operand_can_begin(inp.peek_kind()?) {
+          Ok(PrattRHS::Infix(Precedenced::new(
+            PrattInfix::Left("/"),
+            P_RANGE,
+          )))
+        } else {
+          Ok(PrattRHS::Postfix(Precedenced::new("/", P_RANGE)))
+        }
+      }
+      Token::Plus => Ok(PrattRHS::Infix(Precedenced::new(
+        PrattInfix::Left("+"),
+        P_LOOSE,
+      ))),
+      _ => Ok(PrattRHS::End),
+    },
+    None => Ok(PrattRHS::End),
+  }
+}
+
+fn range_fold_postfix<'inp, Ctx>(
+  _inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+  operand: String,
+  op: Precedenced<&'static str, i64>,
+) -> Result<String, AdjError>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = AdjError>,
+{
+  Ok(format!("({operand}{})", op.into_data()))
+}
+
+fn range_expr<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<Result<String, AdjError>, AdjError>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = AdjError>,
+{
+  Ok(
+    pratt(
+      range_lhs,
+      range_rhs,
+      juxt_fold_prefix,
+      juxt_fold_infix,
+      range_fold_postfix,
+    )
+    .parse_input(inp),
+  )
+}
+
+fn range(src: &str) -> Result<String, AdjError> {
+  Parser::new()
+    .apply(range_expr)
+    .parse_str(src)
+    .expect("the outer parser never fails")
+}
+
+/// All four variants of one operator, decided by one token of lookahead each.
+#[test]
+fn one_operator_reports_four_variants_by_lookahead() {
+  assert_eq!(range("1 / 2"), Ok("(1 / 2)".to_owned()), "infix");
+  assert_eq!(range("1 /"), Ok("(1/)".to_owned()), "postfix");
+  assert_eq!(range("/ 2"), Ok("(/2)".to_owned()), "prefix");
+  assert_eq!(range("/"), Ok("(/)".to_owned()), "bare operand");
+}
+
+/// The lookahead-chosen variant still obeys the ladder: `/` at 4 against `+` at 1.
+#[test]
+fn a_lookahead_chosen_variant_still_obeys_the_floor() {
+  assert_eq!(range("1 + 2 / 3"), Ok("(1 + (2 / 3))".to_owned()));
+  assert_eq!(range("1 / 2 + 3"), Ok("((1 / 2) + 3)".to_owned()));
+  // The postfix reading nested under the looser operator: `2 /` closes, then `+` folds.
+  assert_eq!(range("1 + 2 /"), Ok("(1 + (2/))".to_owned()));
 }

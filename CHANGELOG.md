@@ -1687,6 +1687,30 @@ and will red until they do.
   `Cargo.lock` that never re-resolved) must move to `logos_0_16` — via the `logos` alias or
   directly — to keep building.
 
+### Changed
+
+- **Documentation only: the restriction idiom and the chained-comparison one are stated on the API
+  that carries them** (#202). Two idioms this crate supports and nothing in it named. A grep of the
+  guide for "restriction" returned zero, so a reader coming from rust-analyzer or rustc — both of
+  which thread a `Restrictions` bitset through expression parsing — could reasonably conclude that
+  tokora has no answer. It does, in halves: the precedence half is `Pratt::min_precedence`, and the
+  mode half is state on the channel *value*, since `parse_lhs` and `parse_rhs` are parsers the
+  grammar constructs. Both are now said on `min_precedence` itself.
+
+  `PrattFoldInfix` gains the chained-comparison note, and it is written as a list of what the fold
+  is **missing** rather than as a recipe. The study that produced this item recorded that
+  `fold_infix` has "both operators' spans in hand"; it has neither. `Precedenced` carries no
+  position, `input.span()` at fold time is the frontier past the right operand, and the previous
+  operator has to be recovered from the shape of `left` — which excludes the `O = ()` CST shape
+  both in-tree CST examples use. Enriching `NonAssociativeChain` is still the wrong route, for the
+  reason the study gave and that still checks out: the type has one `at` field and a
+  two-more-offsets variant does not fit the driver's per-frame error budget.
+
+  The lookahead-dependent report variant — `0..` as a postfix where `0..b` is an infix, the
+  sub-case r-a gates with `Restrictions` — now has an in-tree witness in
+  `tests/pratt_adjacent.rs`, where one operator reports all four variants off one token of
+  lookahead while every one of them consumes what it reports.
+
 ### Fixed
 
 - **A borrowed token keeps its punctuation and pratt capabilities** (#268). `Token`,

@@ -464,6 +464,26 @@ where
 }
 
 /// A trait for infix fold dispatch
+///
+/// # Diagnosing a chained comparison here, and the two things you must arrange first
+///
+/// `a < b < c` is well-formed to this driver whenever `<` is [`Left`](PrattInfix::Left), and
+/// rustc diagnoses it in the parser rather than in the grammar. The fold is the right place to do
+/// the same — [`NonAssociativeChain`](crate::error::NonAssociativeChain) carries a single `at`
+/// offset and a two-more-offsets variant of it does not fit the driver's per-frame error budget,
+/// so enriching that error is not the route. But the fold is not handed what such a diagnostic
+/// needs, and this is the list of what it is missing rather than a claim that it has it:
+///
+/// * **no span for the operator being folded.** `operator` is a [`Precedenced`], which carries
+///   the payload you chose and a power — nothing positional — and `input.span()` at fold time is
+///   the committed frontier *past* the right operand. Put the span in the payload type; that is
+///   legal, because payload types are yours, but it is an instruction and not a given.
+/// * **no previous operator at all.** It has to be recovered from the shape of `left`, rustc's
+///   way, which requires `O` to be a node you can inspect. **That excludes the `O = ()` CST
+///   shape**, where the fold is handed nothing to look at — and CST-shaped grammars are what this
+///   crate is built for. Such a grammar either gives up `O = ()` for a marker type carrying the
+///   last comparison's power and span, or spells the comparison family
+///   [`Neither`](PrattInfix::Neither) and takes the driver's own refusal instead.
 pub trait PrattFoldInfix<
   'inp,
   Power,

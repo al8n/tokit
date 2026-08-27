@@ -561,7 +561,29 @@ impl<
   /// it lowers the bar for *every* report the RHS parser makes, including any it uses to
   /// mean "this is not an operator". Spell that one [`PrattRHS::End`], which is not a power
   /// and which no floor admits.
-
+  ///
+  /// # This knob is half of the *restriction* idiom
+  ///
+  /// rust-analyzer and rustc both carry a `Restrictions` bitset into expression parsing —
+  /// "no struct literal here", "this is a statement position", "stop before `|`" — and it is worth
+  /// saying where the equivalent lives, because tokora has no such type and a reader can conclude
+  /// from that that the idiom is unavailable. It is not; it is split across two places that are
+  /// documented apart:
+  ///
+  /// * **the part that is a precedence** is this method. "Parse an expression, but stop before
+  ///   any operator weaker than `p`" is a floor, and the floor is the driver's own — it applies to
+  ///   every report, including those made by a recursion the grammar did not write.
+  /// * **the part that is a mode** is state on the channel *value*. `parse_lhs` and `parse_rhs`
+  ///   are ordinary parsers you construct, so a channel that is a struct with a
+  ///   `forbid_structs: bool` — or any other flag — carries the mode without the driver knowing it
+  ///   exists. Build one `Pratt` per mode, or read the flag in the classifier and report
+  ///   [`End`](PrattRHS::End) where the mode forbids continuing.
+  ///
+  /// The one shape neither half covers is an operator whose *report variant* depends on what
+  /// follows it — `0..` as a postfix where `0..b` is an infix. That is the classifier's own
+  /// decision and it needs nothing from here: [`ParsePrattRHS`] holds a whole
+  /// [`InputRef`](crate::InputRef) and may look as far ahead as it likes before choosing a
+  /// variant, provided it consumes what it finally reports.
   pub fn min_precedence(
     self,
     min_precedence: Power,
