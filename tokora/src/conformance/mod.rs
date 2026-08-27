@@ -76,7 +76,8 @@
 //! `run_partial` drives every prefix with a **fresh** lexer, so no `L::State` ever crosses a cut;
 //! check 2 above carries state but resumes over the **same** source. The distinction is not *does
 //! state survive* but ***does state survive a change of buffer***, and that is the mode
-//! [`Incomplete`](crate::error::Incomplete) exists for. It drives the [`Lexer`] surface directly —
+//! [`Incomplete`](crate::error::Incomplete) exists for. It drives the [`Lexer`] surface
+//! directly —
 //! [`with_state`](crate::Lexer::with_state) + [`bump`](crate::Lexer::bump) over a longer source —
 //! because the input layer has no offset-resuming constructor to hand a carried state to, and each
 //! leg is bounded by the same per-loop item budget the trait-tier checks carry, for the same
@@ -674,7 +675,7 @@ where
   /// into a **grown** buffer, and lexing continued there.
   ///
   /// This is the contract's own streaming mode. A driver that reaches
-  /// [`Incomplete`](crate::error::Incomplete) appends the next chunk to its buffer and continues
+  /// [`Incomplete`] appends the next chunk to its buffer and continues
   /// from the offset that error reported; a resuming one carries the lexer
   /// [`State`](crate::state::State) with it. Everything that can go wrong there goes wrong at the
   /// **change of buffer**, and no other entry point puts a state across one:
@@ -730,7 +731,7 @@ where
   ///
   /// # The driver this models, and where its rules come from
   ///
-  /// A leg commits an item only when a partial [`Input`] would: an item whose **effective read
+  /// A leg commits an item only when a [`Partial`] input would: an item whose **effective read
   /// frontier** (`max(span.end, `[`read_frontier`](crate::Lexer::read_frontier)`)`) reaches the
   /// non-final buffer end is withheld, because the decision consulted the end and later bytes
   /// could change it. Withholding is what keeps this from being stricter than the contract:
@@ -3098,7 +3099,7 @@ where
 /// # The two pairs a leg can end on
 ///
 /// - **A withheld item.** The lexer produced something whose effective read frontier reaches the
-///   non-final buffer end, so the layer would surface [`Incomplete`](crate::error::Incomplete)
+///   non-final buffer end, so the layer would surface [`Incomplete`]
 ///   and commit nothing more. The leg stops there and hands back the pair after its **last
 ///   committed** item — the incoming pair, when it committed none. Rolling back to it is what
 ///   makes the tier sound rather than strict: the withheld item's bytes are re-lexed on the
