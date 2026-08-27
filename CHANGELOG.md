@@ -87,9 +87,22 @@ and will red until they do.
   both refusals are a terminal `UnexpectedEoRhs` plus a `debug_assert` naming which one fired:
 
   - **the charge**, read when the operand parse returns and **before the fold, the CST wrap and the
-    next turn**, which is the work a continuation buys. It refuses a cycle that advanced nothing.
+    next turn**, which is the work a continuation buys. It refuses a continuation whose right
+    operand advanced nothing past where the classifier left the input.
   - **the debt**, read before the descent. The charge is frame-local and runs on the way back up,
     so on its own it prices nothing the way down already built.
+
+  **Both are measured from where the report crossed back, not from where the cycle started, and
+  that is the exemption's other half** (#323). An exempt classifier may legally have consumed on
+  its way to the report, and those bytes pay the adjacency its frame is *already inside* — never
+  the one it is reporting. Bytes taken before the report discharge the debt the frames above are
+  owed, bytes taken after it pay for this continuation, and every byte pays exactly one of the two.
+  Measured from the top of the cycle the same trivia paid twice and in both directions at once: it
+  satisfied the charge with input the right operand never consumed — a fold, a wrap and another
+  turn for bytes that were the operator's — while staying invisible to the debt test, which is the
+  one obligation it really does discharge, so a legal parse was refused and refused *terminally*.
+  The structural bound survives and tightens, since the report boundary is never behind the
+  position the cycle started from.
 
   A grammar that can answer a zero-width operand, which every recovering grammar can, is the one
   that reaches either.
@@ -110,18 +123,22 @@ and will red until they do.
   frame, and that byte is past the position every ancestor descended from and satisfies all of
   their charges at once — after k frames, k folds and k CST wraps have already happened. So the
   driver carries the committed position of the nearest outstanding continuation into the
-  recursion and refuses another zero-token descent until committed consumption has **strictly**
-  passed it, replacing it with its own on the way down. One advancement therefore discharges
-  exactly one adjacency, and along any path from the outermost continuation inward the descents
-  sit at strictly increasing committed offsets: **never more `Adjacent` frames than bytes between
-  the first and the last**, structurally rather than by measurement.
+  recursion and refuses another zero-token descent until committed consumption — the reporting
+  classifier's own included — has **strictly** passed it, replacing it with the position its own
+  report left the input at on the way down. One advancement therefore discharges exactly one
+  adjacency, and along any path from the outermost continuation inward the descents sit at
+  strictly increasing committed offsets: **never more `Adjacent` frames than bytes between the
+  first and the last**, structurally rather than by measurement.
 
   Pinned three ways in `tests/pratt_adjacent.rs`, all of them counts rather than errors — the
   recursion limiter reaches an error too, and a bound that is really the limiter's would look the
   same: the refused cycle enters the LHS channel twice rather than once per budget level; a chain
   four times longer than the budget parses in one frame; and an escalating classifier over a
   one-byte document builds two frames and no fold where an unbounded driver builds one frame and
-  one fold per rung and returns `Ok`.
+  one fold per rung and returns `Ok`. Three further cells run a classifier that *does* consume
+  before reporting, one per measurement that sits on the report boundary, so reverting any single
+  one of them to the top of the cycle reds exactly one cell and leaves the other two — and the
+  paying ladder that is their control — green.
 
   **The token-level engine (`InputRef::pratt`) does not serve it.** Its termination argument is
   that acceptance *is* the commit of one nonzero-width token, and its `fold_infix` is handed a

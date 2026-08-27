@@ -1055,9 +1055,10 @@ fn trivia(src: &str, script: &'static [Rung]) -> Run {
 ///
 /// **The falsifier.** Charge against `committed` — the position the cycle started from, read
 /// before the classifier ran — and the comma reads as the operand's payment: `folds == 1` and an
-/// `Ok("(1 · <hole>)")` carrying a fold the document never bought. That is the reading at
-/// 7d3e2f4. Neither of the other two measurements can move this cell: the root frame inherits no
-/// watermark, so the debt test's arm is `None` and the descent's value is never read.
+/// `Ok("(1 · <hole>)")` carrying a fold the document never bought, which is the reading this cell
+/// replaces. Neither of the other two measurements can move it: the root frame inherits no
+/// watermark, so the debt test's arm is `None`, and the frame the descent lands on ends without
+/// reporting a continuation of its own, so the watermark it carried is never read.
 #[test]
 fn the_classifiers_own_trivia_does_not_pay_for_the_operand() {
   let run = trivia("1 , ;", &[Rung::EatThenReport, Rung::Stop]);
@@ -1098,10 +1099,10 @@ fn the_classifiers_own_trivia_does_not_pay_for_the_operand() {
 ///
 /// **The falsifier.** Test `committed` instead — the inner frame's position before its own
 /// classifier ran, which is still the watermark — and the comma is invisible to the test: a legal
-/// parse is refused, *terminally*, with `AdjacencyDebt`. That is the reading at 7d3e2f4:
-/// `lhs_entries == 2`, `folds == 0`, `Err(EoRhs)`. Neither of the other two measurements can move
-/// this cell: the outer classifier consumed nothing, so the descent carries the same number
-/// either way, and both charges clear by a whole operand.
+/// parse is refused, *terminally*, with `AdjacencyDebt` at `lhs_entries == 2` and `folds == 0`.
+/// Neither of the other two measurements can move this cell: the outer classifier consumed
+/// nothing, so the descent carries the same number either way, and both charges clear by a whole
+/// operand.
 #[test]
 fn the_classifiers_own_trivia_discharges_the_enclosing_adjacency() {
   let run = trivia(
@@ -1134,10 +1135,11 @@ fn the_classifiers_own_trivia_discharges_the_enclosing_adjacency() {
 ///
 /// **The falsifier.** Descend with `committed` and the comma is spent twice: once discharging
 /// nothing, and once again admitting the inner continuation whose own report added no byte to it.
-/// The refusal then lands one frame deeper — `lhs_entries == 3` — which is the reading at
-/// 7d3e2f4, and the extra frame is exactly the one the rule exists to refuse. The charge cannot
-/// move this cell: no charge in it ever runs, because the refusal is in front of the descent and
-/// propagates through the outer frame's own.
+/// The refusal then lands one frame deeper — `lhs_entries == 3` — and that extra frame is exactly
+/// the one the rule exists to refuse. Neither of the other two measurements can move this cell:
+/// the inner classifier consumes nothing, so its own `committed` and `after_report` are the same
+/// number and the debt test reads the same either way, and no charge in this parse ever runs,
+/// because the refusal is in front of the descent and propagates through the outer frame's.
 #[test]
 fn the_descent_carries_the_position_the_classifier_left() {
   let run = trivia(
