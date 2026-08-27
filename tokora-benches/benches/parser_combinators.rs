@@ -21,6 +21,13 @@
 //!     `i64` binding powers.
 //!   * `skip_then_retry`   — the recovery driver over a source with periodic garbage:
 //!     every eighth statement is preceded by a parenthesised lump the parser must skip.
+//!   * `repeated_at_most`  — `element.repeated().at_most(n)`: the bound any of the four
+//!     repetition families can carry, on the simplest carrier. One group in eight is one
+//!     element over the bound, so the one pass measures both the accepting path and the
+//!     `TooMany` short-circuit/failure path together.
+//!   * `separated_while_collect` — `element.separated_by_comma_while(condition).at_most(n)`:
+//!     the caller-`Decision` twin of `separated_collect` (internally the crate's own
+//!     `sep_while` module), bounded the same mixed way.
 //!
 //! Every source is generated from a counter — no randomness, no clock — so the fixtures
 //! are byte-identical between runs and between machines.
@@ -29,13 +36,15 @@ use core::{fmt::Write as _, time::Duration};
 use std::hint::black_box;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use generic_arraydeque::typenum::U1;
 
 use tokora::{
   Accumulator, Balance, Emitter, EmitterView, InputRef, Parse, ParseChoice, ParseContext,
   ParseInput, ParseTokenChoice, Parser, SimpleSpan, Token, TryParseInput,
+  cache::{Peeked, PeekedTokenExt},
   emitter::{
-    FullContainerEmitter, PrattEmitter, SeparatedEmitter, UnexpectedLeadingSeparatorEmitter,
-    UnexpectedTrailingSeparatorEmitter,
+    FullContainerEmitter, PrattEmitter, SeparatedEmitter, TooManyEmitter,
+    UnexpectedLeadingSeparatorEmitter, UnexpectedTrailingSeparatorEmitter,
   },
   error::{
     MaybeIncomplete, MaybeTerminal, UnexpectedEnd,
@@ -44,7 +53,7 @@ use tokora::{
   },
   lexer::LogosLexer,
   logos::{self, Logos},
-  parser::{Any, PrattInfix, PrattLHS, PrattRHS, Precedenced, expect},
+  parser::{Action, Any, PrattInfix, PrattLHS, PrattRHS, Precedenced, expect},
   punct::Comma,
   span::Spanned,
   token::{PrattToken, PunctuatorToken},
@@ -647,6 +656,169 @@ where
   Ok(n)
 }
 
+// ── 8. repeated + at_most (bounded, mixed accept/trip) ────────────────────────
+//
+// `at_most` is a cross-cutting bound any of the four repetition families can carry
+// (`Repeated::at_most`, `RepeatedWhile::at_most`, `Separated::at_most`,
+// `SeparatedWhile::at_most` all wrap the same `AtMost<P>`); this exercises it on the
+// simplest carrier, `repeated()`. Reaching the bound is a single event that is BOTH the
+// failure path (`TooMany`, filed through `admit_element`'s count-check hook — see
+// `tokora/src/parser/many/mod.rs`) and the short-circuit path (the construct ends there
+// rather than continuing): there is no separate "stops without erroring" mode for a bound.
+// So one driver over a mixed fixture covers both — most groups stay at or under
+// `REPEATED_AT_MOST_BOUND` elements and return cleanly (the same accepting path
+// `repeated_collect` already measures, now additionally paying the bound check on every
+// element), and one group in eight carries one element too many and trips it. The element
+// that trips it has already been lexed and accepted by `try_int` before the count hook
+// rejects it, so the cursor lands right after it — the overflow groups are sized so that
+// element is the group's last, and there is nothing left to skip before the `;`.
+
+const REPEATED_AT_MOST_BOUND: usize = 8;
+
+fn repeated_at_most<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, BenchLexer<'inp>, Ctx>,
+) -> Result<usize, BenchError>
+where
+  Ctx: ParseContext<'inp, BenchLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, BenchLexer<'inp>, Error = BenchError>
+    + FullContainerEmitter<'inp, BenchLexer<'inp>>
+    + TooManyEmitter<'inp, BenchLexer<'inp>>,
+{
+  let mut n = 0usize;
+  loop {
+    // Scope the peek borrow: an empty input ends the drain before a group is attempted
+    // that is not there — same idiom as `pratt_expr` and `skip_then_retry_drain` above.
+    let done = {
+      let peeked = inp.peek_one()?;
+      peeked.is_none()
+    };
+    if done {
+      break;
+    }
+    let result: Result<Vec<i64>, BenchError> = try_int
+      .repeated()
+      .at_most(REPEATED_AT_MOST_BOUND)
+      .collect()
+      .parse_input(inp);
+    match result {
+      // At or under the bound: the accepting path, same as `repeated_collect`.
+      Ok(items) => n += black_box(items).len(),
+      // Over the bound: `TooMany` — the failure/short-circuit path.
+      Err(_) => n += 1,
+    }
+    if inp
+      .try_expect(|t| matches!(t.data(), BenchTok::Semi))?
+      .is_none()
+    {
+      break;
+    }
+  }
+  Ok(n)
+}
+
+// ── 9. separated_while (bounded, mixed accept/trip) ───────────────────────────
+//
+// `separated_while` takes a caller-supplied `Decision` instead of `separated_by_comma`'s
+// built-in policy of continuing for as long as a separator is present — internally this is
+// the crate's own `sep_while` module (`tokora/src/parser/many/sep_while/`), and its test
+// coverage in `tokora/tests/sep_while_parse.rs` uses that same short name. The condition is
+// asked before every candidate element, including the first, and is handed the peek window
+// positioned at that element's own leading token — not the separator — which is the whole
+// point of the combinator: `separated_by_comma` already continues on "a separator is
+// there" without any callback, so a condition that only re-checked the separator would add
+// indirection for a question the crate can answer itself. `decide_on_int` asks the
+// simplest element-shaped question ("does this look like another integer"), verified
+// against `tokora/tests/sep_while_parse.rs`'s own `decide` (which asks the same question of
+// its `Token::Num`); the gap between this bench and `separated_collect` then isolates the
+// cost of the caller-supplied call itself rather than a different stopping rule.
+// `separated_while`'s element bound is `ParseInput`, not `TryParseInput` — hence `int_elem`
+// rather than `try_int` — so a missing integer is a hard failure rather than a decline,
+// matching `sep_while_parse.rs`'s own `parse_num`.
+//
+// As with `at_most` above, reaching the bound is the failure and short-circuit path
+// together, so the same mixed-fixture, one-group-in-eight-overflows shape covers it here
+// too — see section 8's comment for why one driver suffices for both paths.
+
+const SEP_WHILE_BOUND: usize = 6;
+
+/// `separated_while`'s element: `ParseInput`, not `TryParseInput`, is the bound that
+/// combinator's element parser needs — unlike `try_int`, a missing integer is a hard
+/// failure rather than a decline.
+fn int_elem<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, BenchLexer<'inp>, Ctx>,
+) -> Result<i64, BenchError>
+where
+  Ctx: ParseContext<'inp, BenchLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, BenchLexer<'inp>, Error = BenchError>,
+{
+  match inp.try_expect(|t| matches!(t.data(), BenchTok::Int(_)))? {
+    Some(tok) => match tok.into_data() {
+      BenchTok::Int(n) => Ok(n),
+      _ => unreachable!("the predicate admits only integers"),
+    },
+    None => Err(BenchError),
+  }
+}
+
+/// Continue while the upcoming element-position token is an integer; stop at anything else
+/// (the group's trailing `;`, in every fixture group). Mirrors
+/// `sep_while_parse.rs::decide`'s own `Token::Num` check.
+fn decide_on_int<'inp, Ctx>(
+  mut peeked: Peeked<'_, 'inp, BenchLexer<'inp>, U1>,
+  _emitter: EmitterView<'_, 'inp, BenchLexer<'inp>, Ctx::Emitter>,
+) -> Result<Action, BenchError>
+where
+  Ctx: ParseContext<'inp, BenchLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, BenchLexer<'inp>, Error = BenchError>,
+{
+  Ok(match peeked.pop_front() {
+    Some(t) if matches!(t.token(), BenchTok::Int(_)) => Action::Continue,
+    _ => Action::Stop,
+  })
+}
+
+fn separated_while_collect<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, BenchLexer<'inp>, Ctx>,
+) -> Result<usize, BenchError>
+where
+  Ctx: ParseContext<'inp, BenchLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, BenchLexer<'inp>, Error = BenchError>
+    + SeparatedEmitter<'inp, BenchLexer<'inp>>
+    + FullContainerEmitter<'inp, BenchLexer<'inp>>
+    + UnexpectedLeadingSeparatorEmitter<'inp, BenchLexer<'inp>>
+    + UnexpectedTrailingSeparatorEmitter<'inp, BenchLexer<'inp>>
+    + TooManyEmitter<'inp, BenchLexer<'inp>>,
+{
+  let mut n = 0usize;
+  loop {
+    let done = {
+      let peeked = inp.peek_one()?;
+      peeked.is_none()
+    };
+    if done {
+      break;
+    }
+    let result: Result<Vec<i64>, BenchError> = int_elem
+      .separated_by_comma_while::<_, U1>(decide_on_int::<Ctx>)
+      .at_most(SEP_WHILE_BOUND)
+      .collect()
+      .parse_input(inp);
+    match result {
+      // At or under the bound: the accepting path, same shape as `separated_collect`.
+      Ok(items) => n += black_box(items).len(),
+      // Over the bound: `TooMany` — the failure/short-circuit path.
+      Err(_) => n += 1,
+    }
+    if inp
+      .try_expect(|t| matches!(t.data(), BenchTok::Semi))?
+      .is_none()
+    {
+      break;
+    }
+  }
+  Ok(n)
+}
+
 // ── Deterministic sources ─────────────────────────────────────────────────────
 //
 // All generated from a counter — no randomness, no clock — so a fixture is byte-identical
@@ -745,6 +917,56 @@ fn garbage_source() -> String {
   s
 }
 
+/// `1 2 3 4 5 6 7 8 ; 9 10 …` — space-separated integer groups terminated by `;`, most
+/// exactly `REPEATED_AT_MOST_BOUND` long and one group in eight one element over it (the
+/// same `is_multiple_of(8)` ratio `garbage_source` uses).
+fn at_most_source() -> String {
+  let mut s = String::with_capacity(TARGET + 64);
+  let mut group = 0u32;
+  let mut i = 0u32;
+  while s.len() < TARGET {
+    let len = if group.is_multiple_of(8) {
+      REPEATED_AT_MOST_BOUND + 1
+    } else {
+      REPEATED_AT_MOST_BOUND
+    };
+    for _ in 0..len {
+      let n = i.wrapping_mul(2654435761) % 100_000;
+      let _ = write!(s, "{n} ");
+      i = i.wrapping_add(1);
+    }
+    s.push_str("; ");
+    group = group.wrapping_add(1);
+  }
+  s
+}
+
+/// `1,2,3,4,5,6;7,8,9,10,11,12,13;14,…` — comma-separated integer groups terminated by
+/// `;`, most exactly `SEP_WHILE_BOUND` long and one group in eight one element over it.
+fn sep_while_source() -> String {
+  let mut s = String::with_capacity(TARGET + 64);
+  let mut group = 0u32;
+  let mut i = 0u32;
+  while s.len() < TARGET {
+    let len = if group.is_multiple_of(8) {
+      SEP_WHILE_BOUND + 1
+    } else {
+      SEP_WHILE_BOUND
+    };
+    for k in 0..len {
+      if k > 0 {
+        s.push(',');
+      }
+      let n = i.wrapping_mul(2654435761) % 100_000;
+      let _ = write!(s, "{n}");
+      i = i.wrapping_add(1);
+    }
+    s.push(';');
+    group = group.wrapping_add(1);
+  }
+  s
+}
+
 // ── The group ─────────────────────────────────────────────────────────────────
 
 macro_rules! bench_parser {
@@ -770,6 +992,8 @@ fn parser_bench(c: &mut Criterion) {
   let dispatch = dispatch_source();
   let exprs = expr_source();
   let garbage = garbage_source();
+  let at_most_src = at_most_source();
+  let sep_while_src = sep_while_source();
 
   let mut group = c.benchmark_group("parser");
   group.measurement_time(Duration::from_secs(3));
@@ -791,6 +1015,18 @@ fn parser_bench(c: &mut Criterion) {
     "skip_then_retry",
     garbage.as_str(),
     skip_then_retry_drain
+  );
+  bench_parser!(
+    group,
+    "repeated_at_most",
+    at_most_src.as_str(),
+    repeated_at_most
+  );
+  bench_parser!(
+    group,
+    "separated_while_collect",
+    sep_while_src.as_str(),
+    separated_while_collect
   );
 
   group.finish();
