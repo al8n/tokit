@@ -2770,10 +2770,20 @@ impl<'a> Lexer<'a> for AltErrLexer<'a> {
 
   fn new(src: &'a str) -> Self {
     let pick = ALT_FLIP.fetch_xor(true, core::sync::atomic::Ordering::Relaxed);
-    Self { src, start: 0, end: 0, state: AltChoice(pick) }
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: AltChoice(pick),
+    }
   }
   fn with_state(src: &'a str, state: AltChoice) -> Self {
-    Self { src, start: 0, end: 0, state }
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
   }
   fn check(&self) -> Result<(), Collide> {
     Ok(())
@@ -2803,7 +2813,11 @@ impl<'a> Lexer<'a> for AltErrLexer<'a> {
     }
     self.end = boundary_after(self.src, self.start);
     if self.start == 0 {
-      return Some(Err(if self.state.0 { Collide::Junk } else { Collide::Cut }));
+      return Some(Err(if self.state.0 {
+        Collide::Junk
+      } else {
+        Collide::Cut
+      }));
     }
     Some(Ok(CTok))
   }
@@ -2861,10 +2875,20 @@ impl<'a> Lexer<'a> for AltTokLexer<'a> {
 
   fn new(src: &'a str) -> Self {
     let pick = ALT_TOK_FLIP.fetch_xor(true, core::sync::atomic::Ordering::Relaxed);
-    Self { src, start: 0, end: 0, state: AltChoice(pick) }
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: AltChoice(pick),
+    }
   }
   fn with_state(src: &'a str, state: AltChoice) -> Self {
-    Self { src, start: 0, end: 0, state }
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
   }
   fn check(&self) -> Result<(), Infallible> {
     Ok(())
@@ -2928,11 +2952,21 @@ impl<'a> Lexer<'a> for ResumeDriftErrLexer<'a> {
   type Offset = usize;
 
   fn new(src: &'a str) -> Self {
-    Self { src, start: 0, end: 0, state: AltChoice(false) }
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: AltChoice(false),
+    }
   }
   fn with_state(src: &'a str, _state: AltChoice) -> Self {
     // The defect: a rebuilt lexer decides the error differently from the one that saved the state.
-    Self { src, start: 0, end: 0, state: AltChoice(true) }
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: AltChoice(true),
+    }
   }
   fn check(&self) -> Result<(), Collide> {
     Ok(())
@@ -2962,7 +2996,11 @@ impl<'a> Lexer<'a> for ResumeDriftErrLexer<'a> {
     }
     self.end = boundary_after(self.src, self.start);
     if self.start == 0 {
-      return Some(Err(if self.state.0 { Collide::Junk } else { Collide::Cut }));
+      return Some(Err(if self.state.0 {
+        Collide::Junk
+      } else {
+        Collide::Cut
+      }));
     }
     Some(Ok(CTok))
   }
@@ -3041,10 +3079,20 @@ impl<'a, const MODE: u8> Lexer<'a> for FloatLexer<'a, MODE> {
   type Offset = usize;
 
   fn new(src: &'a str) -> Self {
-    Self { src, start: 0, end: 0, state: () }
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: (),
+    }
   }
   fn with_state(src: &'a str, state: ()) -> Self {
-    Self { src, start: 0, end: 0, state }
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
   }
   fn check(&self) -> Result<(), Infallible> {
     Ok(())
@@ -3161,7 +3209,10 @@ fn a_reflexive_payload_of_the_same_type_still_fails_the_ordinary_way() {
     "the control must not be re-labelled as a payload problem, got: {msg}"
   );
   // And expected-vs-got must be two distinguishable values, unlike the NaN cell's.
-  assert!(msg.contains("FTok(122.0)") && msg.contains("FTok(98.0)"), "{msg}");
+  assert!(
+    msg.contains("FTok(122.0)") && msg.contains("FTok(98.0)"),
+    "{msg}"
+  );
 }
 
 #[test]
@@ -3177,7 +3228,7 @@ fn a_conforming_lexer_over_the_same_float_payload_passes_both_tiers() {
 /// partial one a token or error payload carries — a stronger caller defect, and exactly as wrong
 /// to report as a stream divergence. It stands in for the whole `Eq`/`Ord` half of the population:
 /// `Lexer::Span` is bounded `Ord` and can lie the same way.
-#[derive(Clone, Copy, Debug, Hash)]
+#[derive(Clone, Copy, Debug)]
 struct LyingKind;
 
 impl PartialEq for LyingKind {
@@ -3187,6 +3238,14 @@ impl PartialEq for LyingKind {
 }
 
 impl Eq for LyingKind {}
+
+/// Hand-written because `Token::Kind` requires `Hash` and deriving it beside a manual `PartialEq`
+/// is what `clippy::derived_hash_with_manual_eq` exists to stop. The lint's law —
+/// `k1 == k2` implies `hash(k1) == hash(k2)` — is satisfied *vacuously* here, since nothing is
+/// equal to anything, so this impl is not a second lie on top of the one the fixture is for.
+impl core::hash::Hash for LyingKind {
+  fn hash<H: core::hash::Hasher>(&self, _: &mut H) {}
+}
 
 impl core::fmt::Display for LyingKind {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -3227,10 +3286,20 @@ impl<'a> Lexer<'a> for LyingKindLexer<'a> {
   type Offset = usize;
 
   fn new(src: &'a str) -> Self {
-    Self { src, start: 0, end: 0, state: () }
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: (),
+    }
   }
   fn with_state(src: &'a str, state: ()) -> Self {
-    Self { src, start: 0, end: 0, state }
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
   }
   fn check(&self) -> Result<(), Infallible> {
     Ok(())

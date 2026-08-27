@@ -969,6 +969,30 @@ and will red until they do.
 
 ### Changed (breaking)
 
+- **`conformance::Harness::run` requires `L::Token: PartialEq` and `<L::Token as Token>::Error:
+  PartialEq`** (#269). It required nothing beyond `Lexer` before, and that is what the defect was:
+  check 1 is documented as identity of the *item*, and with no equality to call the kit
+  substituted the two things it could reach — the error's `Debug` rendering and the token's
+  `kind`. `run_partial` has asked for both bounds since 0.10.0, so this is the same obligation on
+  the other entry point rather than a new one, and the two tiers now differ only in `Offset =
+  usize`, a prefix-sliceable source and `State: Clone`.
+
+  **Who this excludes.** A vocabulary whose token or error type genuinely cannot be `PartialEq` —
+  one holding an `Arc<dyn Error>`, a closure, a handle — loses the kit, since every tier runs from
+  `run` or `run_partial`. Recovering it costs a `#[derive(PartialEq)]`, a hand-written impl where
+  derivation is wrong, or a newtype whose equality is the one the vocabulary means; nothing about
+  the lexer changes. There is no in-tree vocabulary among the excluded — this crate ships no
+  concrete `Token` implementation at all — and the bundled logos adapter is transparent:
+  `LogosLexer<T>` takes its `Token` and `Error` from the caller and constrains neither.
+
+  The alternative to a bound is a caller-supplied comparator or key, and `run_partial` settled
+  that trade already: a hand-written projection is silently escaped by the next field added, which
+  is the failure mode the rendering had.
+
+  `Item`'s private fields move with it — the kit keeps the `Result` `lex()` already handed it
+  instead of a `kind` plus a `format!("{err:?}")` `String`, so the repair costs an allocation per
+  error item less than what it replaces.
+
 - **`PrattRHS` gains a variant, so an exhaustive `match` on it stops compiling** (#274). The new
   arm is `Adjacent(Precedenced<L, Power>)` — see **Added**. Every in-tree `match` on `PrattRHS`
   was a driver's; grammar code builds these values rather than reading them, so the expected
@@ -1759,6 +1783,57 @@ and will red until they do.
   lookahead while every one of them consumes what it reports.
 
 ### Fixed
+
+- **`conformance::Harness::run` compares the item and not a rendering of it** (#269). Two fresh
+  runs were held to agree on the error's `Debug` string and the token's `kind`, which the module
+  header called identity of the token/error sequence. `Debug` is neither **injective** — two
+  unequal error variants may render identically, and a hand-written `Debug` printing one label for
+  a family of variants is legal and not rare, so a lexer whose error *value* changed between fresh
+  runs was certified — nor **stable**: a rendering carrying an address or a counter differs
+  between the two separately constructed lexers and reddened a lexer with no defect at all. The
+  two run in opposite directions, so no amount of care with the rendering fixes both, and
+  correcting the documentation to describe rendering-equality would have kept the false red.
+  `kind` had the third failure of the same shape: a payload that moved between fresh runs kept its
+  kind, its span and its slice, which was the whole comparison.
+
+  The partial tier made this repair in 0.10.0 and the trait tier did not, so the argument, the
+  bound and now the cells are the same on both. Three plants: an alternating error value behind one
+  `Debug` spelling, an alternating token payload behind one kind, and the same error drift through
+  a `with_state` resume, which is `check_resume`'s own comparison and not `assert_run_eq`'s. The
+  control is `TickingErrLexer` — conforming, unstable `Debug` — now driven through `run` as well
+  as `run_partial`.
+
+- **The conformance kits diagnose a payload that is not equal to itself instead of convicting the
+  lexer or the cache** (#295). `PartialEq` promises symmetry and transitivity and **not**
+  reflexivity, so a token payload holding an `f64` that can be `NaN` is not equal to itself. The
+  partial tier's final leg compares the complete stream against a final drain of the *same*
+  source, so such a payload failed a stream against itself: the kit raised `partial-equivalence`
+  — a red naming the consumer's lexer — with an expected-vs-got in which both sides render
+  `FTok(NaN)`. Two things that look the same, and a verdict about the wrong thing. 38 corpus
+  queries in one downstream reached it.
+
+  The obligation is unchanged and is the caller's: `run_partial`'s documentation has said since
+  0.10.0 that such a type must hand-write the impl that says what equality means for it, and value
+  equality is deliberate. What moves is the **diagnosis**. Every comparison any tier draws a
+  verdict from asks, once it has already failed, whether either side is equal to itself, and a
+  side that is not gets a refusal tagged `non-reflexive-payload` naming the component — the token
+  payload, the error payload, the `Kind`, the `L::State`, the span — and the obligation.
+
+  **The sweep is the population and not the reported site.** Six comparisons: `assert_run_eq` and
+  `check_resume` in the trait tier, `assert_partial_stream_eq` and `assert_partial_prefix_of` in
+  the partial tier, the committed-stream comparison in the integration tier, and the cache kit's
+  entry and purity comparisons, whose observable is the `(span, token, state)` triple and which
+  asks `PartialEq` of two of the three. A guard at one and not the others is the same defect one
+  relocation away. `Token::Kind` is bounded `Eq` and `Lexer::Span` is bounded `Ord`, so a failure
+  from those two is a broken *total*-equality promise rather than a partial one; both are scanned
+  anyway, because a component left out of the scan is a component whose failure is reported as a
+  defect of the thing under test.
+
+  **It can only ever re-label a failure, never create one.** Every guard sits on a path its own
+  comparison has already taken to failure, so a reflexive value never reaches one. That is what
+  keeps the repair from trading a false red for a false green, and it is pinned by a control: a
+  genuinely non-conforming lexer over the same float payload type, never `NaN`, still reds
+  `partial-equivalence` with two distinguishable values in the message.
 
 - **A borrowed token keeps its punctuation and pratt capabilities** (#268). `Token`,
   `IdentifierToken`, `KeywordToken` and every `LitToken` predicate forward from `T` to `&'a T`;

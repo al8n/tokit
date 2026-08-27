@@ -2018,7 +2018,10 @@ where
         self.span,
         self.slice
       ),
-      Err(err) => format!("lexer error {err:?}@{:?} (slice {:?})", self.span, self.slice),
+      Err(err) => format!(
+        "lexer error {err:?}@{:?} (slice {:?})",
+        self.span, self.slice
+      ),
     }
   }
 }
