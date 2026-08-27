@@ -5071,3 +5071,40 @@ fn one_side_that_will_not_equal_itself_is_enough_to_make_a_difference_inconclusi
     "a conclusive difference exists, so nothing is refused, got: {msg}"
   );
 }
+
+#[test]
+fn a_later_component_of_the_same_item_outranks_an_earlier_one_the_kit_cannot_use() {
+  // The ranking inside ONE item, which the stream cells cannot reach: `LyingKind` is consulted
+  // first and decides nothing — it answers `false` to every comparison, its own included — while
+  // the span behind it is `Ord` and settles the divergence outright.
+  //
+  // Before: "[input #0 non-reflexive-payload] integration/peek-heavy position 0: INCONCLUSIVE —
+  // the token's `Kind` …", over a span divergence the kit had established. The existing
+  // `LyingKind` cell asks the other question — a lying kind with NOTHING conclusive behind it —
+  // so the pair differs in the one thing.
+  let expected = [super::StreamItem::<LyingKindLexer<'_>>::Token(
+    LTok,
+    SimpleSpan::new(0, 1),
+  )];
+  let got = [super::StreamItem::<LyingKindLexer<'_>>::Token(
+    LTok,
+    SimpleSpan::new(0, 2),
+  )];
+  let msg = panic_message(|| {
+    super::assert_stream_eq::<LyingKindLexer<'_>>(
+      0,
+      "peek-heavy",
+      super::COMMITTED,
+      &expected,
+      &got,
+    );
+  });
+  assert!(
+    msg.contains("[input #0 integration/peek-heavy] position 0: committed token stream diverges"),
+    "the span is what the kit established and the kind is not, got: {msg}"
+  );
+  assert!(
+    !msg.contains("non-reflexive-payload"),
+    "a sound span outranks a `Kind` the kit cannot use, got: {msg}"
+  );
+}

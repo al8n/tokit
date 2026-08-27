@@ -68,10 +68,19 @@ lexer. A vocabulary whose token or error genuinely cannot be `PartialEq` loses t
 recovers it with a hand-written impl or a newtype.
 
 One thing `PartialEq` does *not* promise is reflexivity, and a payload holding an `f64` that can
-be `NaN` is not equal to itself. That is your obligation, not the kit's — hand-write the impl
-that says what equality means for such a type — but the kit will not misreport it: a comparison
-decided by a value that will not equal itself is refused, tagged `non-reflexive-payload` and
-naming the component, instead of being reported as a conformance failure of your lexer.
+be `NaN` is not equal to itself. `Eq` and `Ord` *do* promise it — but they are markers, and
+nothing checks the promise, so a `Kind`, a span, an offset or a source slice can break it too.
+Either way it is your obligation, not the kit's — hand-write the impl that says what equality
+means for such a type — and either way the kit will not misreport it: a comparison decided by a
+value that will not equal itself is refused, tagged `non-reflexive-payload` and naming the
+component, instead of being reported as a conformance failure of your lexer.
+
+The kit refuses only when it has nothing better to say. A difference it *can* convict on — one at
+the discriminant, one in item count, or one between two values that each equal themselves —
+outranks a comparison it cannot use, wherever both are available: two runs yielding `[Tok(NaN)]`
+and `[Tok(NaN), Tok(0.0)]` are reported as a length mismatch, because the extra item proves the
+divergence whatever `NaN` does. The refusal is the answer of last resort, and it means the kit
+searched and found nothing it could stand behind.
 
 ```rust
 # use tokora::{Token as TokenT, logos::{self, Logos}};
