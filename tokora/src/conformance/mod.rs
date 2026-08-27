@@ -760,6 +760,17 @@ where
   /// an address the source does not share. A driver that admits **no** cut below the source length
   /// certifies nothing about any change of buffer, and is refused rather than passed.
   ///
+  /// What the kit checks about a supplied buffer is that it is a content-preserving prefix — and it
+  /// checks that twice, because being asked once stops a driver giving a second answer and does not
+  /// stop it writing through a reference it already gave. What the kit cannot check is that the
+  /// buffer *means* what the prefix means: the comparison is over [`Source::Slice`] values while
+  /// the lexer is handed the whole [`L::Source`](Lexer::Source), so **this tier assumes a source
+  /// whose lexical semantics are fully represented by its [`Slice`](Source::Slice)**. Where they
+  /// are not — a source carrying a mode, a keyword table, a dialect the slice does not show —
+  /// handing back a buffer that lexes like the prefix it stands for is the driver's obligation, and
+  /// it is the caller's the way the reflexivity of a payload's `PartialEq` is. [`RefillDriver`]
+  /// carries the argument, including why it is stated rather than hooked or bounded.
+  ///
   /// # The oracle, and the comparison it is drawn with
   ///
   /// The oracle is the **complete-input lex of the whole source** — the same reference
@@ -820,6 +831,53 @@ where
   /// worded as such: `refill-buffer`, when the driver hands back something that is not a
   /// content-preserving prefix of the source, and `refill-coverage`, when the driver admits no cut
   /// below the source length while the source offers one — a run that certified nothing.
+  ///
+  /// # Reading the certificate is not optional
+  ///
+  /// The two facts the caller supplies here — which cuts a chunk can end at, and what a leg's
+  /// buffer is — are the two the kit cannot check. What it *can* do is count them, and that count
+  /// is the return value. `harness.run_refill(driver);` throws it away at the semicolon, and a run
+  /// whose driver admitted one cut out of five then reads exactly like a run that admitted all
+  /// five. So this method and [`RefillCoverage`] are both `#[must_use]`, and the two requirements
+  /// a caller actually has are one call each —
+  /// [`require_every_admissible_cut`](RefillCoverage::require_every_admissible_cut) and
+  /// [`require_every_cut_relocated`](RefillCoverage::require_every_cut_relocated) — so the strong
+  /// spelling is a chain rather than a hand-rolled comparison against numbers read back out.
+  ///
+  /// The weak spelling does not compile where the lint is denied:
+  ///
+  /// ```compile_fail
+  /// #![deny(unused_must_use)]
+  #[doc = include_str!("doctest_char_lexer.md")]
+  /// let corpus = ["hello", "a b"];
+  /// let chunks = OwnedChunks::over(corpus);
+  /// // The certificate is dropped at the semicolon: a driver that admitted one cut and a driver
+  /// // that admitted every cut leave the same trace behind, which is none.
+  /// Harness::<CharLexer<'_>>::over(corpus).run_refill(&chunks);
+  /// ```
+  ///
+  /// and the strong one does, under the same denial and over the same lexer — the two cells differ
+  /// in their last statement and in nothing else:
+  ///
+  /// ```
+  /// #![deny(unused_must_use)]
+  #[doc = include_str!("doctest_char_lexer.md")]
+  /// let corpus = ["hello", "a b"];
+  /// let chunks = OwnedChunks::over(corpus);
+  /// Harness::<CharLexer<'_>>::over(corpus)
+  ///   .run_refill(&chunks)
+  ///   .require_every_admissible_cut()
+  ///   .require_every_cut_relocated();
+  /// ```
+  ///
+  /// The two requirements return `&Self` rather than `Self` precisely so that the chain is a
+  /// statement the `must_use` is satisfied by, instead of one more value to drop.
+  #[must_use = "a refill run's certificate is the RefillCoverage it hands back. A RefillDriver may \
+                narrow the cut set to a single position, and a run under `SameAllocation` \
+                relocates no buffer at all, so dropping this drops the only evidence that anything \
+                was covered — the run reads as a pass either way. Read the numbers, or require \
+                them with `RefillCoverage::require_every_admissible_cut` and \
+                `RefillCoverage::require_every_cut_relocated`"]
   pub fn run_refill<D>(&self, driver: D) -> RefillCoverage
   where
     D: RefillDriver<'inp, L::Source>,
@@ -874,9 +932,59 @@ where
 /// each of them **once** per input. So a driver can narrow the cut set and can never widen it, and
 /// an implementation that answered differently on a second call could not change what was driven.
 ///
+/// Asking once is not the same as the answer holding still, so every buffer is checked twice: once
+/// as it arrives, and once after the driver has answered every cut of that input and cannot be
+/// called again. A driver that hands back a reference it can still write through — through a
+/// `Cell`, a `RefCell`, an arena it reuses — would otherwise be able to rewrite a buffer that had
+/// already passed while a later cut was being answered, and the schedules are built out of the
+/// whole table at once. The second refusal says so in as many words.
+///
 /// The kit does not ask for the buffer at the source length: a schedule's last leg is the source
 /// itself, sealed, because that is what makes the oracle comparison an equality over the value the
 /// oracle lexed rather than over one that merely equals it.
+///
+/// # What it cannot check, and the obligation that covers it
+///
+/// That comparison is over [`Source::Slice`] values, and **slice equality is not source
+/// equivalence**. A leg is handed the whole `S`, and a source is free to carry more than its slice
+/// does: a mode flag, a keyword table, a dialect, an interner handle. Over such a source two values
+/// can compare equal here and lex differently — a source of `{ text, keywords }` whose buffer holds
+/// the right text under the wrong keyword set passes this check, and the lexer then commits an
+/// identifier where the oracle has a keyword. The kit reports that as `refill-equivalence`, against
+/// the lexer, which is exactly the mis-attribution the rest of this tier is built to avoid.
+///
+/// So the tier assumes a source **whose lexical semantics are fully represented by its
+/// [`Slice`](Source::Slice)**, and where they are not, supplying a buffer that lexes like the
+/// prefix it stands for is the driver's obligation. That is written here rather than checked, in
+/// the same posture as [`run`](Harness::run)'s reflexivity obligation and the `Eq` that promises
+/// reflexivity and does not keep it: the kit says what it has not checked instead of checking
+/// something weaker and calling it the same thing.
+///
+/// **Why it is not a hook.** The check that would close it is a caller-supplied predicate saying
+/// *this buffer means what that prefix means* — and a caller-supplied predicate is a
+/// caller-supplied exemption. There is one such channel already,
+/// [`over_cuts`](OwnedChunks::over_cuts), and it is a value in the caller's own source, seen in
+/// review, precisely because no kit can tell a real rule from a convenient one. A second one here
+/// would have the kit asking the driver to certify the driver, which is not evidence about
+/// anything.
+///
+/// **Why it is not a bound.** A bound is what this kit reaches for first — [`run`](Harness::run)
+/// buys item identity with `PartialEq` rather than with a caller's comparator — so the alternative
+/// is worth writing down. The equality that would settle this is `buf` against *the first `k` units
+/// of `src` as an `S`*, and the kit has no such value: constructing one needs
+/// `S: Index<RangeTo<usize>, Output = S>`, which is the bound this tier dropped in order to exist,
+/// since a source that cannot slice itself but can hand over a buffer is the caller a driver is
+/// *for*. Re-adding it would deny the tier to that caller in order to check them. The other
+/// spelling — a marker trait the caller implements to promise the property — is this obligation
+/// with a compile step in front of it: unverifiable in the same way, and additionally denying the
+/// tier to every source that has not written the impl. Neither buys a check; both buy an exclusion.
+///
+/// What is left is a boundary a reader can see, and the shipped drivers are on the safe side of it
+/// by construction: [`OwnedChunks`] copies `src[..k]` through `ToOwned` and [`SameAllocation`]
+/// borrows it, so both derive every buffer from the source through the source's own indexing and
+/// carry whatever the slice does not. The obligation binds a **hand-written** driver over a source
+/// with slice-invisible state, and it reads: hand back the buffer your own chunking would hold, not
+/// one that merely slices the same.
 pub trait RefillDriver<'inp, S>
 where
   S: Source<usize> + ?Sized,
@@ -1038,12 +1146,19 @@ where
 }
 
 /// What a [`run_refill`](Harness::run_refill) run actually reached: the cut positions it drove
-/// schedules from, the positions the sources offered it, and the legs that really did change
-/// allocation.
+/// schedules from, the positions the sources offered it, and the cuts whose buffer really did
+/// change allocation.
 ///
 /// This exists because a [`RefillDriver`] is allowed to narrow the cut set and the kit cannot tell
 /// a driver's real chunk rule from a convenient one. What it can do is hand the numbers back, so a
 /// run that covered three cuts out of ninety is a fact in the caller's test rather than a silence.
+///
+/// That is why the type is `#[must_use]` as well as the method that returns it: a number nobody
+/// reads is the silence it was built to replace. The two requirements a caller actually has are
+/// [`require_every_admissible_cut`](Self::require_every_admissible_cut) and
+/// [`require_every_cut_relocated`](Self::require_every_cut_relocated), which return `&Self` so
+/// that requiring both is one chain and the chain is a statement rather than another value to
+/// drop.
 ///
 /// # What is and is not counted
 ///
@@ -1051,6 +1166,8 @@ where
 /// every schedule's last leg unconditionally — it is what the oracle comparison is against — so
 /// counting it would add one to every input and distinguish nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[must_use = "this is what the refill run certified, and the kit cannot check the two facts it \
+              counts; see `Harness::run_refill`"]
 pub struct RefillCoverage {
   /// One entry per corpus input, in corpus order.
   per_input: Vec<InputCoverage>,
@@ -1092,9 +1209,9 @@ impl RefillCoverage {
   /// backing `&Self` addresses the pointer variable and not the bytes, so an inequality there
   /// proves nothing and the crate refuses to read one anywhere else either.
   ///
-  /// A run under [`SameAllocation`] reports `Some(0)` over such a source, and that zero is the
-  /// whole point of the number: every leg shared one base address, so nothing about a *change* of
-  /// buffer was tested.
+  /// A run under [`SameAllocation`] over a source that *can* answer reports `Some(0)`, and that
+  /// zero is the whole point of the number: every leg shared one base address, so nothing about a
+  /// *change* of buffer was tested.
   #[must_use]
   pub fn relocated(&self) -> Option<usize> {
     self
@@ -1113,6 +1230,77 @@ impl RefillCoverage {
   #[must_use]
   pub fn admissible_at(&self, idx: usize) -> Option<usize> {
     self.per_input.get(idx).map(|i| i.admissible)
+  }
+
+  /// Requires that the run drove a schedule from **every cut the sources offered** —
+  /// [`exercised`](Self::exercised) equal to [`admissible`](Self::admissible) — and panics
+  /// otherwise.
+  ///
+  /// This is the requirement a caller has whenever the driver is meant to model chunks that can
+  /// end anywhere, which is what [`OwnedChunks::over`] builds. It is *not* the requirement of a
+  /// caller whose chunks are genuinely narrower — a UTF-8-aligned byte driver exercises fewer cuts
+  /// than `[u8]` offers **by construction**, and that gap is the cut rule doing its job. Such a
+  /// caller reads the numbers instead, which is why this is a method and not a check inside the
+  /// run.
+  ///
+  /// # Panics
+  ///
+  /// Panics, tagged `refill-coverage`, when any admissible cut went undriven. Like every other
+  /// refusal in this kit it is worded as the kit declining to certify what it was asked for,
+  /// because an unmet requirement here is a fact about the driver and never about the lexer.
+  pub fn require_every_admissible_cut(&self) -> &Self {
+    let (exercised, admissible) = (self.exercised(), self.admissible());
+    assert!(
+      exercised == admissible,
+      "tokora conformance [refill-coverage] the run drove schedules from {exercised} of the \
+       {admissible} cut positions the corpus offers, and this call required every one of them. \
+       The RefillDriver narrowed the cut set: widen its rule, or — if its chunks really do end \
+       only where it says — drop this requirement and read the two numbers, which is the whole \
+       reason they are handed back. This is not a verdict on the lexer, which has not been \
+       convicted of anything."
+    );
+    self
+  }
+
+  /// Requires that **every exercised cut** got a buffer at an address the source does not share —
+  /// [`relocated`](Self::relocated) equal to `Some(exercised())` — and panics otherwise.
+  ///
+  /// This is the requirement that separates the tier's subject from its neighbour. A run whose
+  /// legs all share one allocation certifies that state survives a change of *length*; the
+  /// property this tier exists for is that state survives a change of *buffer*, and only a
+  /// relocated leg tests it. [`SameAllocation`] cannot satisfy this by construction, and that is
+  /// the mode's stated reduction rather than a surprise.
+  ///
+  /// # Panics
+  ///
+  /// Panics, tagged `refill-coverage`, when some exercised cut kept the source's address — and,
+  /// separately, when the count is [`None`] because
+  /// [`REFERENT_IS_BYTES`](Source::REFERENT_IS_BYTES) is `false` for this source and no address
+  /// comparison over it proves anything. The second is the kit reporting the requirement
+  /// *unanswerable* rather than unmet, which is not the same verdict and is not worded as one.
+  pub fn require_every_cut_relocated(&self) -> &Self {
+    let exercised = self.exercised();
+    let Some(relocated) = self.relocated() else {
+      panic!(
+        "tokora conformance [refill-coverage] this call required every exercised cut to change \
+         allocation, and over this source the kit cannot answer that honestly: \
+         `Source::REFERENT_IS_BYTES` is `false`, so `&Self` addresses a pointer variable rather \
+         than the bytes and an inequality between two of them proves nothing. The requirement is \
+         unanswerable here, not unmet — take it off, or drive the tier over a source whose \
+         reference is its data. This is not a verdict on the lexer."
+      );
+    };
+    assert!(
+      relocated == exercised,
+      "tokora conformance [refill-coverage] {relocated} of the {exercised} cuts this run \
+       exercised got a buffer at an address the source does not share, and this call required all \
+       of them. A leg that keeps the source's address tests a change of *length*; the property \
+       this tier exists for is state surviving a change of *buffer*. `SameAllocation` cannot \
+       satisfy this by construction — reach for `OwnedChunks`, or for a driver of your own that \
+       owns its buffers. This is not a verdict on the lexer, which has not been convicted of \
+       anything."
+    );
+    self
   }
 }
 
@@ -3385,6 +3573,21 @@ where
 /// A driver can then only ever *narrow* the cut set. If the source cannot be sliced at `k` there is
 /// no buffer for the kit to compare against, so a driver answering `Some` there could not be
 /// checked — and an unverifiable buffer is exactly what turns every later verdict into noise.
+///
+/// # Why every buffer is validated twice
+///
+/// **Asking once prevents a second answer; it does not freeze the first one.** A buffer checked the
+/// instant it arrives is checked while the driver still has `k+1..len` callbacks to run, and every
+/// one of those is an opportunity to write through whatever the returned reference points at — a
+/// `Cell`, a `RefCell`, an arena the driver reuses, any interior mutability at all. The schedules
+/// are then built out of the *whole* table at once, so a buffer that passed at cut 2 and was
+/// rewritten while cut 3 was being answered is lexed in its rewritten form, and the divergence that
+/// follows is reported against the lexer.
+///
+/// So the table is checked again once the driver will not be called again, which is the first
+/// moment at which "these bytes are a prefix of the source" is a statement about all of them at the
+/// same time. The second pass costs one slice comparison per exercised cut — Θ(n²) bytes over an
+/// input of n units, the order this tier already lexes at.
 fn resolve_buffers<'inp, L, D>(
   idx: usize,
   src: &'inp L::Source,
@@ -3410,7 +3613,7 @@ where
     let Some(buf) = driver.buffer(idx, src, k) else {
       continue;
     };
-    assert_supplied_prefix::<L>(idx, src, k, buf);
+    assert_supplied_prefix::<L>(idx, src, k, buf, BufferCheck::Handed);
     // Sound only where `&Self` addresses the bytes; see `RefillCoverage::relocated` for why the
     // count is `None` rather than zero everywhere else.
     if !core::ptr::addr_eq(core::ptr::from_ref(buf), core::ptr::from_ref(src)) {
@@ -3418,6 +3621,15 @@ where
     }
     *slot = Some(buf);
     exercised += 1;
+  }
+
+  // The driver has now been asked everything it will be asked, so this is the first point at which
+  // every buffer can be checked *at the same time*. See the header: a check the moment a reference
+  // arrives is a check with the rest of the callbacks still to come.
+  for (k, buf) in buffers.iter().enumerate() {
+    if let Some(buf) = *buf {
+      assert_supplied_prefix::<L>(idx, src, k, buf, BufferCheck::Settled);
+    }
   }
 
   assert!(
@@ -3442,22 +3654,61 @@ where
   )
 }
 
+/// Which of a buffer's two validations is speaking, and the sentence that says what its failing
+/// means.
+///
+/// The comparison is one comparison — a second implementation of it would be a second place for it
+/// to be wrong — so what the two passes differ in is the diagnosis, and only that.
+#[derive(Clone, Copy)]
+enum BufferCheck {
+  /// The moment the driver handed the reference over.
+  Handed,
+  /// After the driver has answered every cut of this input and will not be asked again.
+  Settled,
+}
+
+impl BufferCheck {
+  /// What a failure at this pass tells the reader, appended to the shared refusal.
+  const fn diagnosis(self) -> &'static str {
+    match self {
+      Self::Handed => "",
+      Self::Settled => {
+        " The buffer was a correct prefix when it was handed over and is not one now: the kit \
+         validates each buffer as it arrives and again once the driver has answered every cut, \
+         because being asked once stops a driver giving a second answer and does not stop it \
+         writing through the reference it already gave. Something the driver can still reach — a \
+         `Cell`, a `RefCell`, an arena it reuses — rewrote this buffer while a later cut was \
+         being answered, and every schedule is built out of all of them at once."
+      }
+    }
+  }
+}
+
 /// Refuses a supplied buffer that is not exactly the first `k` units of the source.
 ///
 /// This is the kit declining to draw a verdict, in [`refuse_non_reflexive`]'s posture and for the
 /// same reason: everything downstream would be a comparison against bytes the oracle never lexed,
 /// so reporting the divergence it produces would convict the lexer of the driver's mistake.
-fn assert_supplied_prefix<'inp, L>(idx: usize, src: &'inp L::Source, k: usize, buf: &'inp L::Source)
-where
+///
+/// Called twice per exercised cut — see [`resolve_buffers`] for why once is not enough — with
+/// `when` carrying the only thing that differs between the two.
+fn assert_supplied_prefix<'inp, L>(
+  idx: usize,
+  src: &'inp L::Source,
+  k: usize,
+  buf: &'inp L::Source,
+  when: BufferCheck,
+) where
   L: Lexer<'inp, Offset = usize>,
 {
+  let when = when.diagnosis();
   let got_len = <L::Source as Source<usize>>::len(buf);
   assert!(
     got_len == k,
     "tokora conformance [input #{idx} refill-buffer] the RefillDriver returned a buffer of \
      {got_len} units for cut k={k}. A buffer for cut k is the first k units of the source and \
      nothing else — the kit refuses it rather than lex it, because a leg over the wrong bytes \
-     makes every comparison after it meaningless. This is not a verdict on the lexer."
+     makes every comparison after it meaningless. This is not a verdict on the lexer.{when}"
   );
   let want: <L::Source as Source<usize>>::Slice<'inp> = src
     .slice(..k)
@@ -3468,7 +3719,7 @@ where
     "tokora conformance [input #{idx} refill-buffer] the RefillDriver returned a buffer for cut \
      k={k} whose contents differ from the source: expected {want:?}, got {got:?}. A refill \
      appends; it never rewrites what has already arrived. The kit refuses it rather than lex it — \
-     this is not a verdict on the lexer."
+     this is not a verdict on the lexer.{when}"
   );
 }
 

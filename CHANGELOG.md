@@ -1035,8 +1035,40 @@ and will red until they do.
   certified nothing (`refill-coverage`). Both refusals are worded as the kit declining a verdict
   rather than as the lexer failing one. What no kit can do is tell a driver's real chunk rule from
   a convenient one — so `SameAllocation` is a value you write, for `Budget`'s reason, and the run
-  returns a `conformance::RefillCoverage`: cuts exercised, cuts the sources offered, and legs that
-  actually relocated. A narrow rule is then a number rather than a silence.
+  returns a `conformance::RefillCoverage`: cuts exercised, cuts the sources offered, and cuts whose
+  buffer actually relocated. A narrow rule is then a number rather than a silence.
+
+  **A certificate nobody reads is the silence it replaced**, so `run_refill` and `RefillCoverage`
+  are both `#[must_use]`: `harness.run_refill(driver);` drops the numbers at the semicolon, and a
+  driver that admitted one cut of five then reads exactly like one that admitted all five. The two
+  requirements a caller actually has are one call each —
+  `RefillCoverage::require_every_admissible_cut` and `RefillCoverage::require_every_cut_relocated`
+  — returning `&Self` so that requiring both is one chain and the chain is a statement rather than
+  another value to drop. The second is `SameAllocation`'s stated reduction as a failed requirement
+  rather than as a paragraph, and it reports the requirement **unanswerable** rather than unmet
+  over a source whose `Source::REFERENT_IS_BYTES` is `false`, where no address comparison proves
+  anything.
+
+  **Every supplied buffer is validated twice**, once as it arrives and once after the driver has
+  answered every cut of that input. Being asked once stops a driver giving a second *answer* and
+  does not stop it writing through the reference it already gave — a `Cell`, a `RefCell`, an arena
+  it reuses — while the schedules are built out of the whole table at once. A buffer that passed at
+  cut 3 and was rewritten while cut 4 was being answered was lexed in its rewritten form, and the
+  divergence that followed was reported against the lexer.
+
+  **What the kit cannot check is stated as an obligation rather than hooked.** That validation
+  compares `Source::Slice` values while the lexer receives the whole `L::Source`, and slice
+  equality is not source equivalence: a source carrying a mode, a keyword table or a dialect its
+  slice does not show can be handed back with the right text in the wrong mode, pass, and have the
+  resulting divergence charged to a conforming lexer. So the tier assumes **a source whose lexical
+  semantics are fully represented by its `Slice`**, in the posture the reflexivity obligation
+  already has. Not a caller-supplied predicate, because that is a caller-supplied exemption and the
+  cut rule is the one such channel this design admits — a second would have the kit asking the
+  driver to certify the driver. Not a bound either: the equality that would settle it needs
+  `Index<RangeTo<usize>, Output = Self>`, the bound this tier dropped in order to reach a source
+  that cannot slice itself, and a marker trait is this obligation with a compile step in front of
+  it. Both shipped drivers derive their buffers from the source through the source's own indexing,
+  so the obligation binds a hand-written driver over such a source.
 
   **The withholding is what keeps it from being stricter than the contract**, and the plant says so
   rather than the sentence: with the holdback removed, every conforming fixture in the tree reds —

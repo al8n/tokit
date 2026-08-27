@@ -2451,9 +2451,15 @@ mod logos_adapter {
     // The adapter's `State` is the vocabulary's logos `Extras` plus the probe channel, so a
     // carried state is a real value here rather than a `()`.
     let syn = ["ab 12 cd", "one two three", "42", "  x  ", ""];
-    Harness::<SynLexer<'_>>::over(syn).run_refill(&OwnedChunks::over(syn));
+    Harness::<SynLexer<'_>>::over(syn)
+      .run_refill(&OwnedChunks::over(syn))
+      .require_every_admissible_cut()
+      .require_every_cut_relocated();
     let tile = ["ab 12 cd", "one two", "42"];
-    Harness::<TileLogosLexer<'_>>::over(tile).run_refill(&OwnedChunks::over(tile));
+    Harness::<TileLogosLexer<'_>>::over(tile)
+      .run_refill(&OwnedChunks::over(tile))
+      .require_every_admissible_cut()
+      .require_every_cut_relocated();
   }
 }
 
@@ -2603,10 +2609,16 @@ mod prefix_backtracking {
     // sealed buffer. That is sound and vacuous in equal measure, and worth having as a cell: an
     // `Unbounded` claim must not be able to red.
     let corpus = ["1.5", "5e-3", "1.", "5e", "5ex"];
-    Harness::<DefaultLexer<'_>>::over(corpus).run_refill(&OwnedChunks::over(corpus));
+    Harness::<DefaultLexer<'_>>::over(corpus)
+      .run_refill(&OwnedChunks::over(corpus))
+      .require_every_admissible_cut()
+      .require_every_cut_relocated();
     // And the corpus-shaped limitation is the same here as it is for `run_partial`: the same lie,
     // on the corpus that omits the source it diverges on, is not falsified by this tier either.
-    Harness::<LyingLexer<'_>>::over(["1."]).run_refill(&OwnedChunks::over(["1."]));
+    Harness::<LyingLexer<'_>>::over(["1."])
+      .run_refill(&OwnedChunks::over(["1."]))
+      .require_every_admissible_cut()
+      .require_every_cut_relocated();
   }
 }
 
@@ -2745,7 +2757,10 @@ mod recorded_value {
   #[test]
   fn an_honest_recorded_value_passes_the_refill_tier() {
     let corpus = ["1.5", "1.", "12 34", "1.5 2.5"];
-    Harness::<HonestLexer<'_>>::over(corpus).run_refill(&OwnedChunks::over(corpus));
+    Harness::<HonestLexer<'_>>::over(corpus)
+      .run_refill(&OwnedChunks::over(corpus))
+      .require_every_admissible_cut()
+      .require_every_cut_relocated();
   }
 
   #[test]
@@ -5372,7 +5387,10 @@ where
 fn the_comment_lexer_that_keeps_the_fact_passes_every_tier() {
   Harness::<KeepsTheFact<'_>>::over(REFILL_CORPUS).run();
   Harness::<KeepsTheFact<'_>>::over(REFILL_CORPUS).run_partial();
-  Harness::<KeepsTheFact<'_>>::over(REFILL_CORPUS).run_refill(&OwnedChunks::over(REFILL_CORPUS));
+  Harness::<KeepsTheFact<'_>>::over(REFILL_CORPUS)
+    .run_refill(&OwnedChunks::over(REFILL_CORPUS))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
 }
 
 #[test]
@@ -5417,7 +5435,8 @@ fn witness_two_an_ident_lexed_out_of_comment_text() {
 fn the_refill_tier_reds_the_defect_from_its_own_entry_point() {
   // The cells above drive one schedule each so the witness is exactly the pql probe. The entry
   // point derives its cuts, so it reaches the same defect without being told where it is.
-  Harness::<LosesTheFact<'_>>::over(REFILL_CORPUS).run_refill(&OwnedChunks::over(REFILL_CORPUS));
+  let _ =
+    Harness::<LosesTheFact<'_>>::over(REFILL_CORPUS).run_refill(&OwnedChunks::over(REFILL_CORPUS));
 }
 
 #[test]
@@ -5445,19 +5464,43 @@ fn every_conforming_hand_rolled_fixture_passes_the_refill_tier() {
   // hand-rolled fixture this file certifies elsewhere is driven through it over the same corpus,
   // and over REAL buffers — the same corpus under `SameAllocation` was what round 1 shipped.
   let tile = ["hello world", "a", "", "x y  z", "café"];
-  Harness::<TileLexer<'_>>::over(tile).run_refill(&OwnedChunks::over(tile));
+  Harness::<TileLexer<'_>>::over(tile)
+    .run_refill(&OwnedChunks::over(tile))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
   let syntactic = ["ab cd ef", "one  two", "solo", ""];
-  Harness::<SyntacticLexer<'_>>::over(syntactic).run_refill(&OwnedChunks::over(syntactic));
+  Harness::<SyntacticLexer<'_>>::over(syntactic)
+    .run_refill(&OwnedChunks::over(syntactic))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
   let faithful = ["a?b", "??", "?", "", "ab?cd"];
-  Harness::<FaithfulErrLexer<'_>>::over(faithful).run_refill(&OwnedChunks::over(faithful));
+  Harness::<FaithfulErrLexer<'_>>::over(faithful)
+    .run_refill(&OwnedChunks::over(faithful))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
   let own_byte = ["abz", "a", "", "café"];
-  Harness::<OwnBytePayloadLexer<'_>>::over(own_byte).run_refill(&OwnedChunks::over(own_byte));
+  Harness::<OwnBytePayloadLexer<'_>>::over(own_byte)
+    .run_refill(&OwnedChunks::over(own_byte))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
   let ticking = ["a?b", "??", "?", ""];
-  Harness::<TickingErrLexer<'_>>::over(ticking).run_refill(&OwnedChunks::over(ticking));
-  Harness::<RepeatErrLexer<'_, 72>>::new("a").run_refill(&OwnedChunks::over(["a"]));
-  Harness::<RepeatErrLexer<'_, 100>>::new("abcdefgh").run_refill(&OwnedChunks::over(["abcdefgh"]));
+  Harness::<TickingErrLexer<'_>>::over(ticking)
+    .run_refill(&OwnedChunks::over(ticking))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
+  Harness::<RepeatErrLexer<'_, 72>>::new("a")
+    .run_refill(&OwnedChunks::over(["a"]))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
+  Harness::<RepeatErrLexer<'_, 100>>::new("abcdefgh")
+    .run_refill(&OwnedChunks::over(["abcdefgh"]))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
   let nan = ["ab", "a", ""];
-  Harness::<NanPayloadLexer<'_>>::over(nan).run_refill(&OwnedChunks::over(nan));
+  Harness::<NanPayloadLexer<'_>>::over(nan)
+    .run_refill(&OwnedChunks::over(nan))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
 }
 
 // ── A leg has to change buffer, not just length ─────────────────────────────────────
@@ -5591,7 +5634,7 @@ fn owned_chunks_red_a_lexer_that_keys_on_the_buffer_address() {
   // The other half of the same cell: the identical lexer, the identical corpus, the identical
   // cuts. The only thing that changed is that a leg's bytes live in the driver's storage, so the
   // pair really does cross a change of buffer.
-  Harness::<PointerStateLexer<'_>>::over(POINTER_CORPUS)
+  let _ = Harness::<PointerStateLexer<'_>>::over(POINTER_CORPUS)
     .run_refill(&OwnedChunks::over(POINTER_CORPUS));
 }
 
@@ -5776,7 +5819,8 @@ fn every_byte_index_reds_a_lexer_whose_driver_never_cuts_there() {
   // include one **inside** the two-byte `é` — a buffer a UTF-8-validating driver never delivers.
   // The lexer is convicted on a schedule its driver cannot produce, which is the one thing a kit
   // must not do (#295).
-  Harness::<Utf8ByteLexer<'_>>::over(BYTE_CORPUS).run_refill(&OwnedChunks::over(BYTE_CORPUS));
+  let _ =
+    Harness::<Utf8ByteLexer<'_>>::over(BYTE_CORPUS).run_refill(&OwnedChunks::over(BYTE_CORPUS));
 }
 
 #[test]
@@ -5946,7 +5990,7 @@ fn a_byte_comment_lexer_that_keeps_the_fact_passes_the_aligned_cut_rule() {
 fn the_aligned_cut_rule_does_not_save_a_byte_lexer_that_forgets() {
   // The control for the cell above. A cut rule narrow enough to remove the false red must still be
   // wide enough to keep the true one, or the trade was a false red for a false green.
-  Harness::<ByteCommentLexer<'_, true>>::over(BYTE_COMMENT_CORPUS)
+  let _ = Harness::<ByteCommentLexer<'_, true>>::over(BYTE_COMMENT_CORPUS)
     .run_refill(&OwnedChunks::over_cuts(BYTE_COMMENT_CORPUS, utf8_aligned));
 }
 
@@ -5982,19 +6026,19 @@ impl<'inp> super::RefillDriver<'inp, str> for NoChunkEnds {
 #[test]
 #[should_panic(expected = "[input #0 refill-buffer] the RefillDriver returned a buffer of 0 units")]
 fn a_buffer_of_the_wrong_length_is_refused_and_not_lexed() {
-  Harness::<TileLexer<'_>>::new("ab cd").run_refill(ShortBuffer);
+  let _ = Harness::<TileLexer<'_>>::new("ab cd").run_refill(ShortBuffer);
 }
 
 #[test]
 #[should_panic(expected = "[input #0 refill-buffer] the RefillDriver returned a buffer for cut")]
 fn a_buffer_of_the_wrong_bytes_is_refused_and_not_lexed() {
-  Harness::<TileLexer<'_>>::new("ab cd").run_refill(OtherBytes);
+  let _ = Harness::<TileLexer<'_>>::new("ab cd").run_refill(OtherBytes);
 }
 
 #[test]
 #[should_panic(expected = "[input #0 refill-coverage] the RefillDriver admitted none of the 5 cut")]
 fn a_driver_that_admits_no_cut_certifies_nothing_and_is_refused() {
-  Harness::<TileLexer<'_>>::new("ab cd").run_refill(NoChunkEnds);
+  let _ = Harness::<TileLexer<'_>>::new("ab cd").run_refill(NoChunkEnds);
 }
 
 #[test]
@@ -6037,4 +6081,365 @@ fn a_driver_can_narrow_the_cut_set_and_can_never_widen_it() {
   // 5 bytes, one of which is a continuation byte: `c`, `a`, `f`, the `é` lead, and offset 0.
   assert_eq!(coverage.admissible(), 4);
   assert_eq!(coverage.exercised(), 4);
+}
+
+// ── A buffer the driver can still reach, and a mode its slice does not carry ─────────
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ModalKind {
+  Ident,
+  Keyword,
+}
+
+impl core::fmt::Display for ModalKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    match self {
+      Self::Ident => f.write_str("ident"),
+      Self::Keyword => f.write_str("keyword"),
+    }
+  }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ModalTok {
+  kind: ModalKind,
+  head: u8,
+}
+
+impl Token<'_> for ModalTok {
+  type Kind = ModalKind;
+  type Error = Infallible;
+
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::WithinSpan;
+
+  fn kind(&self) -> ModalKind {
+    self.kind
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// A `Source` that is **not** its slice, in both of the ways a `RefillDriver` can exploit.
+///
+/// - `text` is behind a [`Cell`](core::cell::Cell), so whoever holds the `ModalSource` can rewrite
+///   its bytes after handing a reference to it away. `str` cannot do this — a `&str` addresses
+///   immutable bytes — which is why the buffer-mutation attack needs a source of its own rather
+///   than one more `&str` driver.
+/// - `keywords` is a fact the slice does not carry: two `ModalSource`s can be equal at
+///   `Source::as_slice` and lex differently. That is the tier's stated obligation, executable.
+///
+/// It is a sized backing, so `REFERENT_IS_BYTES` keeps its conservative default and
+/// `RefillCoverage::relocated` is `None` over it — which is the third thing these cells use it for.
+#[derive(Debug)]
+struct ModalSource {
+  text: core::cell::Cell<&'static str>,
+  keywords: bool,
+}
+
+impl ModalSource {
+  const fn new(text: &'static str, keywords: bool) -> Self {
+    Self {
+      text: core::cell::Cell::new(text),
+      keywords,
+    }
+  }
+
+  fn text(&self) -> &'static str {
+    self.text.get()
+  }
+}
+
+impl crate::Source<usize> for ModalSource {
+  type Slice<'source>
+    = &'source str
+  where
+    Self: 'source;
+
+  fn is_empty(&self) -> bool {
+    self.text().is_empty()
+  }
+
+  fn len(&self) -> usize {
+    self.text().len()
+  }
+
+  fn as_slice(&self) -> Self::Slice<'_> {
+    self.text()
+  }
+
+  fn slice<R>(&self, range: R) -> Option<Self::Slice<'_>>
+  where
+    R: core::ops::RangeBounds<usize>,
+  {
+    self.text().get((
+      range.start_bound().map(|s| *s),
+      range.end_bound().map(|s| *s),
+    ))
+  }
+
+  fn is_boundary(&self, index: usize) -> bool {
+    self.text().is_char_boundary(index)
+  }
+}
+
+/// A whitespace-separated word lexer over [`ModalSource`], whose only mode-sensitive decision is
+/// whether the word `kw` is a keyword.
+struct ModalLexer<'a> {
+  src: &'a ModalSource,
+  start: usize,
+  end: usize,
+  state: (),
+}
+
+impl<'a> Lexer<'a> for ModalLexer<'a> {
+  type State = ();
+  type Source = ModalSource;
+  type Token = ModalTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a ModalSource) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: (),
+    }
+  }
+  fn with_state(src: &'a ModalSource, state: ()) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+  fn state(&self) -> &() {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut () {
+    &mut self.state
+  }
+  fn into_state(self) {
+    self.state
+  }
+  fn source(&self) -> &'a ModalSource {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src.text()[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<ModalTok, Infallible>> {
+    let text = self.src.text();
+    let b = text.as_bytes();
+    let len = b.len();
+    self.start = self.end;
+    while self.start < len && b[self.start] == b' ' {
+      self.start += 1;
+    }
+    if self.start >= len {
+      self.end = self.start;
+      return None;
+    }
+    let mut e = self.start;
+    while e < len && b[e] != b' ' {
+      e += 1;
+    }
+    self.end = e;
+    let kind = if self.src.keywords && &text[self.start..e] == "kw" {
+      ModalKind::Keyword
+    } else {
+      ModalKind::Ident
+    };
+    Some(Ok(ModalTok {
+      kind,
+      head: b[self.start],
+    }))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+/// One [`ModalSource`] per cut of `text`, each holding that prefix under the given mode.
+fn modal_bufs(text: &'static str, keywords: bool) -> Vec<ModalSource> {
+  (0..text.len())
+    .map(|k| ModalSource::new(&text[..k], keywords))
+    .collect()
+}
+
+/// A driver that hands back correct buffers and then **rewrites one it already handed over**,
+/// while it is being asked about a later cut.
+struct MutatingChunks {
+  bufs: Vec<ModalSource>,
+  /// The cut whose callback performs the write.
+  strike: usize,
+  /// The already-validated buffer that callback rewrites, and what it rewrites it to.
+  victim: usize,
+  overwrite: &'static str,
+}
+
+impl<'inp> super::RefillDriver<'inp, ModalSource> for &'inp MutatingChunks {
+  fn buffer(&self, _idx: usize, _src: &'inp ModalSource, k: usize) -> Option<&'inp ModalSource> {
+    // Copied out of `&self` first, for `OwnedChunks`'s reason: `Self` is itself a `&'inp _`.
+    let owner: &'inp MutatingChunks = self;
+    if k == owner.strike {
+      owner.bufs[owner.victim].text.set(owner.overwrite);
+    }
+    owner.bufs.get(k)
+  }
+}
+
+/// A driver whose buffers carry the right text in a mode the source does not have.
+struct WrongMode {
+  bufs: Vec<ModalSource>,
+}
+
+impl<'inp> super::RefillDriver<'inp, ModalSource> for &'inp WrongMode {
+  fn buffer(&self, _idx: usize, _src: &'inp ModalSource, k: usize) -> Option<&'inp ModalSource> {
+    let owner: &'inp WrongMode = self;
+    owner.bufs.get(k)
+  }
+}
+
+#[test]
+fn the_modal_lexer_is_conforming_over_a_driver_that_agrees_with_its_source() {
+  // The control every cell below is read against: the same lexer, the same source, buffers that
+  // carry the source's own mode and are never written to again. Nothing here reds, so what reds
+  // below is the driver's doing and not the lexer's.
+  //
+  // There is no `run_partial` leg, and its absence is the tier's own argument made executable:
+  // `ModalSource` has no `Index<RangeTo<usize>, Output = Self>`, so the entry point that slices its
+  // own prefixes does not apply to this source and this one does — the buffers are the driver's.
+  let src = ModalSource::new("kw x", true);
+  let honest = WrongMode {
+    bufs: modal_bufs("kw x", true),
+  };
+  Harness::<ModalLexer<'_>>::new(&src).run();
+  let coverage = Harness::<ModalLexer<'_>>::new(&src).run_refill(&honest);
+  coverage.require_every_admissible_cut();
+  // A sized backing keeps `REFERENT_IS_BYTES = false`, so the kit refuses to read an address
+  // comparison over it at all rather than reporting one that proves nothing.
+  assert_eq!(coverage.relocated(), None);
+}
+
+#[test]
+#[should_panic(
+  expected = "[input #0 refill-buffer] the RefillDriver returned a buffer for cut \
+                           k=3 whose contents differ"
+)]
+fn a_buffer_rewritten_after_it_passed_is_refused_as_the_drivers_doing() {
+  // Round 3's second finding, executable. Cut 3's buffer is `"ab "` and passes the moment it is
+  // handed over; answering cut 4 rewrites it to `"xb "`. Nothing asks the driver again, so a table
+  // validated only on arrival carries the rewrite into every schedule built from it: `[3, 5]`
+  // commits `x` where the oracle has `a`, and the kit reports `refill-equivalence` against a lexer
+  // that did exactly what it was handed. Validating the settled table is what turns that verdict
+  // back into the driver refusal it always was.
+  let src = ModalSource::new("ab cd", false);
+  let driver = MutatingChunks {
+    bufs: modal_bufs("ab cd", false),
+    strike: 4,
+    victim: 3,
+    overwrite: "xb ",
+  };
+  let _ = Harness::<ModalLexer<'_>>::new(&src).run_refill(&driver);
+}
+
+#[test]
+#[should_panic(
+  expected = "being asked once stops a driver giving a second answer and does not \
+                           stop it writing through the reference it already gave"
+)]
+fn the_rewrite_refusal_says_which_of_the_kits_two_promises_did_not_cover_it() {
+  // The wording is the repair: "asked once" is a fact about callbacks, and the reader has to be
+  // told it was never a fact about referents, or the refusal reads as the earlier one it is not.
+  let src = ModalSource::new("ab cd", false);
+  let driver = MutatingChunks {
+    bufs: modal_bufs("ab cd", false),
+    strike: 4,
+    victim: 3,
+    overwrite: "xb ",
+  };
+  let _ = Harness::<ModalLexer<'_>>::new(&src).run_refill(&driver);
+}
+
+#[test]
+#[should_panic(expected = "[input #0 refill-equivalence] refills [2, 3, 4], position 0")]
+fn a_buffer_in_the_wrong_mode_passes_validation_and_the_verdict_names_the_lexer() {
+  // Round 3's third finding, executable — and it is a **documented obligation** rather than a
+  // repair, so this cell pins the boundary instead of a fix. Every buffer here is the right text:
+  // `Source::as_slice` at cut 3 is `"kw "` on both sides and the length matches, so the kit's
+  // validation passes. What differs is `keywords`, which the slice does not carry, so the leg
+  // commits an ident where the oracle has a keyword and the kit convicts a conforming lexer.
+  //
+  // The kit cannot close this without either a caller-supplied semantic hook (a caller-supplied
+  // exemption, which is what the cut rule already is and why it is a value in the caller's own
+  // source) or a whole-source equality it has no value to build. So `RefillDriver` states it: this
+  // tier assumes a source whose lexical semantics are fully represented by its `Slice`. If this
+  // cell ever stops panicking, the assumption became a check and that contract needs rewriting.
+  let src = ModalSource::new("kw x", true);
+  let driver = WrongMode {
+    bufs: modal_bufs("kw x", false),
+  };
+  let _ = Harness::<ModalLexer<'_>>::new(&src).run_refill(&driver);
+}
+
+// ── The certificate, and the two requirements it can be read with ───────────────────
+
+#[test]
+#[should_panic(
+  expected = "[refill-coverage] the run drove schedules from 7 of the 11 cut \
+                           positions the corpus offers"
+)]
+fn requiring_every_admissible_cut_reds_a_run_whose_driver_narrowed_them() {
+  // The same green run the coverage cell above reads by hand: 7 of 11, because the driver's chunks
+  // are UTF-8 aligned. Read as numbers that is the cut rule working; required as a whole it is
+  // unmet, and the caller says which of the two they meant.
+  let chunks = OwnedChunks::over_cuts(BYTE_CORPUS, utf8_aligned);
+  Harness::<Utf8ByteLexer<'_>>::over(BYTE_CORPUS)
+    .run_refill(&chunks)
+    .require_every_admissible_cut();
+}
+
+#[test]
+#[should_panic(
+  expected = "[refill-coverage] 0 of the 12 cuts this run exercised got a buffer at \
+                           an address the source does not share"
+)]
+fn requiring_relocation_reds_the_mode_that_cannot_relocate() {
+  // `SameAllocation`'s stated reduction, as a failed requirement rather than as a paragraph: the
+  // lexer that keys on the buffer address passes this run, and passes it because nothing moved.
+  Harness::<PointerStateLexer<'_>>::over(POINTER_CORPUS)
+    .run_refill(SameAllocation)
+    .require_every_cut_relocated();
+}
+
+#[test]
+#[should_panic(
+  expected = "[refill-coverage] this call required every exercised cut to change \
+                           allocation, and over this source the kit cannot answer that honestly"
+)]
+fn requiring_relocation_over_a_source_that_cannot_answer_is_unanswerable_not_unmet() {
+  // The `None` arm, and the reason it is a different sentence: `ModalSource` is a sized backing, so
+  // `&Self` addresses a variable rather than the bytes and an inequality between two of them proves
+  // nothing. Reporting that as "no cut relocated" would be reporting a number the kit refuses to
+  // read anywhere else in the crate.
+  let src = ModalSource::new("kw x", true);
+  let honest = WrongMode {
+    bufs: modal_bufs("kw x", true),
+  };
+  Harness::<ModalLexer<'_>>::new(&src)
+    .run_refill(&honest)
+    .require_every_cut_relocated();
 }
