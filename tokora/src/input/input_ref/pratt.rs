@@ -20,11 +20,43 @@ use super::*;
 /// had already transformed, and reconstructing the original by inverse arithmetic on the far
 /// side; that reconstruction was wrong at the ladder's extremes and misfired the repeat guard.
 ///
-/// A repeat is *not* one of these variants: the closure parks its token and flags it, and the
-/// loop raises [`NonAssociativeChain`](crate::error::NonAssociativeChain) instead of stepping.
+/// A repeat is *not* one of these variants, and neither is a zero-token continuation: the closure
+/// parks its token and records why in a [`Parked`], and the loop raises the matching error instead
+/// of stepping.
 enum TokRhs<Power> {
   Postfix,
   Infix(PrattInfix<(), (), ()>, Power),
+}
+
+/// Why the classifying closure parked its token — the far side of a `None`, which on its own
+/// cannot tell three different endings apart.
+///
+/// A fieldless enum rather than a pair of `bool`s, so "at most one of these holds" is a property
+/// of the type instead of a sentence about the closure. No offset rides in it; the offset is read
+/// on the far side, off the input itself, for the reason spelled out at the raise below.
+enum Parked {
+  /// The token is not this expression's operator, or is below its floor. The ordinary handback.
+  Decline,
+  /// The same power as the [`Neither`](PrattInfix::Neither) operator this frame just folded.
+  NonAssoc,
+  /// A [`PrattRHS::Adjacent`] report the floor admitted and the chain constraint allowed — a
+  /// zero-token infix continuation, which this engine cannot express.
+  ///
+  /// **Admitted and non-repeating, checked in that order before this variant is reached.** An
+  /// adjacency below the floor is the surrounding grammar's and gets [`Decline`](Self::Decline);
+  /// one repeating a [`Neither`](PrattInfix::Neither) fold at the same power gets
+  /// [`NonAssoc`](Self::NonAssoc). Only what is left over is the report this engine has no answer
+  /// for, and only that is worth a diagnostic of its own.
+  ///
+  /// **Diagnosed rather than declined, and that is the whole of the reason it needs a variant.**
+  /// This driver's termination argument is that acceptance *is* the commit of exactly one token of
+  /// nonzero width, so every descent is preceded by a commit and depth is bounded by the token
+  /// count; and its infix fold is handed `Spanned<PrattInfix<L::Token, …>, L::Span>`, a real token
+  /// there is no zero-token spelling of. Treating the report as an ending instead would truncate
+  /// the expression with an `Ok` and no diagnostic on any channel — the exact failure
+  /// `PrattRHS::End`'s own documentation refuses for a below-floor sentinel. The typed driver
+  /// ([`Pratt`](crate::parser::Pratt)) is where this shape is expressible.
+  Adjacent,
 }
 
 impl<'inp, L, Ctx, Lang: ?Sized> InputRef<'inp, '_, L, Ctx, Lang>
@@ -257,18 +289,20 @@ where
       //   makes every token nonzero-width — so depth is bounded by the token count. Bounded by
       //   the token count is not bounded by anything a *machine* has; the frame prologue's
       //   `descend` is what bounds it by the configured budget.
+      //
+      //   That bullet is why `PrattRHS::Adjacent` is REFUSED here rather than served. A zero-token
+      //   continuation is a descent with no commit in front of it, which is the one thing this
+      //   engine's termination argument does not survive — and it has no token for `fold_infix`
+      //   either. The typed driver carries the shape, and pays for it with a charge on the
+      //   operand that this engine has no fold-side place to put.
       let mut prev_op_is_neither: Option<Power> = None;
       loop {
-        // The non-associative repeat, flagged out of the classifying closure rather than answered
-        // inside it. Both the floor decline and the repeat must PARK the token — a decline commits
-        // nothing, and the trip is owed the same handback the `End` arm gets — so both answer
-        // `None`; the flag is what tells the two apart on the far side. Re-declared per cycle, and
-        // written at most once per `try_expect_map_or_stop` call: the closure runs against one
-        // token.
-        //
-        // A bare flag, and no offset rides in it. The offset is read on the far side, off the input
-        // itself, for the reason spelled out at the raise below.
-        let mut nonassoc_trip = false;
+        // Why the classifying closure parked, recorded out of it rather than answered inside it.
+        // All three endings must PARK the token — a decline commits nothing, and both refusals are
+        // owed the same handback the `End` arm gets — so all three answer `None`; this is what
+        // tells them apart on the far side. Re-declared per cycle, and written at most once per
+        // `try_expect_map_or_stop` call: the closure runs against one token.
+        let mut parked = Parked::Decline;
         // A terminal scanner stop mid-loop is not "the expression is complete" — surface it
         // rather than breaking, so a tripped limit cannot end the expression early.
         let step = this.try_expect_map_or_stop(|tok| {
@@ -291,10 +325,37 @@ where
               // declared-non-associative chain. Park the token and flag it, so the loop below
               // raises the diagnostic instead of quietly stopping.
               if prev_op_is_neither.as_ref() == Some(&lpower) {
-                nonassoc_trip = true;
+                parked = Parked::NonAssoc;
                 return None;
               }
               Some(TokRhs::Infix(infix, lpower))
+            }
+            // THE SAME TWO TESTS THE `Infix` ARM RUNS, AND IN THE SAME ORDER — this engine has
+            // no third, because it has no report boundary to rank: acceptance here IS the commit
+            // of a token. Both run before the report reaches the unsupported path at all.
+            //
+            // Parking unconditionally
+            // reads the payload as "adjacency" and never as "adjacency *at a power*", which
+            // makes two answers wrong: an adjacency BELOW the floor is the surrounding grammar's
+            // operator and is owed the ordinary handback, not a refusal that ends this
+            // expression with a diagnostic it did not earn; and an adjacency at the power of the
+            // `Neither` operator this frame just folded is a declared-non-associative chain,
+            // which is `NonAssociativeChain` here exactly as it is for a spelled operator. Both
+            // rejected an otherwise valid embedded parse while leaving the token unconsumed.
+            //
+            // Only an ADMITTED, NON-REPEATING adjacency is the shape this engine cannot serve,
+            // and only that one is refused — see `Parked::Adjacent`.
+            PrattRHS::Adjacent(precedenced) => {
+              let power = precedenced.into_precedence();
+              if !min_precedence.admits(&power) {
+                return None;
+              }
+              if prev_op_is_neither.as_ref() == Some(&power) {
+                parked = Parked::NonAssoc;
+                return None;
+              }
+              parked = Parked::Adjacent;
+              None
             }
           })
         })?;
@@ -318,10 +379,34 @@ where
         // here would also split the two engines' answers on the one input shape they can both parse.
         // The park is unchanged; only what is reported about it is.
         let Some((rhs, tok)) = step else {
-          if nonassoc_trip {
-            return Err(NonAssociativeChain::of(this.span().end()).into());
+          match parked {
+            Parked::Decline => break,
+            Parked::NonAssoc => {
+              return Err(NonAssociativeChain::of(this.span().end()).into());
+            }
+            // The same posture as the missing-right-operand exit below, and for the same reason:
+            // this engine's answer to "an infix operator this cycle cannot complete" is a
+            // diagnostic on the RHS channel plus the left-hand side alone, not a failed parse. A
+            // fail-fast emitter turns the `?` into the `Err`; a collecting one records it and the
+            // surrounding grammar carries on from a position it can see. What is refused either
+            // way is the silent ending — parking the token and `break`ing would truncate the
+            // expression with an `Ok` and no diagnostic on any channel, which is exactly the
+            // failure `PrattRHS::End`'s own documentation refuses for a below-floor sentinel.
+            //
+            // No new bound buys this. `From<UnexpectedEoRhs<…>>` is deliberately absent from this
+            // function's `where` clause, and adding it to reach `Err` directly would widen the
+            // public `InputRef::pratt` surface for a shape this engine declines to serve.
+            //
+            // The offset is the handback position, read the same way and for the same reason as
+            // the repeat's above.
+            Parked::Adjacent => {
+              this
+                .session
+                .emitter
+                .emit_unexpected_end_of_rhs(UnexpectedEoRhs::eorhs_of(this.span().end()))?;
+              return Ok(Some(lhs));
+            }
           }
-          break;
         };
 
         match rhs {

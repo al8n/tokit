@@ -71,6 +71,89 @@ and will red until they do.
 
 ### Added
 
+- **`PrattRHS::Adjacent` — an infix continuation spelled with no token** (#274). Juxtaposition as
+  an *operator* rather than as a repetition: the shape LogQL's `labelFilter labelFilter` needs,
+  where the same connective is also spelled `and`, `,` and `|` and the empty one has to compete
+  with those three on the same ladder. A repetition dissolves into a `while` loop at the
+  production and needs nothing from the driver; an operator does, because its right operand's
+  floor has to be the **driver's**. The workaround this replaces — report the already-parsed right
+  operand as a `Postfix` — gives that floor to the production, where none of the driver's
+  precedence laws reach it.
+
+  **The report is exempt from "consume what you report", and the right operand pays instead —
+  twice.** There is no operator spelling for a report boundary to measure, and consuming nothing is
+  the point (consuming trivia before deciding is legal too — that is the CST-shaped classifier). So
+  the driver charges the operand at the two points a zero-token continuation can be held to it, and
+  both refusals are a terminal `UnexpectedEoRhs` plus a `debug_assert` naming which one fired:
+
+  - **the charge**, read when the operand parse returns and **before the fold, the CST wrap and the
+    next turn**, which is the work a continuation buys. It refuses a continuation whose right
+    operand advanced nothing past where the classifier left the input.
+  - **the debt**, read before the descent. The charge is frame-local and runs on the way back up,
+    so on its own it prices nothing the way down already built.
+
+  **Both are measured from where the report crossed back, not from where the cycle started, and
+  that is the exemption's other half** (#323). An exempt classifier may legally have consumed on
+  its way to the report, and those bytes pay the adjacency its frame is *already inside* — never
+  the one it is reporting. Bytes taken before the report discharge the debt the frames above are
+  owed, bytes taken after it pay for this continuation, and every byte pays exactly one of the two.
+  Measured from the top of the cycle the same trivia paid twice and in both directions at once: it
+  satisfied the charge with input the right operand never consumed — a fold, a wrap and another
+  turn for bytes that were the operator's — while staying invisible to the debt test, which is the
+  one obligation it really does discharge, so a legal parse was refused and refused *terminally*.
+  The structural bound survives and tightens, since the report boundary is never behind the
+  position the cycle started from.
+
+  A grammar that can answer a zero-width operand, which every recovering grammar can, is the one
+  that reaches either.
+
+  **It is left-associative and offers no choice, and that is half of the depth bound rather than a
+  default.** The payload is the `Infix` arm's left-associative operator type, the fold sees
+  `PrattInfix::Left`, and the driver descends on `> power`. An inclusive bound would admit the
+  operator's own power into its right operand, so an inner frame handed the same zero-token
+  continuation reports it again and descends **with nothing consumed** — one native frame per
+  level, paid for by no byte of the document and bounded only by the recursion budget. On the
+  exclusive bound the inner frame declines it, the chain iterates in one frame, and the charge
+  prices every turn.
+
+  What that leaves open is a chain of *strictly increasing* powers, and that is the grammar's
+  ladder only while the powers come from the grammar. `ParsePrattRHS` is a parser the grammar
+  constructs and may hold state, so a contract-valid classifier can make the powers a function of
+  the input: escalate at every level over zero-width operands, consume one byte in the deepest
+  frame, and that byte is past the position every ancestor descended from and satisfies all of
+  their charges at once — after k frames, k folds and k CST wraps have already happened. So the
+  driver carries the committed position of the nearest outstanding continuation into the
+  recursion and refuses another zero-token descent until committed consumption — the reporting
+  classifier's own included — has **strictly** passed it, replacing it with the position its own
+  report left the input at on the way down. One advancement therefore discharges exactly one
+  adjacency, and along any path from the outermost continuation inward the descents sit at
+  strictly increasing committed offsets: **never more `Adjacent` frames than bytes between the
+  first and the last**, structurally rather than by measurement.
+
+  Pinned three ways in `tests/pratt_adjacent.rs`, all of them counts rather than errors — the
+  recursion limiter reaches an error too, and a bound that is really the limiter's would look the
+  same: the refused cycle enters the LHS channel twice rather than once per budget level; a chain
+  four times longer than the budget parses in one frame; and an escalating classifier over a
+  one-byte document builds two frames and no fold where an unbounded driver builds one frame and
+  one fold per rung and returns `Ok`. Three further cells run a classifier that *does* consume
+  before reporting, one per measurement that sits on the report boundary, so reverting any single
+  one of them to the top of the cycle reds exactly one cell and leaves the other two — and the
+  paying ladder that is their control — green.
+
+  **The token-level engine (`InputRef::pratt`) does not serve it.** Its termination argument is
+  that acceptance *is* the commit of one nonzero-width token, and its `fold_infix` is handed a
+  real token; neither survives a zero-token operator. It raises the end-of-RHS diagnostic and
+  returns the left-hand side — the posture it already takes for an infix whose right operand never
+  arrived — rather than parking the report and ending the expression with a silent `Ok`.
+
+  **Only an admitted, non-repeating adjacency reaches that refusal.** The report carries a power,
+  and the engine applies its floor and its non-associative-chain constraint to it first, exactly as
+  it does to a spelled infix: an adjacency below the floor belongs to the surrounding grammar and
+  is handed back without a diagnostic, and one at the power of a `Neither` operator the frame just
+  folded is `NonAssociativeChain` — non-terminal, the token left on the input, a recoverer's to
+  spend. Either one, refused as an unsupported shape instead, rejects an otherwise valid embedded
+  parse while leaving the token unconsumed.
+
 - **`types::Status`, and `with_status` on all nineteen recovery carriers** (#320). The recovery
   state stops being a private field and becomes a value a consumer can hold: it is returned by
   `IntoComponents` (see **Changed (breaking)**) and accepted back by
@@ -886,6 +969,18 @@ and will red until they do.
 
 ### Changed (breaking)
 
+- **`PrattRHS` gains a variant, so an exhaustive `match` on it stops compiling** (#274). The new
+  arm is `Adjacent(Precedenced<L, Power>)` — see **Added**. Every in-tree `match` on `PrattRHS`
+  was a driver's; grammar code builds these values rather than reading them, so the expected
+  downstream cost is a classifier that wraps or forwards a report. `PrattRHS` is deliberately not
+  `#[non_exhaustive]`: a wildcard arm on this enum is a grammar silently declining a continuation
+  the driver could have served, which is the class of defect `PrattRHS::End` exists to make
+  spellable rather than inferable.
+
+  Nothing else moves. No fold hook, no CST kind, no type parameter and no bound changed — the new
+  variant reuses the left-associative operator type and folds through `PrattFoldInfix` as
+  `PrattInfix::Left`.
+
 - **`UnclosedEmitter::emit_unclosed` no longer imposes `Self::Error: FromUnclosed`, and `Fatal`
   and `Verbose` implement the trait only where their error type carries that conversion** (#270).
   The bound was on the trait method, so it was charged to every *caller* of the capability rather
@@ -1638,6 +1733,30 @@ and will red until they do.
   who was pinned to 0.15 or 0.14 (whether through the version-specific feature or through a
   `Cargo.lock` that never re-resolved) must move to `logos_0_16` — via the `logos` alias or
   directly — to keep building.
+
+### Changed
+
+- **Documentation only: the restriction idiom and the chained-comparison one are stated on the API
+  that carries them** (#202). Two idioms this crate supports and nothing in it named. A grep of the
+  guide for "restriction" returned zero, so a reader coming from rust-analyzer or rustc — both of
+  which thread a `Restrictions` bitset through expression parsing — could reasonably conclude that
+  tokora has no answer. It does, in halves: the precedence half is `Pratt::min_precedence`, and the
+  mode half is state on the channel *value*, since `parse_lhs` and `parse_rhs` are parsers the
+  grammar constructs. Both are now said on `min_precedence` itself.
+
+  `PrattFoldInfix` gains the chained-comparison note, and it is written as a list of what the fold
+  is **missing** rather than as a recipe. The study that produced this item recorded that
+  `fold_infix` has "both operators' spans in hand"; it has neither. `Precedenced` carries no
+  position, `input.span()` at fold time is the frontier past the right operand, and the previous
+  operator has to be recovered from the shape of `left` — which excludes the `O = ()` CST shape
+  both in-tree CST examples use. Enriching `NonAssociativeChain` is still the wrong route, for the
+  reason the study gave and that still checks out: the type has one `at` field and a
+  two-more-offsets variant does not fit the driver's per-frame error budget.
+
+  The lookahead-dependent report variant — `0..` as a postfix where `0..b` is an infix, the
+  sub-case r-a gates with `Restrictions` — now has an in-tree witness in
+  `tests/pratt_adjacent.rs`, where one operator reports all four variants off one token of
+  lookahead while every one of them consumes what it reports.
 
 ### Fixed
 
