@@ -4395,3 +4395,654 @@ fn a_purity_run_length_outranks_a_non_reflexive_entry_at_a_shared_position() {
     "a count outranks a payload that will not equal itself"
   );
 }
+
+// ── #324 round 5 residue: `Eq` is a marker, and nothing checks its promise ──────────
+//
+// Round 4 classified a second population of verdict-drawing comparisons as settled by TOTAL
+// equalities and therefore outside the guarded population — span/slice coherence, read-frontier
+// purity, the span after exhaustion, gap-free tiling, and the cache's span-valued laws. The
+// classification is what these cells attack. `Eq` and `Ord` promise reflexivity and nothing
+// verifies the promise, so the same lying impl that gets a `non-reflexive-payload` refusal at an
+// item comparison got a red naming the caller's lexer three hundred lines away. One answer, not
+// two.
+
+/// A source slice whose `PartialEq` answers `false` to everything, itself included, while
+/// claiming [`Eq`].
+///
+/// This is the brief's own falsifier and it is a legal, compiling implementation of the
+/// [`Slice`](crate::Slice) bound: nothing in the trait system, and nothing in this kit before
+/// now, asks whether the promise `Eq` makes is kept.
+#[derive(Clone, Copy, Debug)]
+struct LyingSlice<'a>(&'a str);
+
+impl PartialEq for LyingSlice<'_> {
+  fn eq(&self, _: &Self) -> bool {
+    false
+  }
+}
+
+impl Eq for LyingSlice<'_> {}
+
+impl<'source> crate::Slice<'source> for LyingSlice<'source> {
+  type Char = char;
+  type Iter<'a>
+    = core::str::Chars<'a>
+  where
+    Self: 'a;
+  type PositionedIter<'a>
+    = core::str::CharIndices<'a>
+  where
+    Self: 'a;
+
+  fn iter<'a>(&'a self) -> Self::Iter<'a>
+  where
+    Self: 'a,
+  {
+    self.0.chars()
+  }
+  fn positioned_iter<'a>(&'a self) -> Self::PositionedIter<'a>
+  where
+    Self: 'a,
+  {
+    self.0.char_indices()
+  }
+  fn len(&self) -> usize {
+    self.0.len()
+  }
+}
+
+/// A `str`-backed source whose slices are [`LyingSlice`]s. Everything else about it is `str`'s
+/// own behaviour.
+#[derive(Debug)]
+struct LyingSliceSource(&'static str);
+
+impl crate::Source<usize> for LyingSliceSource {
+  type Slice<'source>
+    = LyingSlice<'source>
+  where
+    Self: 'source;
+
+  fn is_empty(&self) -> bool {
+    self.0.is_empty()
+  }
+  fn len(&self) -> usize {
+    self.0.len()
+  }
+  fn as_slice(&self) -> Self::Slice<'_> {
+    LyingSlice(self.0)
+  }
+  fn slice<R>(&self, range: R) -> Option<Self::Slice<'_>>
+  where
+    R: core::ops::RangeBounds<usize>,
+  {
+    self
+      .0
+      .get((
+        range.start_bound().map(|s| *s),
+        range.end_bound().map(|s| *s),
+      ))
+      .map(LyingSlice)
+  }
+  fn is_boundary(&self, index: usize) -> bool {
+    self.0.is_char_boundary(index)
+  }
+}
+
+/// A per-character lexer over [`LyingSliceSource`], conforming in everything the contract names.
+/// The only thing wrong anywhere near it is the caller's own slice equality.
+struct LyingSliceLexer<'a> {
+  src: &'a LyingSliceSource,
+  start: usize,
+  end: usize,
+  state: (),
+}
+
+impl<'a> Lexer<'a> for LyingSliceLexer<'a> {
+  type State = ();
+  type Source = LyingSliceSource;
+  type Token = PTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a LyingSliceSource) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: (),
+    }
+  }
+  fn with_state(src: &'a LyingSliceSource, state: ()) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+  fn state(&self) -> &() {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut () {
+    &mut self.state
+  }
+  fn into_state(self) {}
+  fn source(&self) -> &'a LyingSliceSource {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> LyingSlice<'a> {
+    LyingSlice(&self.src.0[self.start..self.end])
+  }
+  fn lex(&mut self) -> Option<Result<PTok, Infallible>> {
+    self.start = self.end;
+    if self.start >= self.src.0.len() {
+      return None;
+    }
+    self.end = boundary_after(self.src.0, self.start);
+    Some(Ok(PTok))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+#[test]
+fn a_slice_that_will_not_equal_itself_is_refused_and_not_blamed_on_the_lexer() {
+  // THE FALSIFIER round 4's exemption had to survive, and it does not. Before this the kit said
+  // "[input #0 span/slice-coherence] position 0: slice() disagrees with the source at span 0..1:
+  // source LyingSlice("a"), slice() LyingSlice("a")" — a red naming the caller's LEXER, with two
+  // values that render identically, which is #295 verbatim at a site round 4 called exempt.
+  let src = LyingSliceSource("ab");
+  let msg = panic_message(|| {
+    let _ = super::lex_run::<LyingSliceLexer<'_>>(0, &src, 8 * 2 + 64);
+  });
+  assert!(
+    msg
+      .contains("non-reflexive-payload] span/slice-coherence position 0: INCONCLUSIVE — the slice"),
+    "a broken TOTAL equality gets the same answer as a broken partial one, got: {msg}"
+  );
+}
+
+#[test]
+fn an_honest_slice_that_genuinely_disagrees_still_reds_span_slice_coherence() {
+  // The control, and the one that keeps the guard from trading a false red for a false green: a
+  // lexer whose `slice()` really does disagree with its own span, over a slice type that equals
+  // itself. `BadSliceLexer` is the kit's existing fixture for exactly that, and its cell
+  // (`incoherent_slice_is_caught`) still reds the ordinary way — asserted here as well so the two
+  // sit next to each other.
+  let msg = panic_message(|| {
+    Harness::<BadSliceLexer<'_>>::new("abc").run();
+  });
+  assert!(
+    msg.contains("span/slice-coherence") && !msg.contains("non-reflexive-payload"),
+    "a slice that equals itself and disagrees is a lexer defect and must be reported as one, got: {msg}"
+  );
+}
+
+/// An offset whose `PartialEq` answers `false` to everything, itself included, while claiming
+/// [`Eq`] through [`Ord`] — and whose **ordering** is honest.
+///
+/// The two halves are separate impls, which is the whole point: `cmp` and `eq` are independent
+/// caller code, so an `Ord` can be a total order for every purpose that compares two *different*
+/// values and still break the one law `Eq` adds on top of it. Every `<`-shaped check the kit runs
+/// therefore behaves exactly as it does over `usize`, and only the equalities move — which is what
+/// makes this a differential fixture rather than a lexer that fails everything.
+///
+/// [`Lexer::Span`](crate::Lexer::Span) is `SimpleSpan<LyingOffset>` here, whose derived
+/// `PartialEq` is elementwise, so the span lies too. One fixture, both components.
+#[derive(Clone, Copy, Debug, Default)]
+struct LyingOffset(usize);
+
+/// Hand-written for [`LyingKind`]'s reason: `Lexer::Offset` requires `Hash`, and deriving it
+/// beside a manual `PartialEq` is what `clippy::derived_hash_with_manual_eq` exists to stop. The
+/// lint's law — `a == b` implies `hash(a) == hash(b)` — holds *vacuously*, since nothing is equal
+/// to anything, so this is not a second lie on top of the one the fixture is for.
+impl core::hash::Hash for LyingOffset {
+  fn hash<H: core::hash::Hasher>(&self, _: &mut H) {}
+}
+
+impl PartialEq for LyingOffset {
+  fn eq(&self, _: &Self) -> bool {
+    false
+  }
+}
+
+impl Eq for LyingOffset {}
+
+impl PartialOrd for LyingOffset {
+  fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+    Some(self.cmp(other))
+  }
+}
+
+impl Ord for LyingOffset {
+  fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+    self.0.cmp(&other.0)
+  }
+}
+
+impl core::ops::AddAssign<&LyingOffset> for LyingOffset {
+  fn add_assign(&mut self, rhs: &Self) {
+    self.0 += rhs.0;
+  }
+}
+
+/// A `str`-backed source addressed by [`LyingOffset`]. Everything else about it is `str`'s own
+/// behaviour.
+#[derive(Debug)]
+struct LyingOffsetSource(&'static str);
+
+impl crate::Source<LyingOffset> for LyingOffsetSource {
+  type Slice<'source>
+    = &'source str
+  where
+    Self: 'source;
+
+  fn is_empty(&self) -> bool {
+    self.0.is_empty()
+  }
+  fn len(&self) -> LyingOffset {
+    LyingOffset(self.0.len())
+  }
+  fn as_slice(&self) -> &str {
+    self.0
+  }
+  fn slice<R>(&self, range: R) -> Option<&str>
+  where
+    R: core::ops::RangeBounds<LyingOffset>,
+  {
+    use core::ops::Bound;
+    let start = match range.start_bound() {
+      Bound::Included(o) => o.0,
+      Bound::Excluded(o) => o.0 + 1,
+      Bound::Unbounded => 0,
+    };
+    let end = match range.end_bound() {
+      Bound::Included(o) => o.0 + 1,
+      Bound::Excluded(o) => o.0,
+      Bound::Unbounded => self.0.len(),
+    };
+    self.0.get(start..end)
+  }
+  fn is_boundary(&self, index: LyingOffset) -> bool {
+    self.0.is_char_boundary(index.0)
+  }
+}
+
+/// A per-character lexer over [`LyingOffsetSource`], conforming in everything the contract names.
+///
+/// It reports its frontier as [`ReadTo`](crate::ReadFrontier::ReadTo) rather than
+/// [`SpanEnd`](crate::ReadFrontier::SpanEnd) because `ReadFrontier`'s equality is derived from the
+/// offset's: a unit variant compares equal whatever the offset does, so `SpanEnd` would hide the
+/// very thing this fixture exists to show.
+struct LyingOffsetLexer<'a> {
+  src: &'a LyingOffsetSource,
+  start: usize,
+  end: usize,
+  state: (),
+}
+
+impl<'a> Lexer<'a> for LyingOffsetLexer<'a> {
+  type State = ();
+  type Source = LyingOffsetSource;
+  type Token = PTok;
+  type Span = SimpleSpan<LyingOffset>;
+  type Offset = LyingOffset;
+
+  fn new(src: &'a LyingOffsetSource) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: (),
+    }
+  }
+  fn with_state(src: &'a LyingOffsetSource, state: ()) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+  fn state(&self) -> &() {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut () {
+    &mut self.state
+  }
+  fn into_state(self) {}
+  fn source(&self) -> &'a LyingOffsetSource {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan<LyingOffset> {
+    SimpleSpan::new(LyingOffset(self.start), LyingOffset(self.end))
+  }
+  fn slice(&self) -> &'a str {
+    &self.src.0[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<PTok, Infallible>> {
+    self.start = self.end;
+    if self.start >= self.src.0.len() {
+      return None;
+    }
+    self.end = boundary_after(self.src.0, self.start);
+    Some(Ok(PTok))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<LyingOffset> {
+    crate::ReadFrontier::ReadTo(LyingOffset(self.end))
+  }
+  fn bump(&mut self, n: &LyingOffset) {
+    self.end += n.0;
+  }
+}
+
+/// The items a conforming [`LyingOffsetLexer`] run over `src` produces, captured WITHOUT the
+/// guarded checks that would refuse first.
+///
+/// `lex_run` refuses at read-frontier purity for this fixture, which is the first equality it
+/// reaches — so the checks that run later have to be reached directly, exactly as
+/// `a_nan_payload_is_diagnosed_at_the_resume_comparison` reaches `check_resume`. Reachability is
+/// an argument about check ORDER; a guard behind another guard is still a guard.
+fn lying_offset_items(src: &LyingOffsetSource) -> Vec<super::Item<'_, LyingOffsetLexer<'_>>> {
+  let mut lexer = <LyingOffsetLexer<'_> as Lexer<'_>>::new(src);
+  let mut out = Vec::new();
+  while let Some(item) = lexer.lex() {
+    let span = lexer.span();
+    let end = *span.end_ref();
+    out.push(super::Item {
+      item,
+      span,
+      slice: lexer.slice(),
+      end,
+      state: (),
+    });
+  }
+  out
+}
+
+#[test]
+fn a_read_frontier_that_will_not_equal_itself_is_refused_and_not_blamed_on_the_lexer() {
+  // Before: "[input #0 read-frontier] position 0: read_frontier() changed between calls: first
+  // read ReadTo(LyingOffset(1)), probe #0 read ReadTo(LyingOffset(1))" — a purity accusation over
+  // two readings that are the same reading, rendered identically.
+  let src = LyingOffsetSource("ab");
+  let msg = panic_message(|| {
+    let _ = super::lex_run::<LyingOffsetLexer<'_>>(0, &src, 8 * 2 + 64);
+  });
+  assert!(
+    msg.contains(
+      "non-reflexive-payload] read-frontier position 0: INCONCLUSIVE — the read frontier"
+    ),
+    "the frontier's equality is the offset's, and a broken one is not a purity defect, got: {msg}"
+  );
+}
+
+#[test]
+fn a_span_that_will_not_equal_itself_is_refused_after_exhaustion_too() {
+  // Before: "[input #0 span-survives-exhaustion] span() changed after exhaustion: first read
+  // 2..2, probe #0 read 2..2". The clause this enforces is read by a refill driver, so the red it
+  // used to produce sent a caller looking for a lexer bug that is not there.
+  let src = LyingOffsetSource("ab");
+  let msg = panic_message(|| {
+    super::check_span_after_exhaustion::<LyingOffsetLexer<'_>>(0, &src, 8 * 2 + 64);
+  });
+  assert!(
+    msg.contains(
+      "non-reflexive-payload] span-survives-exhaustion after exhaustion: INCONCLUSIVE — the span"
+    ),
+    "the span after exhaustion is compared for stability, and the comparison is the caller's, got: {msg}"
+  );
+}
+
+#[test]
+fn an_offset_that_will_not_equal_itself_is_refused_by_the_tiling_law() {
+  // Before: "[input #0 lossless] position 0: first span 0..1 does not start at 0" — a tiling
+  // accusation over an offset that IS zero. Gap-free tiling is four `Offset` equalities and every
+  // one of them was unguarded; this is the one a run reaches first.
+  let src = LyingOffsetSource("ab");
+  let items = lying_offset_items(&src);
+  let msg = panic_message(|| {
+    super::check_lossless::<LyingOffsetLexer<'_>>(0, &src, &items);
+  });
+  assert!(
+    msg.contains("non-reflexive-payload] lossless position 0: INCONCLUSIVE — the span offset"),
+    "a tiling verdict is drawn from `L::Offset` equality and inherits the same refusal, got: {msg}"
+  );
+}
+
+#[test]
+fn an_honest_lexer_over_the_same_lying_offset_type_is_not_what_any_of_this_rejects() {
+  // The positive control for the whole residue repair: the ORDERING half of `LyingOffset` is
+  // honest, so every `<`-shaped check passes, and the refusals above are reached only because an
+  // equality was asked. Nothing here may pass silently that a `usize`-offset lexer would fail, so
+  // the same source through the same checks must still reach a refusal rather than a green.
+  let src = LyingOffsetSource("ab");
+  let items = lying_offset_items(&src);
+  assert_eq!(items.len(), 2, "the fixture lexes one token per character");
+  assert!(
+    items[0].span.start_ref().cmp(items[0].span.end_ref()) == core::cmp::Ordering::Less,
+    "the ordering half is honest, which is what keeps the fixture differential"
+  );
+}
+
+#[test]
+fn the_cache_kits_span_valued_laws_are_shadowed_by_its_entry_comparison_today() {
+  // **This cell is NOT differential for the residue, and says so on purpose.** The cache kit's
+  // eleven span-valued comparisons are guarded now, and with a wholly-lying `L::Span` not one of
+  // them is reachable: `run()` reaches an ENTRY comparison first, at `accepted-push`, and that
+  // one has been guarded since round 2. Removing `guard_entry` and re-running this fixture lands
+  // on `accepted-push`'s own verdict — never on a span-valued law — which is how the shadowing
+  // was established rather than assumed.
+  //
+  // So what this pins is the ORDER, not the repair: it is the cell that changes if a future
+  // reordering makes a span-valued law the first comparison a lying span reaches. The repair at
+  // those eleven sites is defensive for exactly that reason — reachability is an argument about
+  // check order and not a bound, which is the same argument
+  // `a_nan_payload_is_diagnosed_at_the_resume_comparison` rests on — and it costs a call on a
+  // path already panicking.
+  let src = LyingOffsetSource("abcdefghijklmnop");
+  let msg = panic_message(|| {
+    crate::conformance::cache::CacheHarness::<
+      LyingOffsetLexer<'_>,
+      crate::cache::DefaultCache<'_, LyingOffsetLexer<'_>>,
+    >::new(&src)
+    .run();
+  });
+  assert!(
+    msg.contains("non-reflexive-payload] accepted-push")
+      && msg.contains("INCONCLUSIVE — the span of the got entry"),
+    "a lying `L::Span` must reach the ENTRY comparison first and be refused there, got: {msg}"
+  );
+}
+
+/// A `NaN`-capable token payload whose **error** type is constructible.
+///
+/// [`FTok`]'s error is `Infallible`, so no fixture could put a non-reflexive value on the
+/// committed arm and a real divergence on the raised one at the same time — which is exactly the
+/// arrangement the integration tier's two-arm ordering fails in. This is the pair of arms in one
+/// token type.
+#[derive(Clone, Debug, PartialEq)]
+struct MTok(f64);
+
+impl Token<'_> for MTok {
+  type Kind = FKind;
+  type Error = FErr;
+
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
+
+  fn kind(&self) -> FKind {
+    FKind
+  }
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// A per-character lexer over [`MTok`], conforming in everything the contract names. It exists to
+/// name the type parameter the two-arm comparison is generic over; the cells below build the
+/// observations by hand, exactly as the partial tier's own refusal cells do.
+struct MixedArmLexer<'a> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: (),
+}
+
+impl<'a> Lexer<'a> for MixedArmLexer<'a> {
+  type State = ();
+  type Source = str;
+  type Token = MTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: (),
+    }
+  }
+  fn with_state(src: &'a str, state: ()) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), FErr> {
+    Ok(())
+  }
+  fn state(&self) -> &() {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut () {
+    &mut self.state
+  }
+  fn into_state(self) {}
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<MTok, FErr>> {
+    self.start = self.end;
+    if self.start >= self.src.len() {
+      return None;
+    }
+    self.end = boundary_after(self.src, self.start);
+    Some(Ok(MTok(float_of(self.src.as_bytes()[self.start]))))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+#[test]
+fn a_raised_error_divergence_is_not_withheld_over_a_nan_the_committed_arm_holds() {
+  // The integration tier's two arms are one verdict, and they were two `assert` calls in a fixed
+  // order — so a committed-token divergence a `NaN` decided withheld a raised-error divergence a
+  // SPAN had settled. That is round 5's finding one level above the position/count ordering.
+  //
+  // Before: "[input #0 non-reflexive-payload] integration/peek-heavy position 0: INCONCLUSIVE —
+  // the token payload …", over an error arm that convicts the layer on its own.
+  use super::{Observed, StreamItem};
+  let nan_token = || StreamItem::<MixedArmLexer<'_>>::Token(MTok(f64::NAN), SimpleSpan::new(0, 1));
+  let error_at =
+    |end: usize| StreamItem::<MixedArmLexer<'_>>::LexerError(SimpleSpan::new(1, end), FErr(1.0));
+  let expected = Observed {
+    tokens: vec![nan_token()],
+    errors: vec![error_at(2)],
+  };
+  let got = Observed {
+    tokens: vec![nan_token()],
+    errors: vec![error_at(3)],
+  };
+  let msg = panic_message(|| {
+    super::assert_observed_eq::<MixedArmLexer<'_>>(0, "peek-heavy", &expected, &got);
+  });
+  assert!(
+    msg.contains(
+      "[input #0 integration/peek-heavy] error position 0: raised lexer-error stream diverges"
+    ),
+    "the error arm's span divergence is conclusive and must be what speaks, got: {msg}"
+  );
+  assert!(
+    !msg.contains("non-reflexive-payload"),
+    "a span settled the error arm, so there is nothing to refuse, got: {msg}"
+  );
+}
+
+#[test]
+#[should_panic(
+  expected = "non-reflexive-payload] integration/peek-heavy position 0: INCONCLUSIVE — the token payload"
+)]
+fn a_committed_arm_nan_with_a_reproduced_error_arm_is_still_refused() {
+  // The control for it: the same committed arm, and an error arm that agrees. Nothing conclusive
+  // exists anywhere, so the retained fallback is the answer and the arm ordering is unchanged.
+  use super::{Observed, StreamItem};
+  let nan_token = || StreamItem::<MixedArmLexer<'_>>::Token(MTok(f64::NAN), SimpleSpan::new(0, 1));
+  let error = || StreamItem::<MixedArmLexer<'_>>::LexerError(SimpleSpan::new(1, 2), FErr(1.0));
+  let expected = Observed {
+    tokens: vec![nan_token()],
+    errors: vec![error()],
+  };
+  let got = Observed {
+    tokens: vec![nan_token()],
+    errors: vec![error()],
+  };
+  super::assert_observed_eq::<MixedArmLexer<'_>>(0, "peek-heavy", &expected, &got);
+}
+
+#[test]
+fn a_prefilled_impurity_the_appended_run_decided_is_not_withheld_over_a_nan_in_the_prefix() {
+  // THE COUNTEREXAMPLE'S MIRROR, and the third level the same finding lives at. The existing cell
+  // above runs the other way — a conclusive prefix and a `NaN` in the appended run — and passed
+  // because `find_map` takes the prefix first. This one is the direction `find_map` got wrong:
+  // the prefix's divergence is a `NaN` that decides nothing, and the appended run's is a span.
+  //
+  // Before: "[cache non-reflexive-payload] pure-peek/prefilled at depth 1 … INCONCLUSIVE — the
+  // token payload of the first prefix entry …".
+  let prefix_first = [(SimpleSpan::new(0, 1), FTok(f64::NAN), ())];
+  let prefix_second = [(SimpleSpan::new(0, 1), FTok(f64::NAN), ())];
+  let appended_first = [(SimpleSpan::new(4, 5), FTok(2.0), ())];
+  let appended_second = [(SimpleSpan::new(6, 7), FTok(2.0), ())];
+  let msg = panic_message(|| {
+    purity_harness().assert_prefilled_peek_pure(
+      "prefilled",
+      1,
+      "a full cache",
+      (&prefix_first, &prefix_second),
+      (&appended_first, &appended_second),
+    );
+  });
+  assert!(
+    msg.contains("disagreed in the run it appended behind that prefix"),
+    "the appended half is what the kit established, got: {msg}"
+  );
+  assert!(
+    !msg.contains("non-reflexive-payload"),
+    "a span settled the appended half, so there is nothing to refuse, got: {msg}"
+  );
+}

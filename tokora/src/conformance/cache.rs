@@ -436,15 +436,15 @@ where
   // caller's `L::Token` and `L::State` equalities exactly as rarely as it did before.
   let mut ranking = Ranking::new();
   let span = compare_by(EntryPart::Span.component(), want.0, got.0);
-  if let Some(hit) = ranking.settle(EntryPart::Span, span) {
+  if let Some(hit) = ranking.settle(EntryPart::Span, span.differs()) {
     return Some(hit);
   }
   let token = compare_by(EntryPart::Token.component(), want.1, got.1);
-  if let Some(hit) = ranking.settle(EntryPart::Token, token) {
+  if let Some(hit) = ranking.settle(EntryPart::Token, token.differs()) {
     return Some(hit);
   }
   let state = compare_by(EntryPart::State.component(), want.2, got.2);
-  if let Some(hit) = ranking.settle(EntryPart::State, state) {
+  if let Some(hit) = ranking.settle(EntryPart::State, state.differs()) {
     return Some(hit);
   }
   ranking.refusal()
@@ -524,13 +524,19 @@ where
 }
 
 /// [`runs_decided`] over the two halves of a prefilled peek, in buffer order, answering with the
-/// **first** half that a second peek did not reproduce.
+/// half the verdict rests on.
 ///
 /// Prefix before appended because the two halves are the two halves of one buffer in order: the
 /// first position the whole buffer diverges at is in the prefix whenever the prefix diverges at
 /// all. This is [`triple_compare`]'s "span first, always" one level up, and it costs the same
 /// thing — a cache impure in both halves is reported at the first, and the second is seen on the
 /// next run.
+///
+/// **And the order is a preference among CONCLUSIVE answers, not an unconditional first-wins.**
+/// It was `find_map`, so a prefix divergence a `NaN` decided withheld an appended divergence a
+/// span or a length had settled — round 5's finding at the composition of two whole
+/// [`Divergence`]s. [`Ranking`] is generic over what a step answers precisely so this level reads
+/// the same rule as the two below it.
 fn prefilled_purity<'r, 'inp, L>(
   prefix: (&'r [PeekedTriple<'inp, L>], &'r [PeekedTriple<'inp, L>]),
   appended: (&'r [PeekedTriple<'inp, L>], &'r [PeekedTriple<'inp, L>]),
@@ -540,15 +546,25 @@ where
   L::Token: PartialEq,
   L::State: PartialEq,
 {
-  [(PeekHalf::Prefix, prefix), (PeekHalf::Appended, appended)]
-    .into_iter()
-    .find_map(|(half, (first, second))| {
-      runs_decided::<L>(first, second).map(|decided| PrefilledPurity {
+  let mut ranking = Ranking::new();
+  for (half, (first, second)) in [(PeekHalf::Prefix, prefix), (PeekHalf::Appended, appended)] {
+    let found = runs_decided::<L>(first, second);
+    if let Some(((half, first, second), decided)) = ranking.settle((half, first, second), found) {
+      return Some(PrefilledPurity {
         half,
         first,
         second,
         decided,
-      })
+      });
+    }
+  }
+  ranking
+    .refusal()
+    .map(|((half, first, second), decided)| PrefilledPurity {
+      half,
+      first,
+      second,
+      decided,
     })
 }
 
@@ -1626,7 +1642,9 @@ where
   /// three components at once, and it is an *ordering* violation; reporting it as a token
   /// mismatch would bury the diagnosis and break every existing expectation. The token and state
   /// halves therefore only ever speak about an entry the span half has already agreed is the
-  /// right one.
+  /// right one — or about one whose span comparison the kit cannot convict on, which is the one
+  /// case [`Ranking`] moves an answer past a step, and there the span half has agreed to nothing
+  /// because it could not.
   ///
   /// `state_note` is [`RESTORE_NOTE`] at the `back()`/`pop_back` sites and [`NO_NOTE`] everywhere
   /// else.
