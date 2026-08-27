@@ -125,8 +125,8 @@
 //! from the one the comparison had asked, and it hid the truncation nonconformance the partial
 //! tier exists to report behind a refusal saying the kit had convicted the lexer of nothing. The
 //! kit never reports an identity it did not check, and it never withholds a verdict it did
-//! establish; those are one rule, and [`Comparison`] is where it is enforced rather than
-//! remembered.
+//! establish; those are one rule, and the comparison's own answer is where it is enforced
+//! rather than remembered.
 
 pub mod cache;
 pub mod emitter;
