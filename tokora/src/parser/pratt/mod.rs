@@ -216,6 +216,11 @@ pub enum PrattRHS<L, R, N, Post, Power = i64> {
   /// that skips trivia before deciding two operands are adjacent has consumed that trivia. Neither
   /// is a violation, and no report boundary is applied.
   ///
+  /// **Whatever it did consume pays the enclosing adjacency, never this one.** Both refusals below
+  /// are therefore measured from where the report crossed back and not from where the cycle
+  /// started: bytes taken *before* the report discharge the debt the frames above are owed, bytes
+  /// taken *after* it pay for this continuation, and every byte pays exactly one of the two.
+  ///
   /// **The right operand carries the obligation instead, and it is charged twice over.** Both
   /// refusals are the same law — a zero-token continuation is paid for with committed input, once
   /// each — and both surface as a terminal
@@ -223,18 +228,19 @@ pub enum PrattRHS<L, R, N, Post, Power = i64> {
   /// an assertion naming which one fired:
   ///
   /// * **the charge**, read when the operand parse returns and before the fold and the CST wrap,
-  ///   since both are the work it exists to price. It refuses a continuation whose cycle advanced
-  ///   nothing. Without it a document buys a fold, a wrap and another cycle for no input at all,
-  ///   and the next cycle reports the same continuation over the same bytes.
+  ///   since both are the work it exists to price. It refuses a continuation whose right operand
+  ///   consumed nothing past where the classifier left the input. Without it a document buys a
+  ///   fold, a wrap and another cycle for input the operator itself took, and the next cycle
+  ///   reports the same continuation over the same bytes.
   /// * **the debt**, read before the descent. The charge is frame-local and retrospective, so on
   ///   its own it prices this frame's cycles and nothing the descent has already built: a
   ///   classifier escalating its powers over zero-width operands, with one byte consumed in the
   ///   deepest frame, satisfies every ancestor's charge with that one byte on the way back up —
   ///   after k frames, k folds and k wraps have happened. So the driver also carries the position
   ///   the nearest outstanding continuation descended at, and refuses another one until committed
-  ///   consumption has passed it, **strictly**. The position it then carries down is its own, so
-  ///   it increases at every zero-token descent and one advancement discharges exactly one
-  ///   adjacency.
+  ///   consumption — the reporting classifier's own included — has passed it, **strictly**. The
+  ///   position it then carries down is where its own report left the input, so it increases at
+  ///   every zero-token descent and one advancement discharges exactly one adjacency.
   ///
   /// Together they are a **structural** bound rather than a measured one: along any path from the
   /// outermost continuation inward, the descents sit at strictly increasing committed offsets, so

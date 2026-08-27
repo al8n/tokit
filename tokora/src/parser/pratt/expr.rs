@@ -1177,10 +1177,16 @@ enum Fault<E, Off> {
   /// `channel`'s terminal error — the [`Keep`](Self::Keep) posture with both effects moved out
   /// past the settle.
   Stall {
-    /// Committed consumption measured the instant the report crossed back, and the offset the
-    /// terminal error is built from once the guard has committed.
+    /// Committed consumption read where `channel`'s own law is decided, and the offset the
+    /// terminal error is built from once the guard has committed. That is the report boundary for
+    /// the three channels whose law is "consume what you report" — including
+    /// [`AdjacencyDebt`](StalledChannel::AdjacencyDebt), whose law is read at the same boundary
+    /// one step before the descent — and the position the recursion returned at for
+    /// [`Adjacency`](StalledChannel::Adjacency), whose law is about the operand.
     at: Off,
-    /// Committed consumption the report started from — the value `at` failed to exceed.
+    /// The value `at` failed to exceed: committed consumption where the measured span began, or —
+    /// for [`AdjacencyDebt`](StalledChannel::AdjacencyDebt) — the inherited watermark it was held
+    /// against.
     committed_before: Off,
     /// Which channel broke "consume what you report": the wording the assertion takes, and which
     /// of the two report constructors the wrapper calls.
@@ -1229,6 +1235,10 @@ enum Fault<E, Off> {
 /// recursion happens. Two readings and not one, because a charge taken on the way back up prices
 /// nothing that the way down already built.
 ///
+/// Both of those two are measured *from* the report boundary even so, and that is the exemption's
+/// other half rather than a contradiction of it: an exempt classifier may have consumed, and what
+/// it consumed pays the adjacency its own frame is already inside — never the one it is reporting.
+///
 /// A fieldless marker rather than the `&'static str` message itself, and the reason is size:
 /// `Fault` is the error half of the `Result` the driver returns through **every** frame of its
 /// own recursion, and a `&str` field is two words where a fieldless marker is free. Free, not
@@ -1243,12 +1253,17 @@ enum StalledChannel {
   /// nothing.
   Rhs,
   /// A [`PrattRHS::Adjacent`] continuation the floor admitted whose right operand consumed
-  /// nothing either — so the whole cycle advanced no input, and the next one would report the
-  /// same continuation over the same bytes.
+  /// nothing past the position the classifier left the input at — so nothing paid for this
+  /// continuation, and the next cycle would report the same one over the same bytes.
+  ///
+  /// Read from the report boundary rather than from the top of the cycle, because whatever an
+  /// exempt classifier took on its way to the report is the *enclosing* adjacency's payment and
+  /// never this operand's.
   Adjacency,
   /// A [`PrattRHS::Adjacent`] continuation the floor admitted in a frame that has committed
-  /// nothing since the enclosing continuation descended — so descending would stack a second
-  /// zero-token frame on input the first one has already been paid with.
+  /// nothing — the reporting classifier's own consumption included — since the enclosing
+  /// continuation descended, so descending would stack a second zero-token frame on input the
+  /// first one has already been paid with.
   ///
   /// The same law as [`Adjacency`](Self::Adjacency), read one step earlier: that one prices this
   /// cycle's operand once the recursion has returned, this one prices the recursion before it
@@ -1430,10 +1445,17 @@ fn parse<
   // is strictly increasing along any root-to-leaf path, and one advancement cannot discharge two
   // adjacencies. That arm states why a frame-local charge alone does not bound the nesting.
   //
-  // A BORROW, not an owned offset: what it points at is the enclosing frame's own `committed`,
-  // which outlives the call by construction, and passing it by reference is what keeps the
-  // pass-through sites — the prefix operand and the infix right operand, neither of which is an
-  // adjacency — free of an `L::Offset::clone` each.
+  // `p` IS WHERE THE ENCLOSING CLASSIFIER LEFT THE INPUT, not where its cycle started. A report
+  // exempt from the report boundary may legally have consumed on its way to being made, and those
+  // bytes discharge the adjacency that frame was already inside rather than paying for the one it
+  // is reporting — see the rule stated in the `Adjacent` arm. Where the classifier consumes
+  // nothing the two positions coincide, which is why the distinction is invisible in most
+  // grammars and load bearing in a CST-shaped one.
+  //
+  // A BORROW, not an owned offset: what it points at is the enclosing frame's own `after_report`,
+  // a local of the loop turn that made the descent and so alive for the whole of the call, and
+  // passing it by reference is what keeps the pass-through sites — the prefix operand and the
+  // infix right operand, neither of which is an adjacency — free of an `L::Offset::clone` each.
   adjacency_watermark: Option<&L::Offset>,
   cst: &Cst,
 ) -> Result<O, Fault<<Ctx::Emitter as Emitter<'inp, L, Lang>>::Error, L::Offset>>
@@ -1860,6 +1882,30 @@ where
           // off this cycle's operand, and the debt test immediately following, off the frames
           // above.
           //
+          // `after_report` IS STILL THE LINE ALL THREE OF THIS ARM'S MEASUREMENTS SIT ON, and that
+          // does not follow from the exemption — it is the second half of the same fact. The
+          // exemption says the classifier MAY have moved the input between `committed`, which this
+          // loop reads at the top of the turn and which therefore names the position before
+          // `parse_pratt_rhs` ran, and `after_report`, which is the position it left. Something
+          // then has to say where those bytes go, and the rule is:
+          //
+          //     CLASSIFIER CONSUMPTION PAYS THE ENCLOSING ADJACENCY, NEVER THE CONTINUATION THE
+          //     CLASSIFIER REPORTS.
+          //
+          // Bytes taken before the report discharge the debt the frames above are owed; bytes
+          // taken after it pay for this continuation. Every byte pays exactly one debt and none
+          // pays two. Measured from `committed` the same trivia pays twice and in both directions
+          // at once: it satisfies this cycle's charge with input the right operand never consumed
+          // — a fold, a wrap and another turn for bytes that were the operator's — while staying
+          // invisible to the debt test, which is the one obligation it really does discharge, so a
+          // legal parse is refused and refused terminally.
+          //
+          // The structural bound survives this and tightens under it. `after_report` is never
+          // behind `committed` on any input the driver does not already refuse, so the watermark
+          // rises at least as high as it did, the strict increase the debt test demands is
+          // unchanged, and the descents along a root-to-leaf path still sit at strictly increasing
+          // committed offsets.
+          //
           // THE ADJACENCY DEBT, and it is the *prospective* half of the same law. The charge below
           // is frame-local and retrospective — it runs only once the recursive operand parse has
           // returned — so on its own it prices this frame's cycles and nothing above them. A
@@ -1875,13 +1921,18 @@ where
           // What bounds the rest is inherited rather than local. `adjacency_watermark` is the
           // committed position the nearest outstanding continuation descended at, and this test
           // refuses to descend again until committed consumption has passed it — strictly. The
-          // descent below then carries THIS frame's position, so the watermark strictly increases
+          // descent below then carries THIS turn's position, so the watermark strictly increases
           // at every zero-token descent along a root-to-leaf path and never decreases anywhere
           // else. A single advancement therefore discharges exactly one adjacency: the next one
           // down is measured against the position that advancement reached, not against the one
           // its parent was measured against. `Adjacent` frames on a path are consequently no more
           // numerous than the distinct committed offsets between the outermost and the innermost
           // — bytes, on any input this crate parses.
+          //
+          // MEASURED AT `after_report`, by the rule above: the classifier's own bytes are the
+          // enclosing continuation's payment, so they are exactly what this test must see. Read at
+          // `committed` it cannot see them, and a frame whose classifier committed real input past
+          // the watermark before reporting is refused for an advance it made.
           //
           // FIRST OF THE TWO REFUSALS, and ahead of the repeat guard below for the reason the
           // `Infix` arm ranks its report boundary there: this is a **terminal** violation of the
@@ -1895,19 +1946,36 @@ where
           //
           // Restore, then the posture, exactly as the `Infix` arm's report boundary does: the
           // probe is still live, the deciding read is handed back through it, and the wrapper
-          // commits before it asserts and before it builds. `at` is this frame's `committed` —
-          // the restore target, so the offset and the position the caller is handed are one value
-          // from one read — and `committed_before` is the watermark it failed to pass, which is
-          // what makes the wrapper's `at > committed_before` assertion name this rule rather than
-          // the operand charge's.
+          // commits before it asserts and before it builds.
+          //
+          // THE TWO OFFSETS ARE THE DECIDING READ AND THE VALUE IT FAILED TO PASS — `after_report`
+          // and the watermark — so the wrapper's `at > committed_before` is the negation of the
+          // branch that got here, in the same two values, and names THIS rule rather than the
+          // operand charge's, whose pair is `after_operand` against `after_report`. It fires here
+          // always and by construction, which is the property that makes the debug profile's half
+          // of the contract worth having.
+          //
+          // `at` IS NO LONGER THE RESTORE TARGET, and it does not need to be: `Fault::Stall`'s
+          // offset is the measurement its channel's law was decided by, which is what the `Lhs`
+          // and `Rhs` channels have always carried. The restore target is still `committed` —
+          // `rollback_abandoning_points` reinstalls the probe's checkpoint, which is that read
+          // verbatim — and the identity survives anyway rather than being asserted: reaching this
+          // branch forces `after_report == committed == owed`, because the frame opened at or past
+          // the watermark and committed consumption does not regress across the LHS or the report,
+          // so `after_report <= owed` can only hold with all three equal. The number the caller is
+          // handed and the number the report carries are therefore still one number, derived where
+          // they used to be stipulated. Only an input that has already broken the driver's
+          // monotonicity law separates them, and the `Rhs` channel one arm up has that same
+          // exposure in the same shape. `NonAssoc` below is where the handback position is
+          // definitional, and it still reads `committed`.
           let unpaid = match adjacency_watermark {
-            Some(owed) if committed <= *owed => Some(owed.clone()),
+            Some(owed) if after_report <= *owed => Some(owed.clone()),
             _ => None,
           };
           if let Some(owed) = unpaid {
             txn.rollback_abandoning_points();
             return Err(Fault::Stall {
-              at: committed,
+              at: after_report,
               committed_before: owed,
               channel: StalledChannel::AdjacencyDebt,
             });
@@ -1952,9 +2020,15 @@ where
             // frame below inherits this position until one of them is itself an adjacency
             // descent, so the operand parse — however deep, and through however many spelled
             // operators — may not take another zero-token continuation until committed
-            // consumption has passed the position this one started from. A borrow of this frame's
-            // own `committed`, which the loop does not touch until the call returns.
-            Some(&committed),
+            // consumption has passed the position this one descended from.
+            //
+            // `after_report`, which is that position: the probe was committed a statement above,
+            // so this is literally where the recursion begins. Carrying `committed` instead would
+            // spend the classifier's own bytes twice — once discharging the enclosing adjacency,
+            // and again admitting a continuation below that added no byte of its own — which is
+            // the same double-payment the debt test above refuses, one frame further down. A
+            // borrow of a local of this loop turn, which nothing touches until the call returns.
+            Some(&after_report),
             cst,
           )?;
 
@@ -1966,6 +2040,15 @@ where
           // So this frame's loop buys exactly as many zero-token continuations as it has bytes to
           // pay for, and the honest grammar this variant exists for never notices: `labelFilter
           // labelFilter` advances by a whole operand per turn.
+          //
+          // AGAINST `after_report`, WHICH IS WHAT MAKES IT THE OPERAND'S CHARGE. `committed` is
+          // this turn's starting position, and between it and `after_report` lie whatever bytes
+          // the classifier took on its way to a report the boundary exempts — the enclosing
+          // adjacency's payment, by the rule at the top of this arm, and not this operand's.
+          // Charged from `committed` the trivia pays a debt it does not owe: a right operand that
+          // consumed nothing buys the fold, the wrap and another turn on the strength of bytes
+          // that were the operator's, which is the one outcome this charge exists to refuse and
+          // which the public contract answers with "the right operand pays".
           //
           // FRAME-LOCAL, and that is why it is not the whole bound. It runs after the recursion
           // returns, so the frames the recursion built have already been built; what prices those
@@ -1982,6 +2065,15 @@ where
           // it was empty. Reporting the second as the first would erase those diagnostics over a
           // failure that took nothing away.
           //
+          // MOVING THE BOUNDARY OPENS A BAND THAT COULD NOT EXIST BEFORE — `after_operand` strictly
+          // between `committed` and `after_report`, an operand parse that rewound past the
+          // classifier's bytes without reaching the cycle start — and the rule above decides it
+          // rather than a new one. The operand was handed the input at `after_report`, because the
+          // probe was committed and the recursion entered there; anything below that is the
+          // recursion moving backwards behind what it was handed, which is the foot-of-cycle
+          // refusal's own sentence and takes its restore. `Stall` keeps exactly the case it
+          // described before: the operand that did not move at all.
+          //
           // NESTED RATHER THAN AN `if`-EXPRESSION, so the posture rule holds for each arm
           // separately: every comparison here is a branch that has not yet decided a posture, and
           // each posture that IS decided is returned with nothing between the decision and the
@@ -1990,16 +2082,16 @@ where
           // in caller-supplied `PartialOrd` would then take the expression-scoped exit on a path
           // that had decided to keep it.
           let after_operand = inp.span().end();
-          if after_operand <= committed {
-            if after_operand < committed {
+          if after_operand <= after_report {
+            if after_operand < after_report {
               return Err(Fault::Rewind {
                 at: after_operand,
-                committed_before: committed,
+                committed_before: after_report,
               });
             }
             return Err(Fault::Stall {
               at: after_operand,
-              committed_before: committed,
+              committed_before: after_report,
               channel: StalledChannel::Adjacency,
             });
           }

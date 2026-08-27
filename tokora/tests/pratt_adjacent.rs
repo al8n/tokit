@@ -889,6 +889,289 @@ fn a_ladder_the_document_pays_for_rung_by_rung_still_nests() {
   );
 }
 
+// ── Where the classifier's own bytes land ────────────────────────────────────
+//
+// Every cell above holds the classifier to the easy half of its exemption: it consumes nothing,
+// so the position the cycle started from and the position the report crossed back at are one
+// number and each of the arm's three measurements can be taken from either. The other half is
+// legal too — a CST-shaped classifier skips the trivia between two adjacent operands before
+// deciding they *are* adjacent — and it splits those two numbers apart. The driver reads
+// `committed` at the top of the loop turn, so inside a turn it names the position BEFORE the
+// classifier ran; `after_report` is the position it left.
+//
+// The rule these cells pin is one sentence: **classifier consumption pays the enclosing
+// adjacency, never the continuation the classifier reports.** Bytes taken before the report
+// discharge the debt the frames above are owed; bytes taken after it pay for this continuation.
+// Every byte pays exactly one debt, and none pays two.
+//
+// Three measurements sit on that boundary, and there is one cell for each — so a driver that
+// takes any single one of them from `committed` reds exactly one of these three and leaves the
+// other two green:
+//
+//   the charge     `after_operand <= after_report`   the trivia is not the operand's payment
+//   the debt test  `after_report <= *owed`           but it does discharge the outer debt
+//   the descent    `Some(&after_report)`             and the frame below owes those bytes too
+//
+// The lexer skips whitespace, so "trivia" here is a real token the classifier consumes and does
+// not report — which is what a CST-shaped grammar does with a comment or a line break it intends
+// to attach to the node rather than to name as the operator.
+
+/// What the scripted classifier below does at one rung.
+#[derive(Clone, Copy)]
+enum Rung {
+  /// Consume the token sitting here and *then* report the continuation. The half of the exemption
+  /// that moves `after_report` past the position the cycle started from.
+  EatThenReport,
+  /// Report the continuation having consumed nothing — the half every cell above uses.
+  ReportOnly,
+  /// End the expression here.
+  Stop,
+}
+
+/// The script the classifier is running, and how far into it this parse has got. A rung is spent
+/// per *report*, so the `End` the classifier answers at exhaustion costs none — which keeps the
+/// powers below tied to the descent rather than to the call count.
+static TRIVIA_SCRIPT: Mutex<&'static [Rung]> = Mutex::new(&[]);
+static TRIVIA_RUNG: AtomicUsize = AtomicUsize::new(0);
+
+/// The frame count and the work, read exactly as the two fixtures above read theirs. Separate
+/// counters and a separate lock, because the harness runs cells in parallel and a reading has to
+/// belong to the parse that produced it.
+static TRIVIA_LHS_CALLS: AtomicUsize = AtomicUsize::new(0);
+static TRIVIA_FOLDS: AtomicUsize = AtomicUsize::new(0);
+static TRIVIA_LOCK: Mutex<()> = Mutex::new(());
+
+fn trivia_lhs<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<PrattLHS<String, &'static str, i64>, AdjError>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = AdjError>,
+{
+  TRIVIA_LHS_CALLS.fetch_add(1, Ordering::Relaxed);
+  if !operand_can_begin(inp.peek_kind()?) {
+    return Ok(PrattLHS::Operand("<hole>".to_owned()));
+  }
+  match inp.next()? {
+    Some(tok) => match tok.into_data() {
+      Token::Num(n) => Ok(PrattLHS::Operand(n.to_string())),
+      _ => Err(AdjError::Other),
+    },
+    None => Err(AdjError::Other),
+  }
+}
+
+fn trivia_rhs<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<PrattRHS<&'static str, &'static str, &'static str, (), i64>, AdjError>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = AdjError>,
+{
+  if inp.peek_kind()?.is_none() {
+    return Ok(PrattRHS::End);
+  }
+  let rung = TRIVIA_RUNG.fetch_add(1, Ordering::Relaxed);
+  let step = TRIVIA_SCRIPT
+    .lock()
+    .unwrap_or_else(|e| e.into_inner())
+    .get(rung)
+    .copied()
+    .unwrap_or(Rung::Stop);
+  // STRICTLY INCREASING, one rung per report, so an inner frame's `Exclusive(p)` floor admits the
+  // next one and the descent is what the cells measure rather than a same-power chain iterating
+  // in one frame.
+  let power = i64::try_from(rung + 1).expect("the scripts here are a handful of rungs long");
+  match step {
+    Rung::Stop => Ok(PrattRHS::End),
+    Rung::ReportOnly => Ok(PrattRHS::Adjacent(Precedenced::new("·", power))),
+    Rung::EatThenReport => {
+      inp.next()?;
+      Ok(PrattRHS::Adjacent(Precedenced::new("·", power)))
+    }
+  }
+}
+
+fn trivia_fold_infix<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+  left: String,
+  right: String,
+  op: Precedenced<PrattInfix<&'static str, &'static str, &'static str>, i64>,
+) -> Result<String, AdjError>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = AdjError>,
+{
+  TRIVIA_FOLDS.fetch_add(1, Ordering::Relaxed);
+  juxt_fold_infix(inp, left, right, op)
+}
+
+fn trivia_expr<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<Result<String, AdjError>, AdjError>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = AdjError>,
+{
+  Ok(
+    pratt(
+      trivia_lhs,
+      trivia_rhs,
+      juxt_fold_prefix,
+      trivia_fold_infix,
+      juxt_fold_postfix,
+    )
+    .parse_input(inp),
+  )
+}
+
+fn trivia(src: &str, script: &'static [Rung]) -> Run {
+  let _guard = TRIVIA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+  *TRIVIA_SCRIPT.lock().unwrap_or_else(|e| e.into_inner()) = script;
+  TRIVIA_RUNG.store(0, Ordering::Relaxed);
+  TRIVIA_LHS_CALLS.store(0, Ordering::Relaxed);
+  TRIVIA_FOLDS.store(0, Ordering::Relaxed);
+  let caught = std::panic::catch_unwind(|| {
+    Parser::new()
+      .apply(trivia_expr)
+      .parse_str(src)
+      .expect("the outer parser never fails")
+  });
+  Run {
+    caught,
+    lhs_entries: TRIVIA_LHS_CALLS.load(Ordering::Relaxed),
+    folds: TRIVIA_FOLDS.load(Ordering::Relaxed),
+  }
+}
+
+/// **THE CHARGE. The trivia the classifier ate is not the right operand's payment.**
+///
+/// `1 , ;` with the classifier consuming the `,` before reporting the continuation, and the `;`
+/// answered by the LHS channel with a hole. Committed consumption moved across this cycle — the
+/// comma — but every byte of that movement is the *classifier's*, taken before the report, and
+/// the operand the continuation descended onto consumed nothing at all. So the fold, the CST wrap
+/// and the next turn have nothing paying for them, and `folds == 0` is what says the driver
+/// refused them before buying any of it.
+///
+/// **The falsifier.** Charge against `committed` — the position the cycle started from, read
+/// before the classifier ran — and the comma reads as the operand's payment: `folds == 1` and an
+/// `Ok("(1 · <hole>)")` carrying a fold the document never bought. That is the reading at
+/// 7d3e2f4. Neither of the other two measurements can move this cell: the root frame inherits no
+/// watermark, so the debt test's arm is `None` and the descent's value is never read.
+#[test]
+fn the_classifiers_own_trivia_does_not_pay_for_the_operand() {
+  let run = trivia("1 , ;", &[Rung::EatThenReport, Rung::Stop]);
+  assert_eq!(
+    run.folds, 0,
+    "the operand consumed nothing past where the classifier left the input, so the continuation \
+     is refused in front of the fold, the wrap and the next turn"
+  );
+  assert_eq!(
+    run.lhs_entries, 2,
+    "`1`, then the hole the continuation descended onto — and nothing after it"
+  );
+  let refused = run.settle(true);
+  if let Some(msg) = refused.refusal.as_deref() {
+    assert!(
+      msg.contains(CHARGE_WORDING),
+      "debug: the law that stopped this is the CHARGE, read off the operand and not off the \
+       cycle: {msg}"
+    );
+  }
+  if let Some(out) = refused.outcome {
+    assert_eq!(
+      out,
+      Err(AdjError::EoRhs),
+      "release: the terminal end-of-RHS report, not an `Ok` carrying a fold the classifier's own \
+       trivia paid for"
+    );
+  }
+}
+
+/// **THE DEBT TEST. The same trivia does discharge the adjacency the frame above is inside.**
+///
+/// The mirror of the cell above, in the other direction. `1 , 2`: the outer continuation is
+/// reported having consumed nothing and descends onto a zero-width hole, so the inner frame opens
+/// at exactly the watermark it owes. Its classifier then eats the comma and reports at a higher
+/// power — real committed consumption, past the position the enclosing continuation descended
+/// from, and therefore the advancement the debt test asks for. The parse is legal and nests.
+///
+/// **The falsifier.** Test `committed` instead — the inner frame's position before its own
+/// classifier ran, which is still the watermark — and the comma is invisible to the test: a legal
+/// parse is refused, *terminally*, with `AdjacencyDebt`. That is the reading at 7d3e2f4:
+/// `lhs_entries == 2`, `folds == 0`, `Err(EoRhs)`. Neither of the other two measurements can move
+/// this cell: the outer classifier consumed nothing, so the descent carries the same number
+/// either way, and both charges clear by a whole operand.
+#[test]
+fn the_classifiers_own_trivia_discharges_the_enclosing_adjacency() {
+  let run = trivia(
+    "1 , 2",
+    &[Rung::ReportOnly, Rung::EatThenReport, Rung::Stop],
+  );
+  assert_eq!(
+    run.lhs_entries, 3,
+    "`1`, the hole the outer continuation descended onto, and the `2` the inner one bought with \
+     the comma its classifier committed"
+  );
+  assert_eq!(run.folds, 2, "and both continuations folded");
+  let served = run.settle(false);
+  assert_eq!(
+    served.outcome,
+    Some(Ok("(1 · (<hole> · 2))".to_owned())),
+    "a continuation whose classifier committed input past the watermark is owed the descent, not \
+     a terminal refusal"
+  );
+}
+
+/// **THE DESCENT. The frame below owes the classifier's bytes too.**
+///
+/// `1 , ;` again, and the outer classifier eats the comma exactly as in the charge cell — but
+/// here the inner frame reports a continuation of its own instead of ending. That inner report
+/// consumes nothing, and nothing was committed between the two reports, so the inner one is
+/// buying a second zero-token frame on input the first was already paid with. The debt test
+/// refuses it, and can only refuse it if the watermark the descent carried is the position the
+/// outer classifier *left* rather than the one its cycle started from.
+///
+/// **The falsifier.** Descend with `committed` and the comma is spent twice: once discharging
+/// nothing, and once again admitting the inner continuation whose own report added no byte to it.
+/// The refusal then lands one frame deeper — `lhs_entries == 3` — which is the reading at
+/// 7d3e2f4, and the extra frame is exactly the one the rule exists to refuse. The charge cannot
+/// move this cell: no charge in it ever runs, because the refusal is in front of the descent and
+/// propagates through the outer frame's own.
+#[test]
+fn the_descent_carries_the_position_the_classifier_left() {
+  let run = trivia(
+    "1 , ;",
+    &[
+      Rung::EatThenReport,
+      Rung::ReportOnly,
+      Rung::ReportOnly,
+      Rung::ReportOnly,
+      Rung::Stop,
+    ],
+  );
+  assert_eq!(
+    run.lhs_entries, 2,
+    "`1`, then the hole the outer continuation descended onto — the inner continuation is refused \
+     before it descends, so there is no third frame"
+  );
+  assert_eq!(
+    run.folds, 0,
+    "and the refusal is in front of the work, as both halves of the law are"
+  );
+  let refused = run.settle(true);
+  if let Some(msg) = refused.refusal.as_deref() {
+    assert!(
+      msg.contains(DEBT_WORDING),
+      "debug: the law that stopped this is the DEBT — the inner continuation descending on input \
+       the outer one's own classifier was already paid with: {msg}"
+    );
+  }
+  if let Some(out) = refused.outcome {
+    assert_eq!(out, Err(AdjError::EoRhs), "release: the terminal report");
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Section three — the token-level engine refuses the shape
 // ═══════════════════════════════════════════════════════════════════════════════
