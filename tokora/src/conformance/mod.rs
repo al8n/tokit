@@ -225,7 +225,9 @@ const MAX_BUDGET_MULTIPLE: usize = 1 << 16;
 ///   }
 /// }
 ///
-/// #[derive(Clone, Debug)]
+/// // `PartialEq` because `run` compares the token by VALUE (#269) — this is the one line
+/// // the new bound costs a vocabulary that is plain data, which is nearly all of them.
+/// #[derive(Clone, Debug, PartialEq)]
 /// struct CharTok;
 /// impl Token<'_> for CharTok {
 ///   type Kind = CharKind;
