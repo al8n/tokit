@@ -64,8 +64,26 @@ trap 'rm -rf "$WORK"' EXIT
 # pins the extracted base tree only. The generated probe crates are separate packages with
 # no lock of their own and are not covered here — see the probe-side copy further down.
 mkdir -p "$WORK/base"
-git -C "$ROOT" archive "$BASE_REF" | tar -x -C "$WORK/base" || {
+# `git archive | tar -x` is a pipe under `set -o pipefail` (:49). `tar -x` can stop reading
+# once it has what it wants; `git archive` then takes SIGPIPE on the now-closed pipe and exits
+# 141, and pipefail reports the rightmost NON-ZERO exit in the pipeline — 141, from git, not
+# tar's own (successful) status. That FATAL is a race against archive size and pipe buffering,
+# not a real extraction failure: `|| [ $? -eq 141 ]` or `trap '' PIPE` would suppress it, but
+# both make a GENUINE extraction failure indistinguishable from a benign SIGPIPE. Break the
+# pipe instead — archive to a file, then extract from the file, so nothing is reading the
+# other end while git is still writing it.
+git -C "$ROOT" archive --format=tar -o "$WORK/base.tar" "$BASE_REF" || {
+  echo "name-collision: FATAL — could not archive base ref $BASE_REF" >&2; exit 2; }
+tar -x -f "$WORK/base.tar" -C "$WORK/base" || {
   echo "name-collision: FATAL — could not extract base ref $BASE_REF" >&2; exit 2; }
+# Check the RESULT, not the status: a tar that exits 0 said only that it processed its input
+# without error, not that the tree it produced is the crate this script is about to build
+# against ($WORK/base/tokora, below). Cargo.toml at the extracted root is the cheapest positive
+# evidence that the archive was not empty, truncated, or extracted to the wrong place.
+[ -f "$WORK/base/Cargo.toml" ] || {
+  echo "name-collision: FATAL — extraction of base ref $BASE_REF produced no Cargo.toml under" >&2
+  echo "name-collision: $WORK/base — the archive was empty, truncated, or misplaced" >&2
+  exit 2; }
 [ -f "$ROOT/Cargo.lock" ] && cp "$ROOT/Cargo.lock" "$WORK/base/Cargo.lock"
 
 # Flatten the inventory into `category<TAB>name<TAB>owner<TAB>spelling` rows. A parse
@@ -345,9 +363,15 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
   # head-side warning — a new deprecation in tokora, say — would appear on every row and
   # downgrade a genuine SILENT to the non-fatal `warned`, which is a false green produced
   # by a diagnostic about something else entirely.
+  #
+  # `comm` is captured before it is matched, not piped into `grep -q`: under pipefail, a
+  # `grep -q` that matches early closes the pipe while `comm` may still be writing, `comm`
+  # then takes SIGPIPE and exits 141, and pipefail reports THAT instead of grep's true 0 — the
+  # `if` would read "no warning" for a row that has one. Capturing once and matching the
+  # capture keeps the semantics exact with no live pipe left to race.
+  new_warnings="$(comm -13 "$WORK/warn-base.txt" "$WORK/warn-head.txt" 2>/dev/null)"
   if [ -s "$WORK/warn-head.txt" ] \
-     && comm -13 "$WORK/warn-base.txt" "$WORK/warn-head.txt" 2>/dev/null \
-        | grep -qE "(^|[^A-Za-z0-9_])$name([^A-Za-z0-9_]|$)"; then
+     && grep -qE "(^|[^A-Za-z0-9_])$name([^A-Za-z0-9_]|$)" <<<"$new_warnings"; then
     case "$h" in witness=*) h="${h},warned" ;; esac
   fi
 
@@ -374,9 +398,13 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
       # fixture's own naming lint says "constant `dispatch_take` should have an upper case
       # name" — the name, in a diagnostic that has nothing to do with a collision. Requiring
       # the ambiguity wording is what makes this a witness rather than a proxy for one.
+      # Captured once, matched against the capture — not piped into `grep -q`. `grep -qiE`
+      # exits as soon as it matches; under pipefail the writing `grep` can then take SIGPIPE
+      # on the still-open pipe and its 141 outranks the reader's true 0, so `said` would stay
+      # unset for a row that DID say "ambiguous". Same fix as `new_warnings` above.
       said=""
-      grep -E "(^|[^A-Za-z0-9_])$name([^A-Za-z0-9_]|$)" "$WORK/out-head.txt" 2>/dev/null \
-        | grep -qiE "ambiguous|E0659" && said=yes
+      name_lines="$(grep -E "(^|[^A-Za-z0-9_])$name([^A-Za-z0-9_]|$)" "$WORK/out-head.txt" 2>/dev/null)"
+      grep -qiE "ambiguous|E0659" <<<"$name_lines" && said=yes
       # The base side must be one of the two shapes a glob row can actually produce on an
       # ordinary run before head's evidence means anything: `no-compile` (rustc rejected the
       # probe outright — its own INCONCL below) or `unreached` (it compiled — `glob_name` and
@@ -555,12 +583,17 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
     # for a two-sided delta harness by construction.
     base_unresolved=""
     head_unresolved=""
-    grep -E "(^|[^A-Za-z0-9_])$owner([^A-Za-z0-9_]|$)" "$WORK/out-base.txt" 2>/dev/null \
-      | grep -qE "unresolved import|cannot find|failed to resolve|E0432|E0433|E0412" \
-      && base_unresolved=yes
-    grep -E "(^|[^A-Za-z0-9_])$owner([^A-Za-z0-9_]|$)" "$WORK/out-head.txt" 2>/dev/null \
-      | grep -qE "unresolved import|cannot find|failed to resolve|E0432|E0433|E0412" \
-      && head_unresolved=yes
+    # Captured once per side, matched against the capture — see `new_warnings` above for why:
+    # piping straight into `grep -q` lets a SIGPIPE 141 from the first `grep` outrank the
+    # second `grep`'s true 0 under pipefail, and this pair is where that inversion would
+    # misclassify a resolved-vs-unresolved OWNER, not just a warning annotation. `owner_lines_head`
+    # is reused below for `owner_unused` — same owner, same file, one capture.
+    owner_lines_base="$(grep -E "(^|[^A-Za-z0-9_])$owner([^A-Za-z0-9_]|$)" "$WORK/out-base.txt" 2>/dev/null)"
+    grep -qE "unresolved import|cannot find|failed to resolve|E0432|E0433|E0412" \
+      <<<"$owner_lines_base" && base_unresolved=yes
+    owner_lines_head="$(grep -E "(^|[^A-Za-z0-9_])$owner([^A-Za-z0-9_]|$)" "$WORK/out-head.txt" 2>/dev/null)"
+    grep -qE "unresolved import|cannot find|failed to resolve|E0432|E0433|E0412" \
+      <<<"$owner_lines_head" && head_unresolved=yes
     # THE FIFTH WITNESS. `witness=0` is CONSUMER-CALLS, so what it establishes is "the
     # consumer's item did not run" — and for a new owner that is produced by TWO things: the
     # new item taking the call, which is the verdict, and an item of the same name the SUBJECT
@@ -582,8 +615,9 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
     # import may NOT carry `#[allow(unused_imports)]`. A suppressed warning is a witness that
     # cannot fire, and every false green in this file's history was asserted by an absence.
     owner_unused=""
-    grep -E "(^|[^A-Za-z0-9_])$owner([^A-Za-z0-9_]|$)" "$WORK/out-head.txt" 2>/dev/null \
-      | grep -q "unused import" && owner_unused=yes
+    # Reuses `owner_lines_head`, captured above for `head_unresolved` — same owner, same file,
+    # same SIGPIPE hazard the capture already avoids.
+    grep -q "unused import" <<<"$owner_lines_head" && owner_unused=yes
     # The head side's LOUD evidence. `new-owner` took exactly ONE head-side shape as proof that
     # a collision was constructed — `witness=0`, the silent steal — and a trait method taking
     # `&self` cannot produce it. The `trait_method` spellings put the consumer's item one pick
@@ -618,11 +652,16 @@ while IFS=$(printf '\t') read -r cat name owner spelling; do
     # right direction for a wording dependency to fail, and it is why this is three tests rather
     # than one loose one.
     head_rejected=""
+    # The first two tests grep a FILE directly and are not piped into anything, so they cannot
+    # race. The third IS a pipe — candidate-note lines into a second `grep -qE` — and is
+    # captured once for the same reason as every other site in this file: `grep -q` matching
+    # early can SIGPIPE the writing `grep` before it finishes, and pipefail would then report
+    # that 141 instead of the reader's true 0.
+    candidate_lines="$(grep -E "candidate #[0-9]+ is defined in an impl of the trait" \
+      "$WORK/out-head.txt" 2>/dev/null)"
     if grep -qE "E0034|multiple applicable items in scope" "$WORK/out-head.txt" 2>/dev/null \
        && grep -qE "multiple \`$name\` found" "$WORK/out-head.txt" 2>/dev/null \
-       && grep -E "candidate #[0-9]+ is defined in an impl of the trait" "$WORK/out-head.txt" \
-            2>/dev/null \
-          | grep -qE "(^|[^A-Za-z0-9_])$owner([^A-Za-z0-9_]|$)"; then
+       && grep -qE "(^|[^A-Za-z0-9_])$owner([^A-Za-z0-9_]|$)" <<<"$candidate_lines"; then
       head_rejected=yes
     fi
     if [ -n "$base_unresolved" ] && [ -z "$head_unresolved" ]; then
