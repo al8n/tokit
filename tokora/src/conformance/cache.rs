@@ -266,7 +266,7 @@ use generic_arraydeque::{
 };
 use mayber::Maybe;
 
-use super::{Decided, NON_REFLEXIVE_BODY, decided_by};
+use super::{Comparison, Decided, Divergence, NON_REFLEXIVE_BODY, Ranking, compare_by, diverge};
 use crate::{
   Lexer, Slice, Source, Span, Window,
   cache::{
@@ -409,6 +409,19 @@ impl EntryPart {
 /// found a `NaN` in the token beside it refused, hiding a real cache defect behind a diagnosis
 /// nothing had established. See [`refuse_non_reflexive`](CacheHarness::refuse_non_reflexive) and
 /// [`Decided`].
+///
+/// # Why the three thirds are one ranked search and not three returns
+///
+/// It returned at the first third that differed, and "first" is a fixed order while
+/// *conclusiveness* is not: a cache that accepts a push, hands back the correct span and the
+/// correct token, and corrupts a perfectly **reflexive** `L::State` was called INCONCLUSIVE,
+/// because a `NaN` token selected the token third and the state was never examined. The state
+/// difference convicts the cache on its own and no caller equality it could not trust decided it.
+/// So an inconclusive third is retained as a fallback and the search continues into the thirds
+/// behind it — see [`Ranking`], where that rule and its cost live.
+///
+/// "Span first, always" is unchanged for every entry whose span comparison is sound, which is
+/// every entry a conforming `L::Span: Ord` produces.
 pub(super) fn triple_compare<'inp, L>(
   want: (&L::Span, &L::Token, &L::State),
   got: (&L::Span, &L::Token, &L::State),
@@ -418,44 +431,23 @@ where
   L::Token: PartialEq,
   L::State: PartialEq,
 {
-  if want.0 != got.0 {
-    return Some((
-      EntryPart::Span,
-      decided_by(EntryPart::Span.component(), want.0, got.0),
-    ));
+  // Written out rather than folded over an array, so that each third's comparison is only
+  // reached when the search is still open: an entry whose span settles it conclusively runs the
+  // caller's `L::Token` and `L::State` equalities exactly as rarely as it did before.
+  let mut ranking = Ranking::new();
+  let span = compare_by(EntryPart::Span.component(), want.0, got.0);
+  if let Some(hit) = ranking.settle(EntryPart::Span, span) {
+    return Some(hit);
   }
-  if want.1 != got.1 {
-    return Some((
-      EntryPart::Token,
-      decided_by(EntryPart::Token.component(), want.1, got.1),
-    ));
+  let token = compare_by(EntryPart::Token.component(), want.1, got.1);
+  if let Some(hit) = ranking.settle(EntryPart::Token, token) {
+    return Some(hit);
   }
-  if want.2 != got.2 {
-    return Some((
-      EntryPart::State,
-      decided_by(EntryPart::State.component(), want.2, got.2),
-    ));
+  let state = compare_by(EntryPart::State.component(), want.2, got.2);
+  if let Some(hit) = ranking.settle(EntryPart::State, state) {
+    return Some(hit);
   }
-  None
-}
-
-/// What a purity comparison over two peeked runs was decided by — the answer [`runs_decided`]
-/// gives when the two runs differ at all.
-///
-/// **Total over the ways two runs can differ, and the totality is the point.** An `Option<(usize,
-/// Decided)>` could not say "they differ, and a *length* decided it": it said `None`, which is
-/// also what it says about two runs that agree. A caller needing both answers therefore had to
-/// ask a second question — `first != second` — and compose the two by hand, and that composition
-/// is where a `bool` that does not record what fired came back one level up (#324). One
-/// comparison, one answer, consumed by the branch and by the failure path alike.
-pub(super) enum PurityDecided {
-  /// Every shared position agrees and the two runs differ in **length**.
-  ///
-  /// A count is not a comparison of caller values, so there is nothing here that could fail to
-  /// equal itself and nothing to refuse — see [`refuse_runs`](CacheHarness::refuse_runs).
-  Length,
-  /// They disagree at a position, and [`Decided`] names the component that decided it.
-  At(usize, Decided),
+  ranking.refusal()
 }
 
 /// [`triple_compare`] over two whole peeked runs: whether they differ, and when they do, **what
@@ -466,24 +458,29 @@ pub(super) enum PurityDecided {
 /// A scan of one run had neither property: it answered from an entry the two runs might well
 /// agree on, at a position the divergence is not at, and it answered at all when a length settled
 /// the verdict.
+///
+/// **The answer is `conformance`'s own [`Divergence`], not a type of this module's.** It was one:
+/// a `Length | At(usize, Decided)` pair that said exactly what `Divergence` says, written here
+/// because the trait tier's loops had not been factored yet. Two spellings of one answer are two
+/// places for the ordering between a position and a count to be decided, and this round's finding
+/// is that the ordering was wrong in every one of them — so the ranking, the length step and the
+/// answer are all [`diverge`]'s now, and the purity law reads them the way the four stream
+/// comparisons do.
 pub(super) fn runs_decided<'inp, L>(
   first: &[PeekedTriple<'inp, L>],
   second: &[PeekedTriple<'inp, L>],
-) -> Option<PurityDecided>
+) -> Option<Divergence>
 where
   L: Lexer<'inp>,
   L::Token: PartialEq,
   L::State: PartialEq,
 {
-  let diverged = first
-    .iter()
-    .zip(second)
-    .enumerate()
-    .find_map(|(i, (a, b))| {
-      triple_compare::<L>((&a.0, &a.1, &a.2), (&b.0, &b.1, &b.2))
-        .map(|(_, decided)| PurityDecided::At(i, decided))
-    });
-  diverged.or_else(|| (first.len() != second.len()).then_some(PurityDecided::Length))
+  diverge(first, second, first.len() != second.len(), |a, b| {
+    triple_compare::<L>((&a.0, &a.1, &a.2), (&b.0, &b.1, &b.2))
+      .map_or(Comparison::Equal, |(_, decided)| {
+        Comparison::Differs(decided)
+      })
+  })
 }
 
 /// Which half of a prefilled `peek`'s buffer a purity comparison was decided by: the prefix
@@ -523,7 +520,7 @@ where
   half: PeekHalf,
   first: &'r [PeekedTriple<'inp, L>],
   second: &'r [PeekedTriple<'inp, L>],
-  decided: PurityDecided,
+  decided: Divergence,
 }
 
 /// [`runs_decided`] over the two halves of a prefilled peek, in buffer order, answering with the
@@ -1474,10 +1471,16 @@ where
   /// can re-label a failure and can never manufacture one: a genuinely non-conforming cache whose
   /// token and state values *are* reflexive never reaches this line and still fails the ordinary
   /// way, with the ordinary tag.
+  /// `noun` is what the side being refused *is* — an `entry` at every comparison of a cached
+  /// triple, a `run` where a whole peeked vector was compared as one value. It is a parameter
+  /// rather than the constant it used to be because the span-valued laws draw verdicts from
+  /// values that are not entries, and a refusal that called a span vector an entry would be
+  /// describing something the comparison never held.
   fn refuse_non_reflexive(
     &self,
     site: &str,
     side: &str,
+    noun: &str,
     component: Option<&'static str>,
     rendered: &str,
   ) {
@@ -1487,7 +1490,7 @@ where
     let name = self.label();
     panic!(
       "tokora cache conformance [{name} non-reflexive-payload] {site}: INCONCLUSIVE — \
-       {component} of the {side} entry {rendered} is not equal to ITSELF, so the comparison that \
+       {component} of the {side} {noun} {rendered} is not equal to ITSELF, so the comparison that \
        just failed was decided by the value type and not by the cache, which this kit has \
        therefore not convicted of anything. {}",
       NON_REFLEXIVE_BODY
@@ -1510,10 +1513,25 @@ where
       self.refuse_non_reflexive(
         site,
         side,
+        "entry",
         component,
         &format!("({span:?}, {token:?}, {state:?})"),
       );
     }
+  }
+
+  /// The reflexivity guard for one **single-component** comparison — the span-valued laws, where
+  /// there is no triple to rank and the component that decided it is the only one there was.
+  ///
+  /// These comparisons draw a cache verdict from `L::Span` and `L::Offset`, both bounded `Ord`.
+  /// Round 4 read that bound as settling them and left them unguarded; `Ord` is a marker and
+  /// nothing checks its promise, so a caller whose span equality answers `false` to everything
+  /// — itself included — got a red naming their cache. The same lying `L::Span` reaches
+  /// [`triple_compare`] three lines further down at several of these sites and is refused there,
+  /// which is the whole argument: one answer to a broken total equality, not two.
+  fn guard_component(&self, site: &str, noun: &str, decided: &Decided, expected: &str, got: &str) {
+    self.refuse_non_reflexive(site, "expected", noun, decided.expected(), expected);
+    self.refuse_non_reflexive(site, "got", noun, decided.got(), got);
   }
 
   /// The reflexivity refusal for a purity comparison over two whole peeked runs, asked about the
@@ -1521,30 +1539,32 @@ where
   ///
   /// **It does not compare.** The comparison ran at the branch that reached here and its answer
   /// arrives as an argument, so the refusal cannot come to be asked about a pair the verdict does
-  /// not rest on. A [`PurityDecided::Length`] refuses nothing: a count consults no caller
+  /// not rest on. A [`Divergence::Count`] refuses nothing: a count consults no caller
   /// equality, so there is nothing there that could fail to equal itself.
   fn refuse_runs(
     &self,
     site: &str,
-    decided: &PurityDecided,
+    decided: &Divergence,
     first_label: &str,
     first: &[PeekedTriple<'inp, L>],
     second_label: &str,
     second: &[PeekedTriple<'inp, L>],
   ) {
-    let PurityDecided::At(i, decided) = decided else {
+    let Divergence::At(i, decided) = decided else {
       return;
     };
     let at = format!("{site}, position {i}");
     self.refuse_non_reflexive(
       &at,
       first_label,
+      "entry",
       decided.expected(),
       &format!("{:?}", first[*i]),
     );
     self.refuse_non_reflexive(
       &at,
       second_label,
+      "entry",
       decided.got(),
       &format!("{:?}", second[*i]),
     );
@@ -2065,23 +2085,45 @@ where
     // The two span accessors, against the spans of the entries the kit is tracking. These are
     // span-valued by signature — `front_span`/`back_span` return `&L::Span` and nothing else — so
     // the entry comparison has no purchase here; it belongs to the `front()`/`back()` reads below.
+    // The reflexivity guard does apply, and for the reason it applies to every other verdict this
+    // kit draws: see `guard_component`.
     let want_front_span = want.first().map(span_of::<L>);
     let want_back_span = want.last().map(span_of::<L>);
     match (want_front_span.as_ref(), cache.front_span()) {
-      (Some(expected), Some(got)) => assert!(
-        got == expected,
-        "tokora cache conformance [{name} fifo-append] {when}: front is {got:?}, expected the OLDEST resident entry {expected:?}"
-      ),
+      (Some(expected), Some(got)) => {
+        if let Comparison::Differs(decided) = compare_by(Decided::SPAN, expected, got) {
+          self.guard_component(
+            &format!("{when} front_span()"),
+            "entry",
+            &decided,
+            &format!("{expected:?}"),
+            &format!("{got:?}"),
+          );
+          panic!(
+            "tokora cache conformance [{name} fifo-append] {when}: front is {got:?}, expected the OLDEST resident entry {expected:?}"
+          );
+        }
+      }
       (None, None) => {}
       (a, b) => panic!(
         "tokora cache conformance [{name} fifo-append] {when}: front presence disagrees — expected {a:?}, got {b:?}"
       ),
     }
     match (want_back_span.as_ref(), cache.back_span()) {
-      (Some(expected), Some(got)) => assert!(
-        got == expected,
-        "tokora cache conformance [{name} fifo-append] {when}: back is {got:?}, expected the NEWEST resident entry {expected:?}. `push_back` appends after every resident entry."
-      ),
+      (Some(expected), Some(got)) => {
+        if let Comparison::Differs(decided) = compare_by(Decided::SPAN, expected, got) {
+          self.guard_component(
+            &format!("{when} back_span()"),
+            "entry",
+            &decided,
+            &format!("{expected:?}"),
+            &format!("{got:?}"),
+          );
+          panic!(
+            "tokora cache conformance [{name} fifo-append] {when}: back is {got:?}, expected the NEWEST resident entry {expected:?}. `push_back` appends after every resident entry."
+          );
+        }
+      }
       (None, None) => {}
       (a, b) => panic!(
         "tokora cache conformance [{name} fifo-append] {when}: back presence disagrees — expected {a:?}, got {b:?}"
@@ -2135,10 +2177,18 @@ where
         " `pop_front` removes the OLDEST resident entry.",
       );
       let got = span_of::<L>(&popped);
-      assert!(
-        viewed == got,
-        "tokora cache conformance [{name} order]: front() viewed {viewed:?} but pop_front() removed {got:?}; they must name the same entry"
-      );
+      if let Comparison::Differs(decided) = compare_by(Decided::SPAN, &viewed, &got) {
+        self.guard_component(
+          &format!("order pop_front #{i} against the front() that named it"),
+          "entry",
+          &decided,
+          &format!("{viewed:?}"),
+          &format!("{got:?}"),
+        );
+        panic!(
+          "tokora cache conformance [{name} order]: front() viewed {viewed:?} but pop_front() removed {got:?}; they must name the same entry"
+        );
+      }
     }
     // Presence-only, and the law: after a full drain there is no entry left for a pop to return,
     // so absence is the whole observable. (Documented exception — see `checked_push`.)
@@ -2166,10 +2216,18 @@ where
         " `pop_back` removes the NEWEST resident entry. The input layer drops an abandoned continuation's entries with a run of pop_back calls, so a pop_back that is not newest-first drops the wrong tokens.",
       );
       let got = span_of::<L>(&popped);
-      assert!(
-        viewed == got,
-        "tokora cache conformance [{name} order]: back() viewed {viewed:?} but pop_back() removed {got:?}; they must name the same entry"
-      );
+      if let Comparison::Differs(decided) = compare_by(Decided::SPAN, &viewed, &got) {
+        self.guard_component(
+          &format!("order pop_back #{i} against the back() that named it"),
+          "entry",
+          &decided,
+          &format!("{viewed:?}"),
+          &format!("{got:?}"),
+        );
+        panic!(
+          "tokora cache conformance [{name} order]: back() viewed {viewed:?} but pop_back() removed {got:?}; they must name the same entry"
+        );
+      }
     }
     // Presence-only, and the law — see the `pop_front` twin above.
     assert!(
@@ -2231,10 +2289,20 @@ where
           // The prepend law itself, before the generic residency check: the entry just pushed
           // must be the one `front` names.
           match cache.front_span() {
-            Some(got) => assert!(
-              *got == span,
-              "tokora cache conformance [{name} push-front]: after push_front the front is {got:?}, expected the token just pushed, {span:?}. `push_front` places a token BEFORE every resident entry."
-            ),
+            Some(got) => {
+              if let Comparison::Differs(decided) = compare_by(Decided::SPAN, &span, got) {
+                self.guard_component(
+                  &format!("push_front #{i} against the front() it must have become"),
+                  "entry",
+                  &decided,
+                  &format!("{span:?}"),
+                  &format!("{got:?}"),
+                );
+                panic!(
+                  "tokora cache conformance [{name} push-front]: after push_front the front is {got:?}, expected the token just pushed, {span:?}. `push_front` places a token BEFORE every resident entry."
+                );
+              }
+            }
             None => panic!(
               "tokora cache conformance [{name} push-front]: front() is empty right after an accepted push_front"
             ),
@@ -2732,11 +2800,21 @@ where
     // that violates it and nothing else, which `DUPLICATING_PEEK` in `cache_tests.rs` now is: the
     // right count, the right first entry, the front served `bound` times over.
     let first_spans: Vec<L::Span> = first.iter().map(|e| e.0.clone()).collect();
-    assert!(
-      first_spans == want_spans[..bound],
-      "tokora cache conformance [{name} bounded-peek] against {state}: peek() appended {first_spans:?}, expected the resident prefix OLDEST FIRST {:?}",
-      &want_spans[..bound]
-    );
+    if let Comparison::Differs(decided) =
+      compare_by(Decided::SPANS, &want_spans[..bound], &first_spans[..])
+    {
+      self.guard_component(
+        &format!("bounded-peek against {state}"),
+        "run",
+        &decided,
+        &format!("{:?}", &want_spans[..bound]),
+        &format!("{first_spans:?}"),
+      );
+      panic!(
+        "tokora cache conformance [{name} bounded-peek] against {state}: peek() appended {first_spans:?}, expected the resident prefix OLDEST FIRST {:?}",
+        &want_spans[..bound]
+      );
+    }
     // …and the other two thirds of every entry the run just landed. The vector comparison above
     // is the ORDER law and keeps its own wording; this is the entry law (#183), and it is what
     // separates a `peek` that serves the right run from one that serves the right spans with
@@ -2887,11 +2965,21 @@ where
       first.len()
     );
     let first_spans: Vec<L::Span> = first.iter().map(|e| e.0.clone()).collect();
-    assert!(
-      first_spans == want_spans[..bound],
-      "tokora cache conformance [{name} bounded-peek/window {window}] against {state}: peek() appended {first_spans:?}, expected the resident prefix OLDEST FIRST {:?}. A cache may not read W::CAPACITY and answer differently for it.",
-      &want_spans[..bound]
-    );
+    if let Comparison::Differs(decided) =
+      compare_by(Decided::SPANS, &want_spans[..bound], &first_spans[..])
+    {
+      self.guard_component(
+        &format!("bounded-peek/window {window} against {state}"),
+        "run",
+        &decided,
+        &format!("{:?}", &want_spans[..bound]),
+        &format!("{first_spans:?}"),
+      );
+      panic!(
+        "tokora cache conformance [{name} bounded-peek/window {window}] against {state}: peek() appended {first_spans:?}, expected the resident prefix OLDEST FIRST {:?}. A cache may not read W::CAPACITY and answer differently for it.",
+        &want_spans[..bound]
+      );
+    }
     self.assert_peeked_run_eq(
       &first,
       &want[..bound],
@@ -2940,10 +3028,20 @@ where
     let prefilled_bound = remaining_at_prefill.min(want.len());
     let (prefix_after, appended) = self.peeked_entries_after_prefill(cache, prefill);
     let prefix_spans: Vec<L::Span> = prefix_after.iter().map(|e| e.0.clone()).collect();
-    assert!(
-      prefix_spans == prefill_spans,
-      "tokora cache conformance [{name} bounded-peek/{tag} at depth {depth}] against {state}: peek() changed the {depth} entr(ies) already in the buffer ahead of it — got {prefix_spans:?}, expected them untouched, {prefill_spans:?}. `peek` appends BEHIND what the buffer already holds; it neither overwrites nor reorders it."
-    );
+    if let Comparison::Differs(decided) =
+      compare_by(Decided::SPANS, &prefill_spans[..], &prefix_spans[..])
+    {
+      self.guard_component(
+        &format!("bounded-peek/{tag} at depth {depth} untouched prefix against {state}"),
+        "run",
+        &decided,
+        &format!("{prefill_spans:?}"),
+        &format!("{prefix_spans:?}"),
+      );
+      panic!(
+        "tokora cache conformance [{name} bounded-peek/{tag} at depth {depth}] against {state}: peek() changed the {depth} entr(ies) already in the buffer ahead of it — got {prefix_spans:?}, expected them untouched, {prefill_spans:?}. `peek` appends BEHIND what the buffer already holds; it neither overwrites nor reorders it."
+      );
+    }
     self.assert_peeked_run_eq(
       &prefix_after,
       &prefill_want,
@@ -2955,11 +3053,23 @@ where
       appended.len()
     );
     let appended_spans: Vec<L::Span> = appended.iter().map(|e| e.0.clone()).collect();
-    assert!(
-      appended_spans == want_spans[..prefilled_bound],
-      "tokora cache conformance [{name} bounded-peek/{tag} at depth {depth}] against {state}: peek() appended {appended_spans:?}, expected the resident prefix OLDEST FIRST {:?}. Every resident entry is served, whatever the buffer already holds: `peek` is not entitled to decide the caller has one of them already.",
-      &want_spans[..prefilled_bound]
-    );
+    if let Comparison::Differs(decided) = compare_by(
+      Decided::SPANS,
+      &want_spans[..prefilled_bound],
+      &appended_spans[..],
+    ) {
+      self.guard_component(
+        &format!("bounded-peek/{tag} at depth {depth} against {state}"),
+        "run",
+        &decided,
+        &format!("{:?}", &want_spans[..prefilled_bound]),
+        &format!("{appended_spans:?}"),
+      );
+      panic!(
+        "tokora cache conformance [{name} bounded-peek/{tag} at depth {depth}] against {state}: peek() appended {appended_spans:?}, expected the resident prefix OLDEST FIRST {:?}. Every resident entry is served, whatever the buffer already holds: `peek` is not entitled to decide the caller has one of them already.",
+        &want_spans[..prefilled_bound]
+      );
+    }
     self.assert_peeked_run_eq(
       &appended,
       &want[..prefilled_bound],
@@ -3215,12 +3325,28 @@ where
   fn assert_span_at(&self, cache: &C, want: &[L::Span], state: &str) {
     let name = self.label();
     match (want.first(), want.last(), cache.span()) {
-      (Some(first), Some(last), Some(combined)) => assert!(
-        combined.start_ref() == first.start_ref() && combined.end_ref() == last.end_ref(),
-        "tokora cache conformance [{name} combined-span] against {state}: span() is {combined:?}, expected {:?}..{:?} — the front entry's start to the back entry's end",
-        first.start_ref(),
-        last.end_ref()
-      ),
+      // Two endpoint comparisons and ONE answer: `&&` over them is a `bool` that does not record
+      // which end fired, which is the shape #324 kept finding one level up. `Comparison::ranked`
+      // consumes both, ranks them, and hands the refusal below the endpoint the verdict rests on.
+      (Some(first), Some(last), Some(combined)) => {
+        if let Comparison::Differs(decided) = Comparison::ranked(&[
+          &|| compare_by(Decided::OFFSET, first.start_ref(), combined.start_ref()),
+          &|| compare_by(Decided::OFFSET, last.end_ref(), combined.end_ref()),
+        ]) {
+          self.guard_component(
+            &format!("combined-span against {state}"),
+            "span",
+            &decided,
+            &format!("{:?}..{:?}", first.start_ref(), last.end_ref()),
+            &format!("{combined:?}"),
+          );
+          panic!(
+            "tokora cache conformance [{name} combined-span] against {state}: span() is {combined:?}, expected {:?}..{:?} — the front entry's start to the back entry's end",
+            first.start_ref(),
+            last.end_ref()
+          );
+        }
+      }
       (None, None, None) => {}
       (_, _, got) => panic!(
         "tokora cache conformance [{name} combined-span] against {state}: span() presence disagrees with the {} resident entr(ies) it should be built from — got {got:?}",
@@ -3655,12 +3781,22 @@ where
     // CACHE_CALL_CENSUS: compared-in-place
     let overflow: Vec<_> = cache.push_many(corpus.into_iter()).collect();
     let overflow_spans: Vec<L::Span> = overflow.iter().map(span_of::<L>).collect();
-    assert!(
-      overflow_spans == all_spans[cap..],
-      "tokora cache conformance [{name} push-many]: push_many()'s overflow iterator yielded {overflow_spans:?}, expected exactly the {} refused entr(ies) {:?}, unchanged and in order",
-      all_spans.len() - cap,
-      &all_spans[cap..]
-    );
+    if let Comparison::Differs(decided) =
+      compare_by(Decided::SPANS, &all_spans[cap..], &overflow_spans[..])
+    {
+      self.guard_component(
+        "push-many overflow run",
+        "run",
+        &decided,
+        &format!("{:?}", &all_spans[cap..]),
+        &format!("{overflow_spans:?}"),
+      );
+      panic!(
+        "tokora cache conformance [{name} push-many]: push_many()'s overflow iterator yielded {overflow_spans:?}, expected exactly the {} refused entr(ies) {:?}, unchanged and in order",
+        all_spans.len() - cap,
+        &all_spans[cap..]
+      );
+    }
     // "Unchanged" is the whole entry: a `push_many` that hands back the right spans in the right
     // order with re-associated tokens or states behind them has changed what it refused (#183).
     for (i, (got, expected)) in overflow.iter().zip(&all[cap..]).enumerate() {

@@ -3900,17 +3900,18 @@ fn two_peeked_runs_that_differ_only_in_length_are_refused_nothing() {
   // than the one before it settles the verdict with no `PartialEq` involved — and a scan of one
   // run still found the `NaN` in it and refused, over a `peek` that genuinely is not pure.
   //
-  // `Length` is a DECISION and not an absence, which is #324: an answer that said `None` here
+  // `Count` is a DECISION and not an absence, which is #324: an answer that said `None` here
   // said the same thing about two runs that agree, so a caller needing both facts had to ask a
-  // second question and compose the two by hand.
-  use super::cache::{PurityDecided, runs_decided};
+  // second question and compose the two by hand. And a count is CONCLUSIVE, so it outranks the
+  // `NaN` at position 0 rather than queueing behind it — see `Ranking`.
+  use super::{Divergence, cache::runs_decided};
   let entry = || (SimpleSpan::new(0, 1), FTok(f64::NAN), ());
   let first = [entry()];
   let second: [(SimpleSpan, FTok, ()); 0] = [];
   assert!(
     matches!(
       runs_decided::<NanPayloadLexer<'_>>(&first, &second),
-      Some(PurityDecided::Length)
+      Some(Divergence::Count)
     ),
     "a length divergence consults no caller equality, so there is nothing to refuse — and it is \
      still what decided the verdict"
@@ -3936,13 +3937,13 @@ fn a_peeked_run_is_probed_at_the_position_the_two_runs_disagree_at() {
   // And where they do disagree at a position, the question is asked THERE. A scan answered from
   // the first non-reflexive entry anywhere in one run, which need not be — and here is not — the
   // position the two runs actually differ at.
-  use super::cache::{PurityDecided, runs_decided};
+  use super::{Divergence, cache::runs_decided};
   let head = || (SimpleSpan::new(0, 1), FTok(1.0), ());
   let middle = |end: usize| (SimpleSpan::new(1, end), FTok(2.0), ());
   let nan = || (SimpleSpan::new(4, 5), FTok(f64::NAN), ());
   let first = [head(), middle(2), nan()];
   let second = [head(), middle(3), nan()];
-  let Some(PurityDecided::At(i, decided)) = runs_decided::<NanPayloadLexer<'_>>(&first, &second)
+  let Some(Divergence::At(i, decided)) = runs_decided::<NanPayloadLexer<'_>>(&first, &second)
   else {
     panic!("position 1 differs in its span, so a position is what decided it")
   };
@@ -4135,5 +4136,262 @@ fn two_prefilled_peeks_that_agree_in_both_halves_are_not_a_failure() {
     "a full cache",
     (&prefix, &prefix),
     (&appended, &appended),
+  );
+}
+
+// ── #324 round 5: a conclusive difference outranks an inconclusive one ──────────────
+//
+// Rounds 1–4 built the rule that the kit never reports a diagnosis it did not establish. These
+// cells are its mirror: it never withholds one it did. Every one of them is differential — at the
+// commit before this round each produced the wrong answer quoted in its own comment.
+
+/// A one-character-per-token lexer over the `NaN`-capable payload whose `L::State` is a
+/// **comparable** counter.
+///
+/// [`FloatLexer`]'s state is `()`, and a `()` state cannot differ — so the third of
+/// `triple_compare`'s three questions had no fixture that could make it fire while the token
+/// question was already failing, which is exactly the arrangement round 5's second finding lives
+/// in. This is that fixture and it is conforming in everything else.
+struct StateLexer<'a> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: Emitted,
+}
+
+impl<'a> Lexer<'a> for StateLexer<'a> {
+  type State = Emitted;
+  type Source = str;
+  type Token = FTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: Emitted(0),
+    }
+  }
+  fn with_state(src: &'a str, state: Emitted) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+  fn state(&self) -> &Emitted {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut Emitted {
+    &mut self.state
+  }
+  fn into_state(self) -> Emitted {
+    self.state
+  }
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<FTok, Infallible>> {
+    self.start = self.end;
+    if self.start >= self.src.len() {
+      return None;
+    }
+    self.end = boundary_after(self.src, self.start);
+    self.state.0 += 1;
+    Some(Ok(FTok(float_of(self.src.as_bytes()[self.start]))))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+/// One captured item of the `NaN`-capable float lexer, for the stream comparisons that take
+/// `Item`s directly. Every component but the payload is the caller's to choose, so a cell can
+/// hold spans, slices and kinds constant and move exactly one thing.
+fn float_item(
+  value: f64,
+  start: usize,
+  end: usize,
+) -> super::Item<'static, NanPayloadLexer<'static>> {
+  super::Item {
+    item: Ok(FTok(value)),
+    span: SimpleSpan::new(start, end),
+    slice: "x",
+    end,
+    state: (),
+  }
+}
+
+#[test]
+fn an_extra_item_outranks_a_non_reflexive_payload_at_position_zero() {
+  // THE FINDING. `[Tok(NaN)]` against `[Tok(NaN), Tok(0.0)]`: identical kind, span and slice at
+  // position 0, so only the payload can decide there — and it cannot decide anything, because
+  // `NaN != NaN`. The extra item proves replay divergence with NO caller equality consulted at
+  // all, and it sat behind the refusal.
+  //
+  // Before: "[input #0 replay-identity] position 0: INCONCLUSIVE — the token payload …".
+  let msg = panic_message(|| {
+    super::assert_run_eq::<NanPayloadLexer<'_>>(
+      0,
+      "replay-identity",
+      &[float_item(f64::NAN, 0, 1)],
+      &[float_item(f64::NAN, 0, 1), float_item(0.0, 1, 2)],
+    );
+  });
+  assert!(
+    msg.contains("[input #0 replay-identity] length mismatch: expected 1 items, got 2"),
+    "an item COUNT consults no caller equality, so it convicts the lexer on its own, got: {msg}"
+  );
+  assert!(
+    !msg.contains("non-reflexive-payload"),
+    "the kit established replay divergence and may not withhold it, got: {msg}"
+  );
+}
+
+#[test]
+#[should_panic(
+  expected = "non-reflexive-payload] replay-identity position 0: INCONCLUSIVE — the token payload"
+)]
+fn a_non_reflexive_payload_with_nothing_conclusive_anywhere_is_still_refused() {
+  // CONTROL 1, and it pulls the opposite way from the finding: two streams of the same length,
+  // identical in every component a total equality settles, differing only in a payload that will
+  // not equal itself. Nothing conclusive exists ANYWHERE, so the retained fallback is the answer
+  // and #295's repair survives.
+  super::assert_run_eq::<NanPayloadLexer<'_>>(
+    0,
+    "replay-identity",
+    &[float_item(f64::NAN, 0, 1)],
+    &[float_item(f64::NAN, 0, 1)],
+  );
+}
+
+#[test]
+fn an_ordinary_divergence_over_reflexive_payloads_keeps_its_component_and_its_wording() {
+  // CONTROL 2. The ordinary case is a caller `PartialEq` over two values that are BOTH self-equal
+  // — the whole population of honest failures — and ranking must not demote it to a fallback. It
+  // is conclusive, it is reported at the first position it occurs, and the words are the ones the
+  // kit has always used.
+  let msg = panic_message(|| {
+    super::assert_run_eq::<NanPayloadLexer<'_>>(
+      0,
+      "replay-identity",
+      &[float_item(1.0, 0, 1)],
+      &[float_item(2.0, 0, 1)],
+    );
+  });
+  assert!(
+    msg.contains("[input #0 replay-identity] position 0: item mismatch: expected"),
+    "a reflexive payload divergence keeps the ordinary tag and wording, got: {msg}"
+  );
+  assert!(
+    msg.contains("FTok(1.0)") && msg.contains("FTok(2.0)"),
+    "and it names two distinguishable values, got: {msg}"
+  );
+  assert!(
+    !msg.contains("non-reflexive-payload"),
+    "both sides equal themselves, so there is nothing to refuse, got: {msg}"
+  );
+}
+
+#[test]
+fn a_conclusive_difference_later_in_the_stream_is_found_and_not_only_one_at_the_same_position() {
+  // CONTROL 3, and it pulls a third way: a repair that only looked at the REST OF THE SAME ITEM
+  // would pass the finding and control 1 and still stop at the first position that differs. The
+  // `NaN` is at position 0; the span divergence — settled by `Lexer::Span`, bounded `Ord` — is at
+  // position 1, and it is what the kit has established.
+  //
+  // Before: "[input #0 replay-identity] position 0: INCONCLUSIVE — the token payload …".
+  let msg = panic_message(|| {
+    super::assert_run_eq::<NanPayloadLexer<'_>>(
+      0,
+      "replay-identity",
+      &[float_item(f64::NAN, 0, 1), float_item(1.0, 1, 2)],
+      &[float_item(f64::NAN, 0, 1), float_item(1.0, 1, 3)],
+    );
+  });
+  assert!(
+    msg.contains("[input #0 replay-identity] position 1: item mismatch: expected"),
+    "the conclusive difference is at position 1 and the search must reach it, got: {msg}"
+  );
+  assert!(
+    !msg.contains("non-reflexive-payload"),
+    "position 1 is settled by a span, so there is nothing to refuse, got: {msg}"
+  );
+}
+
+#[test]
+fn a_reflexive_state_corruption_outranks_a_non_reflexive_token() {
+  // THE SECOND FINDING, at the shared function it lives in. Same span, a `NaN` token on both
+  // sides, and two DIFFERENT `L::State`s that each equal themselves. `triple_compare` returned at
+  // the token and never examined the state, so the guard called the whole thing inconclusive over
+  // a cache the unexamined state convicts on its own.
+  //
+  // Before: `Some((EntryPart::Token, …))`, both sides non-reflexive, hence a refusal.
+  use super::cache::{EntryPart, triple_compare};
+  let span = SimpleSpan::new(0, 1);
+  let nan = FTok(f64::NAN);
+  let Some((part, decided)) =
+    triple_compare::<StateLexer<'_>>((&span, &nan, &Emitted(7)), (&span, &nan, &Emitted(9)))
+  else {
+    panic!("the state differs, so the triple differs")
+  };
+  assert_eq!(
+    part,
+    EntryPart::State,
+    "the state is what the kit established and what it must report"
+  );
+  assert!(
+    decided.expected().is_none() && decided.got().is_none(),
+    "both states equal themselves, so there is nothing to refuse"
+  );
+}
+
+#[test]
+fn a_span_still_outranks_a_state_when_the_span_comparison_is_sound() {
+  // The control for "span first, always". Ranking may only move an answer PAST a step the kit
+  // could not draw a verdict from; a sound span still speaks before everything behind it.
+  use super::cache::{EntryPart, triple_compare};
+  let token = FTok(1.0);
+  let Some((part, _)) = triple_compare::<StateLexer<'_>>(
+    (&SimpleSpan::new(0, 1), &token, &Emitted(7)),
+    (&SimpleSpan::new(0, 2), &token, &Emitted(9)),
+  ) else {
+    panic!("the span and the state both differ")
+  };
+  assert_eq!(part, EntryPart::Span, "span first, always");
+}
+
+#[test]
+fn a_purity_run_length_outranks_a_non_reflexive_entry_at_a_shared_position() {
+  // The same ordering, one level up, on the comparison the cache's purity laws read. A `NaN` at
+  // position 0 and a second run one entry longer: the length is the kit's own `len()`, so no
+  // caller equality stands behind it.
+  //
+  // Before: `At(0, …)` over the payload, and a refusal.
+  use super::{Divergence, cache::runs_decided};
+  let nan = || (SimpleSpan::new(0, 1), FTok(f64::NAN), ());
+  let first = [nan()];
+  let second = [nan(), (SimpleSpan::new(1, 2), FTok(1.0), ())];
+  assert!(
+    matches!(
+      runs_decided::<NanPayloadLexer<'_>>(&first, &second),
+      Some(Divergence::Count)
+    ),
+    "a count outranks a payload that will not equal itself"
   );
 }

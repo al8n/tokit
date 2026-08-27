@@ -1432,27 +1432,15 @@ where
     <L::Token as Token<'inp>>::Error: PartialEq,
   {
     match (self, other) {
-      (Self::Token(a, sa), Self::Token(b, sb)) => {
-        let (ka, kb) = (a.kind(), b.kind());
-        if ka != kb {
-          return Comparison::Differs(decided_by(Decided::KIND, &ka, &kb));
-        }
-        if sa != sb {
-          return Comparison::Differs(decided_by(Decided::SPAN, sa, sb));
-        }
-        if a != b {
-          return Comparison::Differs(decided_by(Decided::TOKEN_PAYLOAD, a, b));
-        }
-        Comparison::Equal
-      }
+      (Self::Token(a, sa), Self::Token(b, sb)) => Comparison::ranked(&[
+        &|| compare_by(Decided::KIND, &a.kind(), &b.kind()),
+        &|| compare_by(Decided::SPAN, sa, sb),
+        &|| compare_by(Decided::TOKEN_PAYLOAD, a, b),
+      ]),
       (Self::LexerError(sa, a), Self::LexerError(sb, b)) => {
-        if sa != sb {
-          return Comparison::Differs(decided_by(Decided::SPAN, sa, sb));
-        }
-        if a != b {
-          return Comparison::Differs(decided_by(Decided::ERROR_PAYLOAD, a, b));
-        }
-        Comparison::Equal
+        Comparison::ranked(&[&|| compare_by(Decided::SPAN, sa, sb), &|| {
+          compare_by(Decided::ERROR_PAYLOAD, a, b)
+        }])
       }
       // A committed token against a lexer error. This tier exists to catch exactly that, and no
       // caller equality was consulted to find it — see [`Decided::Discriminant`].
@@ -1784,9 +1772,11 @@ fn assert_partial_stream_eq<'inp, L>(
   L::Token: PartialEq,
   <L::Token as Token<'inp>>::Error: PartialEq,
 {
-  let n = expected.len().min(got.len());
-  for i in 0..n {
-    if let Comparison::Differs(decided) = expected[i].compare(&got[i]) {
+  match diverge(expected, got, expected.len() != got.len(), |a, b| {
+    a.compare(b)
+  }) {
+    None => {}
+    Some(Divergence::At(i, decided)) => {
       // The final leg compares the complete stream against a final drain of the SAME source, so
       // this is the site #295 arrived through. See `refuse_non_reflexive`: reached only after the
       // comparison has already failed, so it re-labels a failure and never creates one — and it
@@ -1807,13 +1797,11 @@ fn assert_partial_stream_eq<'inp, L>(
         got[i].describe()
       );
     }
-  }
-  if expected.len() != got.len() {
-    panic!(
+    Some(Divergence::Count) => panic!(
       "tokora conformance [input #{idx} partial-equivalence] split k={k}: prefix item count diverges from the complete prefix: expected {}, got {}",
       expected.len(),
       got.len()
-    );
+    ),
   }
 }
 
@@ -1832,9 +1820,13 @@ fn assert_partial_prefix_of<'inp, L>(
   L::Token: PartialEq,
   <L::Token as Token<'inp>>::Error: PartialEq,
 {
-  let n = expected.len().min(got.len());
-  for i in 0..n {
-    if let Comparison::Differs(decided) = expected[i].compare(&got[i]) {
+  // `got` longer than `expected` is this leg's cardinality difference and nothing else:
+  // withholding MORE is sound here, so a short `got` is not a divergence to rank at all.
+  match diverge(expected, got, got.len() > expected.len(), |a, b| {
+    a.compare(b)
+  }) {
+    None => {}
+    Some(Divergence::At(i, decided)) => {
       // The sibling guard to `assert_partial_stream_eq`'s. A guard at one comparison and not the
       // other is the same defect relocated: this leg compares two different drains, so a payload
       // that will not equal itself fails here too, and reads as a truncation defect.
@@ -1857,13 +1849,11 @@ fn assert_partial_prefix_of<'inp, L>(
         got[i].describe()
       );
     }
-  }
-  if got.len() > expected.len() {
-    panic!(
+    Some(Divergence::Count) => panic!(
       "tokora conformance [input #{idx} partial-equivalence] split k={k}: a non-final prefix drain yielded {} items but the complete parse has only {} ending strictly before the cut. The extra one was decided from bytes that had not arrived; report a read frontier that reaches the buffer end (Lexer::read_frontier) so it is withheld.",
       got.len(),
       expected.len()
-    );
+    ),
   }
 }
 
@@ -1908,6 +1898,173 @@ enum Comparison {
   Equal,
   /// The two sides differ, and [`Decided`] names the operation the verdict rests on.
   Differs(Decided),
+}
+
+impl Comparison {
+  /// [`Ranking`] over a fixed list of comparisons, in the caller's declared order: the first
+  /// **conclusive** difference, or — when none of them is conclusive — the first inconclusive
+  /// one, or [`Equal`](Self::Equal).
+  ///
+  /// A thin adapter and deliberately so: the rule lives in [`Ranking`] and this only spells it
+  /// for the sites that need no tag on the step that answered. Each step is a closure because
+  /// **the search short-circuits**: the moment one of them is conclusive the rest are never run,
+  /// so a comparison that agrees, and one that fails the ordinary way, pay exactly what they paid
+  /// before.
+  fn ranked(steps: &[&dyn Fn() -> Self]) -> Self {
+    let mut ranking = Ranking::new();
+    for step in steps {
+      if let Some(((), decided)) = ranking.settle((), step()) {
+        return Self::Differs(decided);
+      }
+    }
+    ranking
+      .refusal()
+      .map_or(Self::Equal, |((), decided)| Self::Differs(decided))
+  }
+}
+
+/// One component's equality, asked as a [`Comparison`] so that the answer carries the operation
+/// that produced it.
+///
+/// **Every equality this kit draws a verdict from is built here.** That is what makes the guarded
+/// population a matter of construction rather than of a count in a comment: a comparison that
+/// does not come through this cannot produce a [`Decided`], and so cannot reach either the
+/// verdict or the refusal. Reflexivity is probed only on the failure path — see [`decided_by`].
+fn compare_by<T>(name: &'static str, expected: &T, got: &T) -> Comparison
+where
+  T: PartialEq + ?Sized,
+{
+  if expected == got {
+    Comparison::Equal
+  } else {
+    Comparison::Differs(decided_by(name, expected, got))
+  }
+}
+
+/// The ranked search for the difference a verdict is drawn from: **a conclusive difference
+/// outranks an inconclusive one, wherever both are available.**
+///
+/// # The other half of the rule
+///
+/// [`refuse_non_reflexive`] is the half that says the kit never reports a diagnosis it did not
+/// establish. This is the half that says it never withholds one it did. Without it the first
+/// difference a comparison happens to reach decides everything, and an inconclusive one reached
+/// first buries every conclusive one behind it:
+///
+/// - `[Tok(NaN)]` against `[Tok(NaN), Tok(0.0)]` refused at position 0 over the payload and never
+///   reached the length check — while the **extra item** proves replay divergence with no caller
+///   equality consulted at all.
+/// - A cache that returns the right span and the right token beside a corrupted, perfectly
+///   reflexive `L::State` refused over the token, because `NaN != NaN` came first in
+///   `triple_compare`'s order — while the unexamined state difference convicts the cache on its
+///   own.
+///
+/// So the first inconclusive difference is *retained as a fallback* and the search goes on. It is
+/// reported only if nothing conclusive is found anywhere: in the remaining components of the same
+/// item, at a later position of the same stream, or in the item **count**.
+///
+/// # What counts as conclusive
+///
+/// [`Decided::is_conclusive`] is the test, and it is a question about the two values the
+/// comparison actually ran on rather than about the bound the component carries:
+///
+/// - a difference at the **discriminant** — no caller equality ran at all;
+/// - a difference in item **count** — likewise, which is why it carries no [`Decided`] and is
+///   conclusive by construction (see [`Divergence::Count`]);
+/// - a component whose comparison **is** sound on both sides: each value equals itself. That
+///   covers every component bounded to a total equality whose promise holds, and it covers the
+///   ordinary `PartialEq` case — two self-equal payloads that disagree with each other. The
+///   ordinary case is the whole population of honest failures and is **not** demoted by any of
+///   this.
+///
+/// Inconclusive is the complement and nothing else: a comparison one of whose two values will not
+/// equal itself.
+///
+/// # Ordering still chooses among conclusive answers
+///
+/// Each site declares the order its components are consulted in, and that order still picks which
+/// *conclusive* difference speaks — `triple_compare`'s "span first, always" is unchanged for
+/// every entry whose span comparison is sound. Ranking only ever moves an answer past a step the
+/// kit could not have drawn a verdict from.
+struct Ranking<T> {
+  /// The first inconclusive difference seen, and what the caller calls the step that produced
+  /// it. Never overwritten: "first" is in the site's own declared order.
+  inconclusive: Option<(T, Decided)>,
+}
+
+impl<T> Ranking<T> {
+  /// A search with nothing found yet.
+  const fn new() -> Self {
+    Self { inconclusive: None }
+  }
+
+  /// Feeds the next comparison, tagged with whatever the caller needs back to render its own
+  /// message — which component of an entry, which position in a stream, or `()` where the
+  /// [`Decided`] already says everything.
+  ///
+  /// `Some` ends the search: this step is conclusive and outranks anything held. `None` means
+  /// keep going, either because the step agreed or because it is now the fallback.
+  fn settle(&mut self, tag: T, comparison: Comparison) -> Option<(T, Decided)> {
+    let Comparison::Differs(decided) = comparison else {
+      return None;
+    };
+    if decided.is_conclusive() {
+      return Some((tag, decided));
+    }
+    if self.inconclusive.is_none() {
+      self.inconclusive = Some((tag, decided));
+    }
+    None
+  }
+
+  /// The answer once every step has run without one of them being conclusive: the retained
+  /// fallback, which is what the refusal is drawn from, or `None` when the two sides agreed.
+  fn refusal(self) -> Option<(T, Decided)> {
+    self.inconclusive
+  }
+}
+
+/// The difference between two item streams a verdict is drawn from — [`Ranking`]'s answer with
+/// the one step a [`Comparison`] cannot express folded in.
+enum Divergence {
+  /// A position differs, and [`Decided`] names the operation that decided it.
+  At(usize, Decided),
+  /// Every shared position agreed, or every difference among them was inconclusive: the two
+  /// streams differ in item **count**.
+  ///
+  /// **Conclusive by construction.** A count is the kit's own `len()`, so no caller equality
+  /// stands behind it and there is nothing here that could fail to equal itself — which is
+  /// exactly why it outranks a retained fallback instead of queueing behind one.
+  Count,
+}
+
+/// [`Ranking`] over two item streams: the first **conclusive** difference among the shared
+/// positions, else a cardinality difference if there is one, else the first inconclusive
+/// position, else `None`.
+///
+/// The four stream comparisons in this module and [`cache`]'s purity comparison all read their
+/// answer from here, so the ordering between a position and a count cannot come to hold at one of
+/// them and not at another — the shape rounds 2 through 4 each hit by repairing a site.
+///
+/// `counts_differ` is the caller's, because the two legs do not agree on what a count difference
+/// *is*: inequality for a stream compared against a stream, and `got` longer than `expected` for
+/// the prefix leg, where withholding more is sound (see [`assert_partial_prefix_of`]).
+fn diverge<T, F>(expected: &[T], got: &[T], counts_differ: bool, compare: F) -> Option<Divergence>
+where
+  F: Fn(&T, &T) -> Comparison,
+{
+  let mut ranking = Ranking::new();
+  for i in 0..expected.len().min(got.len()) {
+    if let Some((i, decided)) = ranking.settle(i, compare(&expected[i], &got[i])) {
+      return Some(Divergence::At(i, decided));
+    }
+  }
+  if counts_differ {
+    return Some(Divergence::Count);
+  }
+  ranking
+    .refusal()
+    .map(|(i, decided)| Divergence::At(i, decided))
 }
 
 /// The operation a failed comparison was decided by, carrying the reflexivity question asked of
@@ -1955,6 +2112,29 @@ impl Decided {
   /// ``"the `L::State`"`` — the caller's [`PartialEq`] on [`Lexer::State`], which only the cache
   /// tier compares.
   const STATE: &'static str = "the `L::State`";
+  /// `"the span offset"` — [`Lexer::Offset`] is bounded `Ord`, another total promise. The
+  /// endpoint comparisons the tiling and combined-span laws are drawn from name this rather than
+  /// [`SPAN`](Self::SPAN), because a start or an end is what those laws compare and a reader
+  /// looking for the value in the message needs the same noun.
+  const OFFSET: &'static str = "the span offset";
+  /// `"the read frontier"` — [`ReadFrontier`] derives its equality from [`Lexer::Offset`]'s, so
+  /// this is the total promise again, one type further out.
+  const FRONTIER: &'static str = "the read frontier";
+  /// `"the span vector"` — a whole run of spans compared as **one** value, which is what the
+  /// cache kit's order laws do. A slice's equality is elementwise, so one lying [`Lexer::Span`]
+  /// anywhere in the run makes the run unequal to itself and the refusal names the run.
+  const SPANS: &'static str = "the span vector";
+
+  /// Whether the difference this describes is **conclusive**: the kit can convict on it, because
+  /// no equality it cannot trust decided it.
+  ///
+  /// This is [`Ranking`]'s test, written here so it is one statement rather than an inference
+  /// from two `Option`s at each site. `true` exactly when the refusal has nothing to say — at the
+  /// discriminant, where no caller comparison ran, and at a component both of whose values equal
+  /// themselves, which is the ordinary case and the one that must never be demoted.
+  const fn is_conclusive(&self) -> bool {
+    self.expected().is_none() && self.got().is_none()
+  }
 
   /// The component to refuse over on the **expected** side, and `None` when the operation that
   /// failed is sound there — or when no caller comparison ran at all.
@@ -2145,31 +2325,17 @@ where
     <L::Token as Token<'inp>>::Error: PartialEq,
   {
     match (&self.item, &other.item) {
-      (Ok(a), Ok(b)) => {
-        // The kind is compared as well as the token, for [`StreamItem::compare`]'s reason: the
-        // two are independent caller code, and a `PartialEq` coarser than the classification the
-        // parser sees is exactly what this comparison stands between.
-        let (ka, kb) = (a.kind(), b.kind());
-        if ka != kb {
-          return Comparison::Differs(decided_by(Decided::KIND, &ka, &kb));
-        }
-        if let Comparison::Differs(decided) = self.compare_shared(other) {
-          return Comparison::Differs(decided);
-        }
-        if a != b {
-          return Comparison::Differs(decided_by(Decided::TOKEN_PAYLOAD, a, b));
-        }
-        Comparison::Equal
-      }
-      (Err(a), Err(b)) => {
-        if let Comparison::Differs(decided) = self.compare_shared(other) {
-          return Comparison::Differs(decided);
-        }
-        if a != b {
-          return Comparison::Differs(decided_by(Decided::ERROR_PAYLOAD, a, b));
-        }
-        Comparison::Equal
-      }
+      // The kind is compared as well as the token, for [`StreamItem::compare`]'s reason: the two
+      // are independent caller code, and a `PartialEq` coarser than the classification the parser
+      // sees is exactly what this comparison stands between.
+      (Ok(a), Ok(b)) => Comparison::ranked(&[
+        &|| compare_by(Decided::KIND, &a.kind(), &b.kind()),
+        &|| self.compare_shared(other),
+        &|| compare_by(Decided::TOKEN_PAYLOAD, a, b),
+      ]),
+      (Err(a), Err(b)) => Comparison::ranked(&[&|| self.compare_shared(other), &|| {
+        compare_by(Decided::ERROR_PAYLOAD, a, b)
+      }]),
       // A token on one side and a lexer error on the other — see [`Decided::Discriminant`].
       _ => Comparison::Differs(Decided::Discriminant),
     }
@@ -2182,13 +2348,10 @@ where
   /// they are asked before either payload: a divergence one of them can settle is never
   /// attributed to a `PartialEq` that promises no reflexivity.
   fn compare_shared(&self, other: &Self) -> Comparison {
-    if self.span != other.span {
-      return Comparison::Differs(decided_by(Decided::SPAN, &self.span, &other.span));
-    }
-    if self.slice != other.slice {
-      return Comparison::Differs(decided_by(Decided::SLICE, &self.slice, &other.slice));
-    }
-    Comparison::Equal
+    Comparison::ranked(&[
+      &|| compare_by(Decided::SPAN, &self.span, &other.span),
+      &|| compare_by(Decided::SLICE, &self.slice, &other.slice),
+    ])
   }
 
   /// A human-readable one-line rendering for panic context.
@@ -2261,9 +2424,23 @@ where
       );
     }
     // 5. slice() equals the source content at span().
+    //
+    // Through `compare_by` for the reason every other verdict-drawing equality here is: the
+    // `Slice` bound is `Eq`, but `Eq` is a marker and nothing checks its promise, so a caller
+    // whose slice comparison answers `false` to everything — itself included — got a red naming
+    // their lexer for a fact about their own `PartialEq`. Same population, same refusal.
     match src.slice(start.clone()..end.clone()) {
       Some(from_source) => {
-        if from_source != slice {
+        if let Comparison::Differs(decided) = compare_by(Decided::SLICE, &from_source, &slice) {
+          let at = format!("position {pos}");
+          refuse_decided(
+            idx,
+            "span/slice-coherence",
+            &at,
+            &decided,
+            &format!("{from_source:?}"),
+            &format!("{slice:?}"),
+          );
           panic!(
             "tokora conformance [input #{idx} span/slice-coherence] position {pos}: slice() disagrees with the source at span {span:?}: source {from_source:?}, slice() {slice:?}"
           );
@@ -2280,16 +2457,34 @@ where
     let frontier = lexer.read_frontier();
     for probe in 0..3 {
       let again = lexer.read_frontier();
-      if again != frontier {
+      if let Comparison::Differs(decided) = compare_by(Decided::FRONTIER, &frontier, &again) {
+        let at = format!("position {pos}");
+        refuse_decided(
+          idx,
+          "read-frontier",
+          &at,
+          &decided,
+          &format!("{frontier:?}"),
+          &format!("{again:?}"),
+        );
         panic!(
           "tokora conformance [input #{idx} read-frontier] position {pos}: read_frontier() changed between calls: first read {frontier:?}, probe #{probe} read {again:?}. It must be a pure read of recorded fact — the input layer's contract lets it be called at most once per item, but nothing may depend on that."
         );
       }
     }
-    if lexer.span() != span {
+    let after = lexer.span();
+    if let Comparison::Differs(decided) = compare_by(Decided::SPAN, &span, &after) {
+      let at = format!("position {pos}");
+      refuse_decided(
+        idx,
+        "read-frontier",
+        &at,
+        &decided,
+        &format!("{span:?}"),
+        &format!("{after:?}"),
+      );
       panic!(
-        "tokora conformance [input #{idx} read-frontier] position {pos}: read_frontier() moved the lexer: span() was {span:?} before the call and {:?} after. It must not advance the lexer or probe new input.",
-        lexer.span()
+        "tokora conformance [input #{idx} read-frontier] position {pos}: read_frontier() moved the lexer: span() was {span:?} before the call and {after:?} after. It must not advance the lexer or probe new input."
       );
     }
 
@@ -2312,12 +2507,19 @@ where
   L::Token: PartialEq,
   <L::Token as Token<'inp>>::Error: PartialEq,
 {
-  let n = expected.len().min(got.len());
-  for i in 0..n {
-    if let Comparison::Differs(decided) = expected[i].compare(&got[i]) {
+  // The item comparisons and the length check are ONE ranked search, and the order they used to
+  // run in was the defect: a `[Tok(NaN)]` against a `[Tok(NaN), Tok(0.0)]` refused at position 0
+  // and never reached the length check, while the extra item proves replay divergence with no
+  // caller equality consulted at all. See `diverge` and `Ranking`.
+  match diverge(expected, got, expected.len() != got.len(), |a, b| {
+    a.compare(b)
+  }) {
+    None => {}
+    Some(Divergence::At(i, decided)) => {
       // Before naming a culprit, ask whether the comparison that decided this is even comparable
-      // to itself. See `refuse_non_reflexive`: reached only once the comparison has failed, so it
-      // can re-label this failure and can never manufacture one.
+      // to itself. See `refuse_non_reflexive`: reached only once the comparison has failed, and
+      // only once the search has established that nothing conclusive outranks it, so it can
+      // re-label this failure and can never manufacture one.
       let at = format!("position {i}");
       refuse_decided(
         idx,
@@ -2333,13 +2535,11 @@ where
         got[i].describe()
       );
     }
-  }
-  if expected.len() != got.len() {
-    panic!(
+    Some(Divergence::Count) => panic!(
       "tokora conformance [input #{idx} {op}] length mismatch: expected {} items, got {}",
       expected.len(),
       got.len()
-    );
+    ),
   }
 }
 
@@ -2414,7 +2614,15 @@ where
   }
   for probe in 0..3 {
     let again = lexer.span();
-    if again != span {
+    if let Comparison::Differs(decided) = compare_by(Decided::SPAN, &span, &again) {
+      refuse_decided(
+        idx,
+        "span-survives-exhaustion",
+        "after exhaustion",
+        &decided,
+        &format!("{span:?}"),
+        &format!("{again:?}"),
+      );
       panic!(
         "tokora conformance [input #{idx} span-survives-exhaustion] span() changed after exhaustion: first read {span:?}, probe #{probe} read {again:?}. Repeated reads must agree — the input layer reads it more than once."
       );
@@ -2446,9 +2654,16 @@ fn check_resume<'inp, L>(
     let mut resumed = L::with_state(src, state);
     resumed.bump(&offset);
 
-    let mut produced = 0usize;
+    // Collected and then ranked, rather than compared item-by-item as it is produced. The
+    // streaming shape settled the verdict at the first position that differed, which is the same
+    // ordering defect `assert_run_eq` carried: an inconclusive difference at position 0 buried a
+    // decisive item-count difference the suffix comparison had already established. The cost is
+    // paid only on a failure path — a run that would have stopped early now lexes on to
+    // exhaustion, under the SAME budget the passing path is already bounded by, and holds the
+    // suffix it produced for the length of one `k`.
+    let mut observed: Vec<Item<'inp, L>> = Vec::new();
     loop {
-      if produced > budget {
+      if observed.len() > budget {
         panic!(
           "tokora conformance [input #{idx} state-resume] resume-from k={k}: produced more than the budget of {budget} items without exhausting"
         );
@@ -2457,49 +2672,50 @@ fn check_resume<'inp, L>(
       let span = resumed.span();
       let slice = resumed.slice();
       let end = span.end_ref().clone();
-      let observed = Item::<L> {
+      observed.push(Item::<L> {
         item: res,
         span,
         slice,
         end,
         state: resumed.state().clone(),
-      };
-
-      match reference.get(k + produced) {
-        Some(expected) => {
-          if let Comparison::Differs(decided) = expected.compare(&observed) {
-            // The same guard `assert_run_eq` carries, for the same reason and under the same
-            // "only after a failed comparison, and only about the comparison that failed" rule.
-            // See `refuse_non_reflexive`.
-            let at = format!("resume-from k={k}, position {produced}");
-            refuse_decided(
-              idx,
-              "state-resume",
-              &at,
-              &decided,
-              &expected.describe(),
-              &observed.describe(),
-            );
-            panic!(
-              "tokora conformance [input #{idx} state-resume] resume-from k={k}, position {produced}: resumed item diverges from the original suffix: expected {}, got {}",
-              expected.describe(),
-              observed.describe()
-            );
-          }
-        }
-        None => panic!(
-          "tokora conformance [input #{idx} state-resume] resume-from k={k}, position {produced}: resume produced MORE items than the original suffix ({} remaining)",
-          reference.len() - k
-        ),
-      }
-      produced += 1;
+      });
     }
 
-    if k + produced != reference.len() {
-      panic!(
+    let suffix = &reference[k..];
+    let produced = observed.len();
+    match diverge(suffix, &observed, produced != suffix.len(), |a, b| {
+      a.compare(b)
+    }) {
+      None => {}
+      Some(Divergence::At(i, decided)) => {
+        // The same guard `assert_run_eq` carries, for the same reason and under the same "only
+        // after a failed comparison, and only about the comparison that failed" rule. See
+        // `refuse_non_reflexive`.
+        let at = format!("resume-from k={k}, position {i}");
+        refuse_decided(
+          idx,
+          "state-resume",
+          &at,
+          &decided,
+          &suffix[i].describe(),
+          &observed[i].describe(),
+        );
+        panic!(
+          "tokora conformance [input #{idx} state-resume] resume-from k={k}, position {i}: resumed item diverges from the original suffix: expected {}, got {}",
+          suffix[i].describe(),
+          observed[i].describe()
+        );
+      }
+      // One cardinality difference, reported from the side it fell on so both wordings survive.
+      Some(Divergence::Count) if produced > suffix.len() => panic!(
+        "tokora conformance [input #{idx} state-resume] resume-from k={k}, position {}: resume produced MORE items than the original suffix ({} remaining)",
+        suffix.len(),
+        suffix.len()
+      ),
+      Some(Divergence::Count) => panic!(
         "tokora conformance [input #{idx} state-resume] resume-from k={k}: resume produced FEWER items than the original suffix: expected {}, got {produced}",
-        reference.len() - k
-      );
+        suffix.len()
+      ),
     }
   }
 }
@@ -2513,10 +2729,22 @@ where
   let src_len = src.len();
   let zero = L::Offset::default();
 
+  // Every comparison below is an `L::Offset` equality, and `Lexer::Offset` is bounded `Ord` — a
+  // TOTAL promise, and one nothing checks. So they are drawn through `compare_by` exactly as the
+  // item comparisons are: an offset that will not equal itself is a fact about the caller's `Ord`
+  // impl, and reporting it as a tiling defect names the wrong culprit.
   let Some(first) = reference.first() else {
     // An empty stream is gap-free tiling of an empty source; a non-empty source with
     // no tokens leaves the whole thing untiled.
-    if src_len != zero {
+    if let Comparison::Differs(decided) = compare_by(Decided::OFFSET, &zero, &src_len) {
+      refuse_decided(
+        idx,
+        "lossless",
+        "source length",
+        &decided,
+        &format!("{zero:?}"),
+        &format!("{src_len:?}"),
+      );
       panic!(
         "tokora conformance [input #{idx} lossless] the lexer produced no items but the source is non-empty (length {src_len:?}); lossless tiling requires covering the whole source"
       );
@@ -2524,7 +2752,16 @@ where
     return;
   };
 
-  if *first.span.start_ref() != zero {
+  let first_start = first.span.start_ref();
+  if let Comparison::Differs(decided) = compare_by(Decided::OFFSET, &zero, first_start) {
+    refuse_decided(
+      idx,
+      "lossless",
+      "position 0",
+      &decided,
+      &format!("{zero:?}"),
+      &format!("{first_start:?}"),
+    );
     panic!(
       "tokora conformance [input #{idx} lossless] position 0: first span {:?} does not start at 0",
       first.span
@@ -2534,7 +2771,16 @@ where
   let mut prev_end = first.span.end_ref().clone();
   for (i, item) in reference.iter().enumerate().skip(1) {
     let start = item.span.start_ref().clone();
-    if start != prev_end {
+    if let Comparison::Differs(decided) = compare_by(Decided::OFFSET, &prev_end, &start) {
+      let at = format!("position {i}");
+      refuse_decided(
+        idx,
+        "lossless",
+        &at,
+        &decided,
+        &format!("{prev_end:?}"),
+        &format!("{start:?}"),
+      );
       panic!(
         "tokora conformance [input #{idx} lossless] position {i}: gap or overlap — previous span ended at {prev_end:?} but this span {:?} starts at {start:?}",
         item.span
@@ -2543,7 +2789,15 @@ where
     prev_end = item.span.end_ref().clone();
   }
 
-  if prev_end != src_len {
+  if let Comparison::Differs(decided) = compare_by(Decided::OFFSET, &src_len, &prev_end) {
+    refuse_decided(
+      idx,
+      "lossless",
+      "source end",
+      &decided,
+      &format!("{src_len:?}"),
+      &format!("{prev_end:?}"),
+    );
     panic!(
       "tokora conformance [input #{idx} lossless] the last span ends at {prev_end:?} but the source ends at {src_len:?}; lossless tiling must reach the source end"
     );
@@ -2898,15 +3152,16 @@ fn assert_stream_eq<'inp, L>(
   L::Token: PartialEq,
   <L::Token as Token<'inp>>::Error: PartialEq,
 {
-  let n = expected.len().min(got.len());
-  for i in 0..n {
-    if let Comparison::Differs(decided) = expected[i].compare(&got[i]) {
-      // Two more members of the same population, and with them the population is closed: the two
-      // in the trait tier, the two in the partial tier, these two, and the two in `cache`.
+  match diverge(expected, got, expected.len() != got.len(), |a, b| {
+    a.compare(b)
+  }) {
+    None => {}
+    Some(Divergence::At(i, decided)) => {
       // `Token::Kind` is bounded `Eq`, `Lexer::Span` is bounded `Ord` and the two payloads are
       // bounded only `PartialEq`, so a refusal here is drawn from whichever of those decided it —
-      // exactly as it is at the other six. Guarding some and not the rest is the defect
-      // relocated, and this one costs a call on a path already panicking.
+      // exactly as it is at every other comparison this kit draws a verdict from. Guarding some
+      // and not the rest is the defect relocated, and this one costs a call on a path already
+      // panicking.
       let op = format!("integration/{sched}");
       let at = format!("{} {i}", arm.at);
       refuse_decided(
@@ -2925,14 +3180,12 @@ fn assert_stream_eq<'inp, L>(
         got[i].describe()
       );
     }
-  }
-  if expected.len() != got.len() {
-    panic!(
+    Some(Divergence::Count) => panic!(
       "tokora conformance [input #{idx} integration/{sched}] {} stream length differs: straight-lex has {}, schedule has {}",
       arm.noun,
       expected.len(),
       got.len()
-    );
+    ),
   }
 }
 
