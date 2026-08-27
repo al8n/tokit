@@ -5395,14 +5395,7 @@ fn witness_one_a_guarded_arm_that_fails_on_a_stale_reader() {
   let reference = super::lex_run::<LosesTheFact<'_>>(0, src, budget);
   let chunks = OwnedChunks::over([src]);
   let buffers = refill_table::<LosesTheFact<'_>>(src, &chunks);
-  super::refill_schedule::<LosesTheFact<'_>>(
-    0,
-    src,
-    &reference,
-    &buffers,
-    &[4, src.len()],
-    budget,
-  );
+  super::refill_schedule::<LosesTheFact<'_>>(0, src, &reference, &buffers, &[4, src.len()], budget);
 }
 
 #[test]
@@ -5416,14 +5409,7 @@ fn witness_two_an_ident_lexed_out_of_comment_text() {
   let reference = super::lex_run::<LosesTheFact<'_>>(0, src, budget);
   let chunks = OwnedChunks::over([src]);
   let buffers = refill_table::<LosesTheFact<'_>>(src, &chunks);
-  super::refill_schedule::<LosesTheFact<'_>>(
-    0,
-    src,
-    &reference,
-    &buffers,
-    &[4, src.len()],
-    budget,
-  );
+  super::refill_schedule::<LosesTheFact<'_>>(0, src, &reference, &buffers, &[4, src.len()], budget);
 }
 
 #[test]
@@ -5611,8 +5597,8 @@ fn owned_chunks_red_a_lexer_that_keys_on_the_buffer_address() {
 
 #[test]
 fn owned_chunks_relocate_every_cut_they_exercise() {
-  let coverage = Harness::<KeepsTheFact<'_>>::over(REFILL_CORPUS)
-    .run_refill(&OwnedChunks::over(REFILL_CORPUS));
+  let coverage =
+    Harness::<KeepsTheFact<'_>>::over(REFILL_CORPUS).run_refill(&OwnedChunks::over(REFILL_CORPUS));
   // The corpus is ASCII, so every position below each source's length is a cut, and the driver
   // narrows none of them: 8 + 5 + 4 + 1 + 8 + 0 + 2.
   assert_eq!(coverage.inputs(), 7);
@@ -5730,7 +5716,7 @@ impl<'a> Lexer<'a> for Utf8ByteLexer<'a> {
   fn state_mut(&mut self) -> &mut () {
     &mut self.state
   }
-  fn into_state(self) -> () {
+  fn into_state(self) {
     self.state
   }
   fn source(&self) -> &'a [u8] {
@@ -6016,7 +6002,8 @@ fn a_source_with_no_interior_cut_is_not_refused() {
   // The floor is "the driver narrowed everything away", not "the source is short". A one-unit
   // source offers exactly one cut, `k = 0`, and a driver that takes it has certified the only
   // change of buffer there is.
-  let coverage = Harness::<TileLexer<'_>>::over(["a", ""]).run_refill(&OwnedChunks::over(["a", ""]));
+  let coverage =
+    Harness::<TileLexer<'_>>::over(["a", ""]).run_refill(&OwnedChunks::over(["a", ""]));
   assert_eq!(coverage.exercised_at(0), Some(1));
   assert_eq!(coverage.admissible_at(1), Some(0));
 }

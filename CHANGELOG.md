@@ -993,16 +993,49 @@ and will red until they do.
   that cannot reach the defect; the tier goes where the bounds already are, beside `run_partial`,
   and asks for exactly its bounds minus the redundant `Kind` ones.
 
-  **What it drives.** For every cut of every input — every source-unit boundary, so a cut inside a
-  token, at a token boundary, inside trivia, at end of input and at zero are covered by
-  construction rather than by a list — it runs four schedule shapes: one refill delivering the
-  whole tail, a refill that **adds nothing**, a minimal one-unit refill and then the rest, and the
-  tail one unit at a time from the empty buffer up. A leg commits only what a partial `Input`
+  **What it drives.** For every cut of every input — every position the source can be sliced at and
+  the driver can end a chunk at, so a cut inside a token, at a token boundary, inside trivia, at
+  end of input and at zero are covered by construction rather than by a list — it runs four
+  schedule shapes: one refill delivering the whole tail, a refill that **adds nothing**, a minimal
+  one-cut refill and then the rest, and the tail one chunk at a time from the first admitted buffer
+  up. A leg commits only what a partial `Input`
   would (an item whose effective read frontier reaches the non-final buffer end is withheld), and
   where nothing is withheld and the lexer runs out of bytes it carries the lexer's own
   post-exhaustion position and the state there — the offset the frontier reports, covering the
   bytes a lexer *skips* without emitting an item. The committed items across the whole schedule
   must equal the complete-input lex, exactly.
+
+  **The buffers are the caller's, and so is the cut rule — as one answer.** `run_refill` takes a
+  required `conformance::RefillDriver`, whose single method returns the buffer that driver holds
+  once `k` units have arrived, or `None` when no chunk of its can end at `k`. Two shipped
+  implementations: `OwnedChunks` copies every admitted prefix into storage of its own, so a leg
+  really does change allocation, and `SameAllocation` hands back `&src[..k]`, which changes the
+  buffer's *length* over one base address. The kit cannot supply either itself — `L::Source` is
+  `?Sized`, so it cannot own one, and a leg's items borrow their slices for the corpus lifetime, so
+  a per-leg allocation could not outlive the leg — which is the same wall the tier exists because
+  of: the caller owns the buffer and grows it.
+
+  Both halves of that answer are load-bearing, and both have cells. **Backing:** a lexer whose
+  `State` carries anything derived from *where* the bytes are — a raw pointer, an interner keyed by
+  address, a cached slice — passes under `SameAllocation` and reds under `OwnedChunks`, same lexer,
+  same corpus, same cuts; without a real change of buffer the tier's own subject sentence was
+  untested. **Cut rule:** `Source::is_boundary` for `[u8]` is every byte index, including one
+  inside a UTF-8 code point, and a byte lexer written for a driver that validates what it appends
+  was convicted on a schedule its driver cannot produce — #295's failure mode at the level of which
+  inputs are legitimate at all. Which is why they are one method: the thing that produces chunks is
+  the thing that knows where a chunk may end, and a buffer for a cut a driver cannot reach is a
+  buffer it would never hold.
+
+  **A cut rule is an exemption, and the kit narrows it as far as it can and no further.** The rule
+  sees only `(src, k)` and never the lexer; it is asked only where `is_boundary` already said yes,
+  so a driver narrows and never widens; it is asked once per cut, so a drifting answer cannot put
+  two buffers into one comparison; a buffer that is not a content-preserving prefix is refused
+  (`refill-buffer`), and a driver that admits no cut below the source length is refused as having
+  certified nothing (`refill-coverage`). Both refusals are worded as the kit declining a verdict
+  rather than as the lexer failing one. What no kit can do is tell a driver's real chunk rule from
+  a convenient one — so `SameAllocation` is a value you write, for `Budget`'s reason, and the run
+  returns a `conformance::RefillCoverage`: cuts exercised, cuts the sources offered, and legs that
+  actually relocated. A narrow rule is then a number rather than a silence.
 
   **The withholding is what keeps it from being stricter than the contract**, and the plant says so
   rather than the sentence: with the holdback removed, every conforming fixture in the tree reds —

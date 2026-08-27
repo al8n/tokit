@@ -70,7 +70,8 @@
 //! [`SCAN_LOOKAHEAD`](crate::Token::SCAN_LOOKAHEAD) claim behind the logos
 //! adapter.
 //!
-//! **Refill tier** (`run_refill`, the same `usize`-offset, prefix-sliceable sources) — carrying a
+//! **Refill tier** (`run_refill`, the same `usize`-offset sources, plus a caller-supplied
+//! [`RefillDriver`](crate::conformance::RefillDriver)) — carrying a
 //! `(state, offset)` pair — the [lexer state](crate::state::State) and the position it was left at
 //! — from the end of one buffer into a **grown** buffer and lexing on there, which is what a
 //! refilling driver does and what neither tier above covers.
@@ -83,8 +84,19 @@
 //! leg is bounded by the same per-loop item budget the trait-tier checks carry, for the same
 //! reason: the counter and the [`lex`](crate::Lexer::lex) call are in one loop body. What lives in
 //! that gap is a lexer that forgets, at end of input, what it was in the middle of — a comment, a
-//! string, a multi-byte prefix — and whose next buffer therefore starts in the wrong mode. See
-//! [`run_refill`](crate::conformance::Harness::run_refill).
+//! string, a multi-byte prefix — and whose next buffer therefore starts in the wrong mode.
+//!
+//! The **cuts** are derived, as everywhere else here; the **buffers** are not, and cannot be. A
+//! `L::Source` is `?Sized`, so the kit cannot own one, and every item a leg produces borrows its
+//! slice for the corpus lifetime, so a buffer the kit allocated per leg could not outlive the leg
+//! that made it. The caller therefore supplies a driver, which answers where one of its chunks may
+//! end and what buffer that chunk lives in as **one** question — because the thing that produces
+//! chunks is the thing that knows where a chunk may end. It is a required argument so that
+//! [`SameAllocation`](crate::conformance::SameAllocation), which drives every leg over one buffer
+//! and therefore tests a change of *length*, is a choice somebody wrote rather than a default they
+//! inherited; and the run hands back a
+//! [`RefillCoverage`](crate::conformance::RefillCoverage) so that a narrow chunk rule is a number
+//! rather than a silence. See [`run_refill`](crate::conformance::Harness::run_refill).
 //!
 //! Both tiers that drive an `Input` are bounded by a single non-rewindable counter per input,
 //! `LexTally`, and not by the item budgets their drain loops also carry. The rule is that **a
@@ -3385,7 +3397,7 @@ where
   let mut exercised = 0usize;
   let mut relocated = 0usize;
 
-  for k in 0..len {
+  for (k, slot) in buffers.iter_mut().enumerate() {
     // A cut that is not a source-unit boundary is not a buffer anybody can hold — `str[..k]` does
     // not exist mid-code-point — so it is not a cut. [`check_partial`] skips the same positions.
     if !src.is_boundary(k) {
@@ -3401,7 +3413,7 @@ where
     if !core::ptr::addr_eq(core::ptr::from_ref(buf), core::ptr::from_ref(src)) {
       relocated += 1;
     }
-    buffers[k] = Some(buf);
+    *slot = Some(buf);
     exercised += 1;
   }
 
@@ -3431,12 +3443,8 @@ where
 /// This is the kit declining to draw a verdict, in [`refuse_non_reflexive`]'s posture and for the
 /// same reason: everything downstream would be a comparison against bytes the oracle never lexed,
 /// so reporting the divergence it produces would convict the lexer of the driver's mistake.
-fn assert_supplied_prefix<'inp, L>(
-  idx: usize,
-  src: &'inp L::Source,
-  k: usize,
-  buf: &'inp L::Source,
-) where
+fn assert_supplied_prefix<'inp, L>(idx: usize, src: &'inp L::Source, k: usize, buf: &'inp L::Source)
+where
   L: Lexer<'inp, Offset = usize>,
 {
   let got_len = <L::Source as Source<usize>>::len(buf);
