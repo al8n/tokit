@@ -575,13 +575,26 @@ fn a_long_adjacency_chain_iterates_in_one_frame() {
 
   let out = bounded_wait(
     2 * 1024 * 1024,
-    // The wall is outside the parse because the failure it guards is not an assertion that fires
-    // — it is a process that does not come back. Measured on this fixture: under a millisecond
-    // compiled, a few seconds interpreted. Both allowances are far over their readings, because
-    // what is being distinguished is "fast" from "never".
+    // The wall is outside the parse because the failure it guards is not an assertion that
+    // fires — it is a process that does not come back.
+    //
+    // Both figures are read rather than scaled. Native: the whole 17-cell file runs in 0.03s
+    // under `cargo test -p tokora --all-features --test pratt_adjacent`, this cell being the
+    // only one that is not instantaneous. Interpreted: **25.9s** for this cell alone, under
+    //
+    //     MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-disable-isolation \
+    //       -Zmiri-symbolic-alignment-check -Zmiri-tree-borrows" \
+    //     cargo +nightly miri test --target aarch64-apple-darwin --test pratt_adjacent \
+    //       --features logos a_long_adjacency_chain
+    //
+    // on an M-series host. The interpreted allowance is `pratt_limit.rs`'s, which is ~27x that
+    // reading and leaves room for a CI runner several times slower than the host measured on.
+    // The margins are deliberately enormous on both sides: what this wall distinguishes is
+    // "fast" from "never", not one duration from another, and a tight bound here would fail on
+    // a loaded runner while pinning nothing extra.
     WallClock {
-      native_secs: 30,
-      interpreted_secs: 300,
+      native_secs: 120,
+      interpreted_secs: 700,
     },
     move || juxt(&src),
   )
