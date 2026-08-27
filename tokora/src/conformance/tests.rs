@@ -3624,13 +3624,35 @@ fn two_peeked_runs_that_differ_only_in_length_are_refused_nothing() {
   // The purity comparison. A count is not a comparison of caller values, so a run that is longer
   // than the one before it settles the verdict with no `PartialEq` involved — and a scan of one
   // run still found the `NaN` in it and refused, over a `peek` that genuinely is not pure.
-  use super::cache::runs_decided;
+  //
+  // `Length` is a DECISION and not an absence, which is #324: an answer that said `None` here
+  // said the same thing about two runs that agree, so a caller needing both facts had to ask a
+  // second question and compose the two by hand.
+  use super::cache::{PurityDecided, runs_decided};
   let entry = || (SimpleSpan::new(0, 1), FTok(f64::NAN), ());
   let first = [entry()];
   let second: [(SimpleSpan, FTok, ()); 0] = [];
   assert!(
-    runs_decided::<NanPayloadLexer<'_>>(&first, &second).is_none(),
-    "a length divergence consults no caller equality, so there is nothing to refuse"
+    matches!(
+      runs_decided::<NanPayloadLexer<'_>>(&first, &second),
+      Some(PurityDecided::Length)
+    ),
+    "a length divergence consults no caller equality, so there is nothing to refuse — and it is \
+     still what decided the verdict"
+  );
+}
+
+#[test]
+fn two_equal_peeked_runs_are_the_only_thing_the_purity_comparison_answers_nothing_about() {
+  // The other half of that totality, and the reason `None` can carry a meaning at all now: it
+  // means the two runs are EQUAL, which is the one answer the failure path must never be reached
+  // with. Two `NaN`-carrying runs are not equal — they disagree at position 0 — so the pair here
+  // is reflexive on purpose.
+  use super::cache::runs_decided;
+  let run = [(SimpleSpan::new(0, 1), FTok(1.0), ())];
+  assert!(
+    runs_decided::<NanPayloadLexer<'_>>(&run, &run).is_none(),
+    "two equal runs differ in nothing, so there is nothing to decide"
   );
 }
 
@@ -3639,17 +3661,199 @@ fn a_peeked_run_is_probed_at_the_position_the_two_runs_disagree_at() {
   // And where they do disagree at a position, the question is asked THERE. A scan answered from
   // the first non-reflexive entry anywhere in one run, which need not be — and here is not — the
   // position the two runs actually differ at.
-  use super::cache::runs_decided;
+  use super::cache::{PurityDecided, runs_decided};
   let head = || (SimpleSpan::new(0, 1), FTok(1.0), ());
   let middle = |end: usize| (SimpleSpan::new(1, end), FTok(2.0), ());
   let nan = || (SimpleSpan::new(4, 5), FTok(f64::NAN), ());
   let first = [head(), middle(2), nan()];
   let second = [head(), middle(3), nan()];
-  let (i, decided) =
-    runs_decided::<NanPayloadLexer<'_>>(&first, &second).expect("position 1 differs in its span");
+  let Some(PurityDecided::At(i, decided)) = runs_decided::<NanPayloadLexer<'_>>(&first, &second)
+  else {
+    panic!("position 1 differs in its span, so a position is what decided it")
+  };
   assert_eq!(i, 1, "the divergence is at position 1, not at the NaN in 2");
   assert!(
     decided.expected().is_none() && decided.got().is_none(),
     "a span decided position 1, and a span is reflexive"
+  );
+}
+
+// ── #324: the prefilled purity law composes TWO comparisons, and `||` collapsed them ───
+//
+// The law compares the prefix `peek` was handed and the run it appended behind that prefix. `||`
+// over the two answers a `bool` that does not record which half fired, and the failure path then
+// re-ran both guards — so the half that did NOT decide was probed too, and its probe can fire.
+//
+// These cells call `assert_prefilled_peek_pure` directly, for the reason the two entry-comparison
+// cells above do and one more: the fabricated `NaN` the counterexample needs is a value no cache
+// the kit can drive is able to produce. The kit's own corpus lexer carries a source slice, which
+// is always reflexive, and a `NaN` in the CORPUS is refused at check 2's first entry comparison,
+// long before the prefilled sweep runs. Only a cache that manufactures the value in its own
+// `peek` reaches this — which is exactly the sequence below, with the manufacture done by hand.
+
+/// The harness the cells drive the prefilled purity law through. It never touches the cache, so
+/// the type parameter is only there to name one.
+fn purity_harness<'a>() -> crate::conformance::cache::CacheHarness<
+  'a,
+  NanPayloadLexer<'a>,
+  crate::cache::DefaultCache<'a, NanPayloadLexer<'a>>,
+> {
+  crate::conformance::cache::CacheHarness::new("nn")
+}
+
+/// The message a panic carried, or a failure saying the kit did not panic at all.
+fn panic_message(f: impl FnOnce() + std::panic::UnwindSafe) -> String {
+  let panicked = std::panic::catch_unwind(f).expect_err("the purity law must fail here");
+  panicked
+    .downcast_ref::<String>()
+    .expect("the kit panics with a formatted message")
+    .clone()
+}
+
+#[test]
+fn a_prefilled_impurity_the_prefix_decided_is_not_withheld_over_a_nan_the_appended_run_holds() {
+  // THE COUNTEREXAMPLE. The prefix already proves `peek` impure and its divergence is settled by
+  // the SPAN, which is reflexive — so that half's probe says nothing. The appended pair is not
+  // what decided anything: it differs because the second peek fabricated a `NaN`, and asking it
+  // withheld a verdict the kit had established, over a value no verdict rests on.
+  let prefix_first = [(SimpleSpan::new(0, 1), FTok(1.0), ())];
+  let prefix_second = [(SimpleSpan::new(9, 10), FTok(1.0), ())];
+  let appended_first = [(SimpleSpan::new(4, 5), FTok(2.0), ())];
+  let appended_second = [(SimpleSpan::new(4, 5), FTok(f64::NAN), ())];
+  let msg = panic_message(|| {
+    purity_harness().assert_prefilled_peek_pure(
+      "prefilled",
+      1,
+      "a full cache",
+      (&prefix_first, &prefix_second),
+      (&appended_first, &appended_second),
+    );
+  });
+  assert!(
+    msg.contains("pure-peek/prefilled at depth 1] against a full cache: two prefilled peeks on an unchanged cache disagreed in the prefix the buffer already held"),
+    "the impurity the prefix decided must be reported, got: {msg}"
+  );
+  assert!(
+    !msg.contains("non-reflexive-payload"),
+    "the verdict rests on a span, which is reflexive; the NaN is in the pair that decided nothing, got: {msg}"
+  );
+}
+
+#[test]
+fn a_nan_in_the_appended_pair_that_actually_decided_is_still_refused() {
+  // CONTROL 1, the appended half: the same fabricated `NaN`, with the prefix now reproduced
+  // exactly. Nothing else decided, so the token payload is what the verdict rests on and the
+  // refusal must stand — or the repair has traded a false green for a false red.
+  let prefix = [(SimpleSpan::new(0, 1), FTok(1.0), ())];
+  let appended_first = [(SimpleSpan::new(4, 5), FTok(2.0), ())];
+  let appended_second = [(SimpleSpan::new(4, 5), FTok(f64::NAN), ())];
+  let msg = panic_message(|| {
+    purity_harness().assert_prefilled_peek_pure(
+      "prefilled",
+      1,
+      "a full cache",
+      (&prefix, &prefix),
+      (&appended_first, &appended_second),
+    );
+  });
+  assert!(
+    msg.contains(
+      "non-reflexive-payload] pure-peek/prefilled at depth 1 against a full cache, position 0: INCONCLUSIVE — the token payload of the second appended entry"
+    ),
+    "a NaN that decided the appended comparison must still be refused, and named as the appended side, got: {msg}"
+  );
+}
+
+#[test]
+fn a_nan_in_the_prefix_pair_that_actually_decided_is_still_refused() {
+  // CONTROL 1, the prefix half — the same rule on the other side of the decision, which is what
+  // pins the two halves to their own labels. The spans agree here, so the token payload is what
+  // decided the prefix comparison.
+  let prefix_first = [(SimpleSpan::new(0, 1), FTok(1.0), ())];
+  let prefix_second = [(SimpleSpan::new(0, 1), FTok(f64::NAN), ())];
+  let appended = [(SimpleSpan::new(4, 5), FTok(2.0), ())];
+  let msg = panic_message(|| {
+    purity_harness().assert_prefilled_peek_pure(
+      "prefilled",
+      1,
+      "a full cache",
+      (&prefix_first, &prefix_second),
+      (&appended, &appended),
+    );
+  });
+  assert!(
+    msg.contains(
+      "non-reflexive-payload] pure-peek/prefilled at depth 1 against a full cache, position 0: INCONCLUSIVE — the token payload of the second prefix entry"
+    ),
+    "a NaN that decided the prefix comparison must still be refused, got: {msg}"
+  );
+}
+
+#[test]
+fn a_prefix_impurity_with_reflexive_payloads_throughout_still_reds_the_ordinary_way() {
+  // CONTROL 2: nothing here is non-reflexive, and the cache is genuinely impure on the prefix.
+  // The ordinary `pure-peek` failure is the whole point of the law and must survive the repair.
+  let prefix_first = [(SimpleSpan::new(0, 1), FTok(1.0), ())];
+  let prefix_second = [(SimpleSpan::new(9, 10), FTok(1.0), ())];
+  let appended = [(SimpleSpan::new(4, 5), FTok(2.0), ())];
+  let msg = panic_message(|| {
+    purity_harness().assert_prefilled_peek_pure(
+      "prefilled",
+      1,
+      "a full cache",
+      (&prefix_first, &prefix_second),
+      (&appended, &appended),
+    );
+  });
+  assert!(
+    msg.contains("pure-peek/prefilled at depth 1] against a full cache: two prefilled peeks on an unchanged cache disagreed in the prefix the buffer already held"),
+    "the ordinary impurity failure must keep its tag and its wording, got: {msg}"
+  );
+  assert!(
+    !msg.contains("non-reflexive-payload"),
+    "there is no non-reflexive value anywhere in this pair, got: {msg}"
+  );
+}
+
+#[test]
+fn an_appended_decided_impurity_is_reported_as_appended_and_not_as_the_prefix() {
+  // CONTROL 3, and it pulls against the other two: a repair that always blamed the prefix would
+  // pass the counterexample and control 2 while replacing one misattribution with another. The
+  // prefix is reproduced exactly here and the appended run is not, so the appended half is what
+  // decided — and the failure has to say so.
+  let prefix = [(SimpleSpan::new(0, 1), FTok(1.0), ())];
+  let appended_first = [(SimpleSpan::new(4, 5), FTok(2.0), ())];
+  let appended_second = [(SimpleSpan::new(6, 7), FTok(2.0), ())];
+  let msg = panic_message(|| {
+    purity_harness().assert_prefilled_peek_pure(
+      "prefilled",
+      1,
+      "a full cache",
+      (&prefix, &prefix),
+      (&appended_first, &appended_second),
+    );
+  });
+  assert!(
+    msg.contains("disagreed in the run it appended behind that prefix"),
+    "an appended-decided impurity must be reported as appended, got: {msg}"
+  );
+  assert!(
+    !msg.contains("the prefix the buffer already held"),
+    "the prefix was reproduced exactly and must not be blamed, got: {msg}"
+  );
+}
+
+#[test]
+fn two_prefilled_peeks_that_agree_in_both_halves_are_not_a_failure() {
+  // The positive control, and the one that keeps the law from being a check that cannot pass:
+  // both halves reproduced, `NaN` nowhere, no panic.
+  let prefix = [(SimpleSpan::new(0, 1), FTok(1.0), ())];
+  let appended = [(SimpleSpan::new(4, 5), FTok(2.0), ())];
+  purity_harness().assert_prefilled_peek_pure(
+    "prefilled",
+    1,
+    "a full cache",
+    (&prefix, &prefix),
+    (&appended, &appended),
   );
 }

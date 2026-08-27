@@ -1832,6 +1832,24 @@ and will red until they do.
   in item **count** is now terminal, because none of those is a partial equality that could fail
   against itself.
 
+  **And no site collapses those comparisons into a `bool` before deciding.** That rule was applied
+  inside each comparison and not to the composition above them, and the cache kit's prefilled
+  purity law is composed: it compares the prefix `peek` was handed *and* the run `peek` appended
+  behind that prefix. `||` over the two answers a `bool` that does not record which half fired, so
+  the failure path re-ran both refusals — and the half that decided nothing was probed too. A
+  prefix impurity settled by a span or by a length says nothing, and a `NaN` the second peek
+  fabricated in the *appended* run then withheld a verdict the kit had established. That is the
+  same `bool` one level up. The comparison now answers which half failed to reproduce, that half's
+  two runs and what decided them — a **length** included, which an `Option<(position, component)>`
+  could not distinguish from agreement — and the branch condition and the failure path consume
+  that one result. The four purity sites take the same shape, so no `!=` over two peeked runs is
+  left in the kit to compose.
+
+  The failure names the half, and that is the one thing it can no longer say: it prints the
+  deciding half's two runs where it used to print both pairs. A cache impure in *both* halves is
+  reported at the prefix and its appended defect is seen on the next run — the same cost
+  "span first, always" already pays at the entry comparison, and for the same reason.
+
   **The sweep is the population and not the reported site.** Six comparisons: `assert_run_eq` and
   `check_resume` in the trait tier, `assert_partial_stream_eq` and `assert_partial_prefix_of` in
   the partial tier, the committed-stream comparison in the integration tier, and the cache kit's

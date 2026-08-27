@@ -439,30 +439,119 @@ where
   None
 }
 
-/// [`triple_compare`] over two whole peeked runs: the **first position they actually disagree
-/// at**, and the component that decided that disagreement — what the purity laws, which compare
-/// two runs as vectors rather than entry by entry, need in order to say *where*.
+/// What a purity comparison over two peeked runs was decided by — the answer [`runs_decided`]
+/// gives when the two runs differ at all.
 ///
-/// `None` when every shared position agrees, and that includes two runs which differ only in
-/// **length**: a count is not a comparison of caller values, so there is nothing there that could
-/// fail to equal itself and nothing to refuse. A scan of one run had neither property — it
-/// answered from an entry the two runs might well agree on, at a position the divergence is not
-/// at, and it answered at all when a length settled the verdict.
+/// **Total over the ways two runs can differ, and the totality is the point.** An `Option<(usize,
+/// Decided)>` could not say "they differ, and a *length* decided it": it said `None`, which is
+/// also what it says about two runs that agree. A caller needing both answers therefore had to
+/// ask a second question — `first != second` — and compose the two by hand, and that composition
+/// is where a `bool` that does not record what fired came back one level up (#324). One
+/// comparison, one answer, consumed by the branch and by the failure path alike.
+pub(super) enum PurityDecided {
+  /// Every shared position agrees and the two runs differ in **length**.
+  ///
+  /// A count is not a comparison of caller values, so there is nothing here that could fail to
+  /// equal itself and nothing to refuse — see [`refuse_runs`](CacheHarness::refuse_runs).
+  Length,
+  /// They disagree at a position, and [`Decided`] names the component that decided it.
+  At(usize, Decided),
+}
+
+/// [`triple_compare`] over two whole peeked runs: whether they differ, and when they do, **what
+/// decided it** — the first position they actually disagree at with the component that settled
+/// it, or their length. That is what the purity laws, which compare two runs as vectors rather
+/// than entry by entry, need in order to say *where*.
+///
+/// A scan of one run had neither property: it answered from an entry the two runs might well
+/// agree on, at a position the divergence is not at, and it answered at all when a length settled
+/// the verdict.
 pub(super) fn runs_decided<'inp, L>(
   first: &[PeekedTriple<'inp, L>],
   second: &[PeekedTriple<'inp, L>],
-) -> Option<(usize, Decided)>
+) -> Option<PurityDecided>
 where
   L: Lexer<'inp>,
   L::Token: PartialEq,
   L::State: PartialEq,
 {
-  first
+  let diverged = first
     .iter()
     .zip(second)
     .enumerate()
     .find_map(|(i, (a, b))| {
-      triple_compare::<L>((&a.0, &a.1, &a.2), (&b.0, &b.1, &b.2)).map(|(_, decided)| (i, decided))
+      triple_compare::<L>((&a.0, &a.1, &a.2), (&b.0, &b.1, &b.2))
+        .map(|(_, decided)| PurityDecided::At(i, decided))
+    });
+  diverged.or_else(|| (first.len() != second.len()).then_some(PurityDecided::Length))
+}
+
+/// Which half of a prefilled `peek`'s buffer a purity comparison was decided by: the prefix
+/// `peek` was handed, or the run it appended behind that prefix.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PeekHalf {
+  /// The entries the buffer already held when `peek` was called.
+  Prefix,
+  /// The entries `peek` wrote behind them.
+  Appended,
+}
+
+impl PeekHalf {
+  /// How the refusal names this half's two runs — the first peek's and the second's.
+  const fn sides(self) -> (&'static str, &'static str) {
+    match self {
+      Self::Prefix => ("first prefix", "second prefix"),
+      Self::Appended => ("first appended", "second appended"),
+    }
+  }
+
+  /// How the failure names this half.
+  const fn noun(self) -> &'static str {
+    match self {
+      Self::Prefix => "the prefix the buffer already held",
+      Self::Appended => "the run it appended behind that prefix",
+    }
+  }
+}
+
+/// The **one** comparison a prefilled peek's purity law is decided by: which half of the buffer
+/// failed to reproduce, the two runs of that half, and what decided them.
+struct PrefilledPurity<'r, 'inp, L>
+where
+  L: Lexer<'inp>,
+{
+  half: PeekHalf,
+  first: &'r [PeekedTriple<'inp, L>],
+  second: &'r [PeekedTriple<'inp, L>],
+  decided: PurityDecided,
+}
+
+/// [`runs_decided`] over the two halves of a prefilled peek, in buffer order, answering with the
+/// **first** half that a second peek did not reproduce.
+///
+/// Prefix before appended because the two halves are the two halves of one buffer in order: the
+/// first position the whole buffer diverges at is in the prefix whenever the prefix diverges at
+/// all. This is [`triple_compare`]'s "span first, always" one level up, and it costs the same
+/// thing — a cache impure in both halves is reported at the first, and the second is seen on the
+/// next run.
+fn prefilled_purity<'r, 'inp, L>(
+  prefix: (&'r [PeekedTriple<'inp, L>], &'r [PeekedTriple<'inp, L>]),
+  appended: (&'r [PeekedTriple<'inp, L>], &'r [PeekedTriple<'inp, L>]),
+) -> Option<PrefilledPurity<'r, 'inp, L>>
+where
+  L: Lexer<'inp>,
+  L::Token: PartialEq,
+  L::State: PartialEq,
+{
+  [(PeekHalf::Prefix, prefix), (PeekHalf::Appended, appended)]
+    .into_iter()
+    .find_map(|(half, (first, second))| {
+      runs_decided::<L>(first, second).map(|decided| PrefilledPurity {
+        half,
+        first,
+        second,
+        decided,
+      })
     })
 }
 
@@ -1427,25 +1516,23 @@ where
     }
   }
 
-  /// The reflexivity guard for a purity comparison over two whole peeked runs — what the purity
-  /// laws, which compare two runs as vectors rather than entry by entry, need in order to say
-  /// *where*.
+  /// The reflexivity refusal for a purity comparison over two whole peeked runs, asked about the
+  /// operation [`runs_decided`] says decided it — and about no other.
   ///
-  /// The question is asked at the first position the two runs actually disagree at, about the
-  /// component that decided that disagreement, and nowhere else. Two runs that agree
-  /// position-for-position and differ only in **length** reach this and are refused nothing: see
-  /// [`runs_decided`]. Called with a pair that turns out to be equal — which the prefilled law
-  /// does, since either half of its condition can be the one that fired — it likewise says
-  /// nothing.
-  fn guard_runs(
+  /// **It does not compare.** The comparison ran at the branch that reached here and its answer
+  /// arrives as an argument, so the refusal cannot come to be asked about a pair the verdict does
+  /// not rest on. A [`PurityDecided::Length`] refuses nothing: a count consults no caller
+  /// equality, so there is nothing there that could fail to equal itself.
+  fn refuse_runs(
     &self,
     site: &str,
+    decided: &PurityDecided,
     first_label: &str,
     first: &[PeekedTriple<'inp, L>],
     second_label: &str,
     second: &[PeekedTriple<'inp, L>],
   ) {
-    let Some((i, decided)) = runs_decided::<L>(first, second) else {
+    let PurityDecided::At(i, decided) = decided else {
       return;
     };
     let at = format!("{site}, position {i}");
@@ -1453,13 +1540,55 @@ where
       &at,
       first_label,
       decided.expected(),
-      &format!("{:?}", first[i]),
+      &format!("{:?}", first[*i]),
     );
     self.refuse_non_reflexive(
       &at,
       second_label,
       decided.got(),
-      &format!("{:?}", second[i]),
+      &format!("{:?}", second[*i]),
+    );
+  }
+
+  /// Check 6's purity law on the **prefilled** path: two peeks over the same cache and the same
+  /// prefill land the same buffer, in both of its halves.
+  ///
+  /// **No site may collapse comparisons into a boolean before deciding: the branch condition and
+  /// the failure path consume the same single result.** This one is composed of two comparisons —
+  /// the prefix `peek` was handed and the run it appended behind that prefix — and `||` over them
+  /// answers a `bool` that does not record which half fired. A failure path that then re-runs
+  /// both asks the half that did *not* decide, whose own probe can fire over a value the verdict
+  /// does not rest on: a prefix impurity settled by a span or a length says nothing, and a
+  /// fabricated `NaN` in the appended run withholds a verdict the kit had established (#324).
+  /// That is `sig_eq`'s `bool` one level up. [`prefilled_purity`] answers once, naming the half,
+  /// and the refusal below is asked about that half's own runs.
+  pub(super) fn assert_prefilled_peek_pure(
+    &self,
+    tag: &str,
+    depth: usize,
+    state: &str,
+    prefix: (&[PeekedTriple<'inp, L>], &[PeekedTriple<'inp, L>]),
+    appended: (&[PeekedTriple<'inp, L>], &[PeekedTriple<'inp, L>]),
+  ) {
+    let Some(purity) = prefilled_purity::<L>(prefix, appended) else {
+      return;
+    };
+    let name = self.label();
+    let site = format!("pure-peek/{tag} at depth {depth} against {state}");
+    let (first_label, second_label) = purity.half.sides();
+    self.refuse_runs(
+      &site,
+      &purity.decided,
+      first_label,
+      purity.first,
+      second_label,
+      purity.second,
+    );
+    panic!(
+      "tokora cache conformance [{name} pure-peek/{tag} at depth {depth}] against {state}: two prefilled peeks on an unchanged cache disagreed in {}: {:?} then {:?}. `peek` takes &self and must be logically pure against every shape of buffer, not only against an empty one.",
+      purity.half.noun(),
+      purity.first,
+      purity.second
     );
   }
 
@@ -2621,9 +2750,9 @@ where
     // Purity: the cache is unchanged, and a second peek reads the same.
     self.assert_resident(cache, cap, want, &format!("after peek() against {state}"));
     let second = self.peeked_entries(cache);
-    if second != first {
+    if let Some(decided) = runs_decided::<L>(&first, &second) {
       let site = format!("pure-peek against {state}");
-      self.guard_runs(&site, "first", &first, "second", &second);
+      self.refuse_runs(&site, &decided, "first", &first, "second", &second);
       panic!(
         "tokora cache conformance [{name} pure-peek] against {state}: two peeks on an unchanged cache disagreed: {first:?} then {second:?}. `peek` takes &self and must be logically pure. The comparison is over whole (span, token, state) entries, so a peek that is stable in its spans and unstable in the tokens or the states behind them disagrees here too."
       );
@@ -2665,10 +2794,11 @@ where
       (None, None) => {}
     }
     let one_second: Option<PeekedTriple<'inp, L>> = self.peeked_one(cache);
-    if one_second != one_first {
+    if let Some(decided) = runs_decided::<L>(one_first.as_slice(), one_second.as_slice()) {
       let site = format!("pure-peek-one against {state}");
-      self.guard_runs(
+      self.refuse_runs(
         &site,
+        &decided,
         "first",
         one_first.as_slice(),
         "second",
@@ -2768,9 +2898,9 @@ where
       &format!("bounded-peek/window {window} against {state}"),
     );
     let second = self.peeked_entries_through::<W>(cache);
-    if second != first {
+    if let Some(decided) = runs_decided::<L>(&first, &second) {
       let site = format!("pure-peek/window {window} against {state}");
-      self.guard_runs(&site, "first", &first, "second", &second);
+      self.refuse_runs(&site, &decided, "first", &first, "second", &second);
       panic!(
         "tokora cache conformance [{name} pure-peek/window {window}] against {state}: two peeks on an unchanged cache disagreed: {first:?} then {second:?}. `peek` takes &self and must be logically pure at every window, not only at the kit's own."
       );
@@ -2850,29 +2980,15 @@ where
     );
     let (prefix_again, appended_again) =
       self.peeked_entries_after_prefill(cache, self.prefill(cap, depth, from));
-    if prefix_again != prefix_after || appended_again != appended {
-      // Either half of the condition above can be the one that fired, so both pairs are asked and
-      // the pair that agrees says nothing — which is the component-aware rule and not a
-      // convenience: a run scanned on its own answers about an entry the two runs may agree on.
-      let site = format!("pure-peek/{tag} at depth {depth} against {state}");
-      self.guard_runs(
-        &site,
-        "first prefix",
-        &prefix_after,
-        "second prefix",
-        &prefix_again,
-      );
-      self.guard_runs(
-        &site,
-        "first appended",
-        &appended,
-        "second appended",
-        &appended_again,
-      );
-      panic!(
-        "tokora cache conformance [{name} pure-peek/{tag} at depth {depth}] against {state}: two prefilled peeks on an unchanged cache disagreed: prefix {prefix_after:?} then {prefix_again:?}, appended {appended:?} then {appended_again:?}. `peek` takes &self and must be logically pure against every shape of buffer, not only against an empty one."
-      );
-    }
+    // No site may collapse comparisons into a boolean before deciding: the branch condition and
+    // the failure path consume the same single result. See `assert_prefilled_peek_pure`.
+    self.assert_prefilled_peek_pure(
+      tag,
+      depth,
+      state,
+      (&prefix_after, &prefix_again),
+      (&appended, &appended_again),
+    );
     self.assert_resident(
       cache,
       cap,

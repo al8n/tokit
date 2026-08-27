@@ -2119,10 +2119,30 @@ fn cache_kit_catches_a_peek_that_drains_only_on_the_prefilled_path() {
   run_queue::<PREFILL_DRAINS_RESIDENCY>();
 }
 
+/// The prefilled purity law end to end, and #324's control 3 on a real cache: this defect leaves
+/// the prefix it was handed untouched and appends one entry fewer on every call after the first,
+/// so the APPENDED half is what decided — by a length, which consults no caller equality. The
+/// failure has to name that half. A repair that always blamed the prefix would keep the tag and
+/// misattribute the defect.
 #[test]
-#[should_panic(expected = "pure-peek/prefilled")]
 fn cache_kit_catches_a_peek_that_is_impure_only_on_the_prefilled_path() {
-  run_queue::<PREFILL_IMPURE_PEEK>();
+  let panicked = std::panic::catch_unwind(run_queue::<PREFILL_IMPURE_PEEK>)
+    .expect_err("an impure prefilled peek must be caught");
+  let msg = panicked
+    .downcast_ref::<String>()
+    .expect("the kit panics with a formatted message");
+  assert!(
+    msg.contains("pure-peek/prefilled"),
+    "the prefilled purity law owns this defect, got: {msg}"
+  );
+  assert!(
+    msg.contains("disagreed in the run it appended behind that prefix"),
+    "the appended half is what this cache failed to reproduce, got: {msg}"
+  );
+  assert!(
+    !msg.contains("the prefix the buffer already held"),
+    "the prefix is handed back untouched here and must not be blamed, got: {msg}"
+  );
 }
 
 #[test]
