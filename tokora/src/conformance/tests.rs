@@ -3598,6 +3598,42 @@ fn an_error_payload_that_moves_between_two_integration_schedules_is_falsified() 
 }
 
 #[test]
+fn a_span_divergence_at_this_tier_is_still_reported_the_way_it_always_was() {
+  // The control for the extension, and the reason this is not a rewrite: the tier compares MORE
+  // than it did, and it must say exactly what it always said about a divergence the span decided.
+  // `Lexer::Span` is bounded `Ord`, so the comparison that drew the verdict is sound and there is
+  // nothing to refuse — same tier, same tag, same words. Only the rendering of the two sides
+  // grew, because an item now carries the payload the verdict is entitled to show.
+  let expected = [super::StreamItem::<InstanceFlipLexer<'_>>::Token(
+    VTok(7),
+    SimpleSpan::new(0, 1),
+  )];
+  let got = [super::StreamItem::<InstanceFlipLexer<'_>>::Token(
+    VTok(7),
+    SimpleSpan::new(1, 2),
+  )];
+  let msg = panic_message(|| {
+    super::assert_stream_eq::<InstanceFlipLexer<'_>>(
+      0,
+      "peek-heavy",
+      super::COMMITTED,
+      &expected,
+      &got,
+    );
+  });
+  assert!(
+    msg.contains(
+      "[input #0 integration/peek-heavy] position 0: committed token stream diverges: expected"
+    ),
+    "a span divergence must keep the tier's own verdict and wording, got: {msg}"
+  );
+  assert!(
+    !msg.contains("non-reflexive-payload"),
+    "the span decided it and a span is reflexive, so there is nothing to refuse, got: {msg}"
+  );
+}
+
+#[test]
 #[should_panic(expected = "cache conformance [cache non-reflexive-payload]")]
 fn the_cache_kit_diagnoses_a_non_reflexive_token_instead_of_blaming_the_cache() {
   // The cache tier draws its verdicts from the same population — its observable is the whole

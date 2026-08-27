@@ -2717,7 +2717,7 @@ fn check_integration<'inp, L>(
   // refills cost.
   //
   // Wrapping is invisible to the comparison: `Bud<'inp, L>` carries L's `Token`, `Span` and error
-  // type, so the streams collected here are the same type as `raw` below.
+  // type, so the streams collected here are the same type as `raw_tokens` below.
   let units = src.slice(..).map(|s| s.len()).unwrap_or(0);
   let tally = LexTally::new(
     idx,
