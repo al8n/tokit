@@ -164,11 +164,60 @@ pub enum PrattInfix<L, R, N> {
 }
 
 /// A right-hand side for Pratt parsing: an infix operator with its precedence level and
-/// associativity, a postfix operator with its precedence level, or the end of the expression.
+/// associativity, a zero-token infix continuation, a postfix operator with its precedence level,
+/// or the end of the expression.
 #[derive(Debug, Clone, Copy)]
 pub enum PrattRHS<L, R, N, Post, Power = i64> {
   /// An infix operator with its precedence level and associativity.
   Infix(Precedenced<PrattInfix<L, R, N>, Power>),
+  /// A **zero-token** infix continuation: the expression continues here, and the operator that
+  /// continues it is spelled with no token at all.
+  ///
+  /// This is juxtaposition as an *operator* rather than as a repetition — LogQL's
+  /// `labelFilter labelFilter`, where the connective competing with `and`, `,` and `|` at the
+  /// same power is the empty string. A repetition dissolves into a `while` loop at the
+  /// production and needs nothing from this enum; an operator does not, because its right
+  /// operand's floor has to be the **driver's** and not the production's. Reporting the
+  /// already-parsed right operand as a [`Postfix`](Self::Postfix) is the workaround this variant
+  /// replaces, and what it gives up is exactly that: the floor moves to the production, where no
+  /// law of this driver reaches it.
+  ///
+  /// # It is left-associative, and there is no associativity to choose
+  ///
+  /// The payload is the [`Infix`](Self::Infix) arm's **left**-associative operator type, and the
+  /// driver descends the right operand on `> power` — the left-associative bound — with no
+  /// alternative offered. That is not a default; it is the depth bound. A right-associative bound
+  /// admits the operator's *own* power into the right operand, so an inner frame handed a
+  /// zero-token continuation at that power reports the same continuation again and descends
+  /// **having consumed nothing**: one native frame per level, none of them paid for by the
+  /// document. On the left-associative bound the inner frame declines it, the chain iterates in
+  /// one frame, and that frame's progress guard bounds it. Zero-token continuations can therefore
+  /// nest only by *strictly increasing* power, which is a property of the grammar's ladder rather
+  /// than of the input.
+  ///
+  /// Every other driver posture that reads an infix report reads this one identically: the floor
+  /// decides whether the continuation is this expression's, and a second same-power operator
+  /// after a [`Neither`](PrattInfix::Neither) fold is refused here exactly as it is there. An
+  /// adjacency never *arms* that latch, because it folds as [`Left`](PrattInfix::Left) — which is
+  /// also why it needs no fold hook and no CST kind of its own. Tell an adjacency from a spelled
+  /// left-associative operator in the payload type, as LogQL must anyway to tell `and` from `,`
+  /// from `|`.
+  ///
+  /// # The obligation moves from the report to the operand
+  ///
+  /// **"Consume what you report" has nothing to bite on here**, so this report is exempt from it.
+  /// Consuming nothing is the point; consuming *something* is legal too — a CST-shaped classifier
+  /// that skips trivia before deciding two operands are adjacent has consumed that trivia. Neither
+  /// is a violation, and no report boundary is applied.
+  ///
+  /// **The right operand carries the obligation instead.** The driver reads committed consumption
+  /// when the operand parse returns — before the fold and before the CST wrap, since both are the
+  /// work this charge exists to price — and refuses a continuation whose cycle advanced nothing:
+  /// [`UnexpectedEoRhs`](crate::error::UnexpectedEoRhs), terminal, with a debug build additionally
+  /// tripping an assertion naming this rule. Without that charge a document buys a fold, a wrap
+  /// and another cycle for no input at all, and the next cycle reports the same continuation over
+  /// the same bytes.
+  Adjacent(Precedenced<L, Power>),
   /// Postfix operator with its precedence level and operator type.
   Postfix(Precedenced<Post, Power>),
   /// The expression does not continue at this position: the next token is not an infix or
@@ -276,6 +325,11 @@ where
 /// [`Pratt`] — and differ only in whether the violation arrives as a panic or as that error. Only
 /// admitted reports are held to it — a report the floor declines is the [`End`](PrattRHS::End)
 /// answer in another spelling, is rolled back, and may consume nothing.
+///
+/// **[`Adjacent`](PrattRHS::Adjacent) is exempt, and its obligation is discharged elsewhere.** A
+/// zero-token continuation has no operator to have consumed, so there is nothing for the report
+/// boundary to measure; the driver charges its **right operand** instead, refusing a continuation
+/// whose cycle advanced nothing. That variant states the rule in full.
 ///
 /// **A terminal stop is an `Err`, never an `End`.** A tripped scanner limit is not the end of
 /// an expression; surfacing it as one lets a truncated view masquerade as a complete parse.

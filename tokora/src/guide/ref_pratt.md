@@ -327,6 +327,7 @@ enum PrattLHS<Op, Pre, Power = i64> {          // left edge of a (sub-)expressio
 enum PrattInfix<L, R, N> { Left(L), Right(R), Neither(N) }   // associativity + operator
 enum PrattRHS<L, R, N, Post, Power = i64> {     // what follows an operand
     Infix(Precedenced<PrattInfix<L, R, N>, Power>),
+    Adjacent(Precedenced<L, Power>),            //   an infix spelled with NO token
     Postfix(Precedenced<Post, Power>),
     End,                                        //   the expression stops here
 }
@@ -337,6 +338,30 @@ how the loop learns a token is *not* part of the expression here and stops — a
 the same. Do **not** spell that as a below-floor `Postfix` "sentinel": a sentinel is a real
 operator report, so whether it binds depends on the floor the loop happens to be running at, and
 over an unsigned `Power` there is no value below the default floor to give it.
+
+### `Adjacent`: juxtaposition as an operator
+
+`Adjacent` is for the case where two operands sit next to each other and *that* is the operator —
+LogQL's `labelFilter labelFilter`, where the same connective is also spelled `and`, `,` and `|`.
+Reach for it only when the juxtaposition has to compete on the precedence ladder with spellings
+that *do* have tokens. A plain repetition (`pipelineExpr`, `lineFilters`) is a `while` loop at the
+production and wants nothing from this enum.
+
+Three properties are worth knowing before you reach for it:
+
+* **it is left-associative and does not offer a choice.** The payload is the `Infix` arm's `L`
+  type and the fold sees `PrattInfix::Left`. The driver descends the right operand on `> power`,
+  which is what keeps a chain of them iterating in one frame instead of descending once per
+  operand on input nothing consumed;
+* **the report is exempt from "consume what you report".** Consuming nothing is the point.
+  Consuming trivia before deciding is fine too;
+* **the right operand carries the obligation instead.** A continuation whose whole cycle advanced
+  no input is refused with a terminal `UnexpectedEoRhs`, before the fold runs. If your grammar can
+  answer a zero-width operand — a recovery hole, typically — that is the shape that reaches it.
+
+The token-level engine (`InputRef::pratt`) does not serve this report: it has no token to commit
+for it and none to hand `fold_infix`. It raises the end-of-RHS diagnostic instead of ending the
+expression silently.
 
 ---
 

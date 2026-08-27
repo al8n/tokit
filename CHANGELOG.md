@@ -71,6 +71,42 @@ and will red until they do.
 
 ### Added
 
+- **`PrattRHS::Adjacent` — an infix continuation spelled with no token** (#274). Juxtaposition as
+  an *operator* rather than as a repetition: the shape LogQL's `labelFilter labelFilter` needs,
+  where the same connective is also spelled `and`, `,` and `|` and the empty one has to compete
+  with those three on the same ladder. A repetition dissolves into a `while` loop at the
+  production and needs nothing from the driver; an operator does, because its right operand's
+  floor has to be the **driver's**. The workaround this replaces — report the already-parsed right
+  operand as a `Postfix` — gives that floor to the production, where none of the driver's
+  precedence laws reach it.
+
+  **The report is exempt from "consume what you report", and the right operand pays instead.**
+  There is no operator spelling for a report boundary to measure, and consuming nothing is the
+  point (consuming trivia before deciding is legal too — that is the CST-shaped classifier). So
+  the driver reads committed consumption when the operand parse returns — **before the fold, the
+  CST wrap and the next turn**, which is the work a continuation buys — and refuses a cycle that
+  advanced nothing with a terminal `UnexpectedEoRhs`, plus a `debug_assert` naming the rule. A
+  grammar that can answer a zero-width operand, which every recovering grammar can, is the one
+  that reaches it.
+
+  **It is left-associative and offers no choice, and that is the depth bound rather than a
+  default.** The payload is the `Infix` arm's left-associative operator type, the fold sees
+  `PrattInfix::Left`, and the driver descends on `> power`. An inclusive bound would admit the
+  operator's own power into its right operand, so an inner frame handed the same zero-token
+  continuation reports it again and descends **with nothing consumed** — one native frame per
+  level, paid for by no byte of the document and bounded only by the recursion budget. On the
+  exclusive bound the inner frame declines it, the chain iterates in one frame, and the charge
+  above prices every turn. What can still nest is a *strictly increasing* power chain, which is a
+  property of the grammar's ladder and not of the input. Pinned both ways in
+  `tests/pratt_adjacent.rs`: the refused cycle enters the LHS channel twice rather than once per
+  budget level, and a chain four times longer than the budget parses in one frame.
+
+  **The token-level engine (`InputRef::pratt`) does not serve it.** Its termination argument is
+  that acceptance *is* the commit of one nonzero-width token, and its `fold_infix` is handed a
+  real token; neither survives a zero-token operator. It raises the end-of-RHS diagnostic and
+  returns the left-hand side — the posture it already takes for an infix whose right operand never
+  arrived — rather than parking the report and ending the expression with a silent `Ok`.
+
 - **`types::Status`, and `with_status` on all nineteen recovery carriers** (#320). The recovery
   state stops being a private field and becomes a value a consumer can hold: it is returned by
   `IntoComponents` (see **Changed (breaking)**) and accepted back by
@@ -885,6 +921,18 @@ and will red until they do.
   baseline in `input::input_ref::tests`.
 
 ### Changed (breaking)
+
+- **`PrattRHS` gains a variant, so an exhaustive `match` on it stops compiling** (#274). The new
+  arm is `Adjacent(Precedenced<L, Power>)` — see **Added**. Every in-tree `match` on `PrattRHS`
+  was a driver's; grammar code builds these values rather than reading them, so the expected
+  downstream cost is a classifier that wraps or forwards a report. `PrattRHS` is deliberately not
+  `#[non_exhaustive]`: a wildcard arm on this enum is a grammar silently declining a continuation
+  the driver could have served, which is the class of defect `PrattRHS::End` exists to make
+  spellable rather than inferable.
+
+  Nothing else moves. No fold hook, no CST kind, no type parameter and no bound changed — the new
+  variant reuses the left-associative operator type and folds through `PrattFoldInfix` as
+  `PrattInfix::Left`.
 
 - **`UnclosedEmitter::emit_unclosed` no longer imposes `Self::Error: FromUnclosed`, and `Fatal`
   and `Verbose` implement the trait only where their error type carries that conversion** (#270).
