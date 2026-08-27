@@ -3730,12 +3730,16 @@ fn a_prefilled_impurity_the_prefix_decided_is_not_withheld_over_a_nan_the_append
     );
   });
   assert!(
-    msg.contains("pure-peek/prefilled at depth 1] against a full cache: two prefilled peeks on an unchanged cache disagreed in the prefix the buffer already held"),
-    "the impurity the prefix decided must be reported, got: {msg}"
+    msg.contains("pure-peek/prefilled at depth 1] against a full cache: two prefilled peeks on an unchanged cache disagreed in the prefix the buffer already held: [(SimpleSpan { start: 0, end: 1 }, FTok(1.0), ())] then [(SimpleSpan { start: 9, end: 10 }, FTok(1.0), ())]"),
+    "the impurity the prefix decided must be reported, and reported with the prefix's own two runs, got: {msg}"
   );
   assert!(
     !msg.contains("non-reflexive-payload"),
     "the verdict rests on a span, which is reflexive; the NaN is in the pair that decided nothing, got: {msg}"
+  );
+  assert!(
+    !msg.contains("FTok(NaN)"),
+    "the appended pair decided nothing and must not be rendered as though it had, got: {msg}"
   );
 }
 
@@ -3758,9 +3762,9 @@ fn a_nan_in_the_appended_pair_that_actually_decided_is_still_refused() {
   });
   assert!(
     msg.contains(
-      "non-reflexive-payload] pure-peek/prefilled at depth 1 against a full cache, position 0: INCONCLUSIVE — the token payload of the second appended entry"
+      "non-reflexive-payload] pure-peek/prefilled at depth 1 against a full cache, position 0: INCONCLUSIVE — the token payload of the second appended entry (SimpleSpan { start: 4, end: 5 }, FTok(NaN), ())"
     ),
-    "a NaN that decided the appended comparison must still be refused, and named as the appended side, got: {msg}"
+    "a NaN that decided the appended comparison must still be refused, named as the appended side and rendered as the appended ENTRY — the value the verdict rests on, got: {msg}"
   );
 }
 
@@ -3783,9 +3787,9 @@ fn a_nan_in_the_prefix_pair_that_actually_decided_is_still_refused() {
   });
   assert!(
     msg.contains(
-      "non-reflexive-payload] pure-peek/prefilled at depth 1 against a full cache, position 0: INCONCLUSIVE — the token payload of the second prefix entry"
+      "non-reflexive-payload] pure-peek/prefilled at depth 1 against a full cache, position 0: INCONCLUSIVE — the token payload of the second prefix entry (SimpleSpan { start: 0, end: 1 }, FTok(NaN), ())"
     ),
-    "a NaN that decided the prefix comparison must still be refused, got: {msg}"
+    "a NaN that decided the prefix comparison must still be refused, and rendered as the prefix ENTRY, got: {msg}"
   );
 }
 
@@ -3806,8 +3810,8 @@ fn a_prefix_impurity_with_reflexive_payloads_throughout_still_reds_the_ordinary_
     );
   });
   assert!(
-    msg.contains("pure-peek/prefilled at depth 1] against a full cache: two prefilled peeks on an unchanged cache disagreed in the prefix the buffer already held"),
-    "the ordinary impurity failure must keep its tag and its wording, got: {msg}"
+    msg.contains("pure-peek/prefilled at depth 1] against a full cache: two prefilled peeks on an unchanged cache disagreed in the prefix the buffer already held: [(SimpleSpan { start: 0, end: 1 }, FTok(1.0), ())] then [(SimpleSpan { start: 9, end: 10 }, FTok(1.0), ())]"),
+    "the ordinary impurity failure must keep its tag, its wording and the deciding half's two runs, got: {msg}"
   );
   assert!(
     !msg.contains("non-reflexive-payload"),
@@ -3834,12 +3838,13 @@ fn an_appended_decided_impurity_is_reported_as_appended_and_not_as_the_prefix() 
     );
   });
   assert!(
-    msg.contains("disagreed in the run it appended behind that prefix"),
-    "an appended-decided impurity must be reported as appended, got: {msg}"
+    msg.contains("disagreed in the run it appended behind that prefix: [(SimpleSpan { start: 4, end: 5 }, FTok(2.0), ())] then [(SimpleSpan { start: 6, end: 7 }, FTok(2.0), ())]"),
+    "an appended-decided impurity must be reported as appended, with the appended run's own two values, got: {msg}"
   );
   assert!(
-    !msg.contains("the prefix the buffer already held"),
-    "the prefix was reproduced exactly and must not be blamed, got: {msg}"
+    !msg.contains("the prefix the buffer already held")
+      && !msg.contains("SimpleSpan { start: 0, end: 1 }"),
+    "the prefix was reproduced exactly and must be neither blamed nor printed, got: {msg}"
   );
 }
 
