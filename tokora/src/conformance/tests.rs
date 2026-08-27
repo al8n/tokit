@@ -3381,3 +3381,275 @@ fn the_cache_kit_still_runs_over_a_reflexive_payload_of_the_same_type() {
   >::new("abcdefgh")
   .run();
 }
+
+// ── The reviewer's counterexample: a divergence the DISCRIMINANT decided ────────────
+
+/// A lexer error payload holding an `f64` — [`FTok`]'s twin on the error arm, non-reflexive
+/// exactly at `NaN`.
+#[derive(Clone, Debug, PartialEq)]
+struct FErr(f64);
+
+/// A token whose *error* type is the `NaN`-capable one. Its own payload is trivial: the whole
+/// point of the fixture is that the non-reflexive value sits on the arm that is NOT compared,
+/// because the two sides are not the same arm at all.
+#[derive(Clone, Debug, PartialEq)]
+struct NTok;
+
+impl Token<'_> for NTok {
+  type Kind = FKind;
+  type Error = FErr;
+
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
+
+  fn kind(&self) -> FKind {
+    FKind
+  }
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// [`ErrLexer`]'s `FLIPS_TO_TOKEN` defect over a `NaN`-carrying error payload: the first item is
+/// an **error** unless the buffer's last byte is `z`, so the prefix `"ab"` yields
+/// `LexerError(0..1, FErr(NaN))` where the complete parse of `"abz"` has `NTok@0..1`.
+///
+/// The truncation nonconformance is the same one [`FlippingErrLexer`] carries — those two differ
+/// in the error payload and in nothing else, which is what makes them a differential pair.
+struct NanErrFlipLexer<'a> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: (),
+}
+
+impl<'a> Lexer<'a> for NanErrFlipLexer<'a> {
+  type State = ();
+  type Source = str;
+  type Token = NTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: (),
+    }
+  }
+  fn with_state(src: &'a str, state: ()) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), FErr> {
+    Ok(())
+  }
+  fn state(&self) -> &() {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut () {
+    &mut self.state
+  }
+  fn into_state(self) {}
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<NTok, FErr>> {
+    self.start = self.end;
+    if self.start >= self.src.len() {
+      return None;
+    }
+    self.end = boundary_after(self.src, self.start);
+    let sealed = self.src.as_bytes().last() == Some(&b'z');
+    if self.start == 0 && !sealed {
+      return Some(Err(FErr(f64::NAN)));
+    }
+    Some(Ok(NTok))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+#[test]
+fn a_discriminant_divergence_is_reported_even_when_a_payload_will_not_compare() {
+  // THE COUNTEREXAMPLE. `"abz"` at split k=2: the complete parse has `NTok@0..1` and the prefix
+  // `"ab"` yields `LexerError(0..1, FErr(NaN))`. The two sides are not the same ARM, so the
+  // comparison is settled by the discriminant and no caller equality is consulted at all — and a
+  // whole-item scan, which runs afterwards and knows nothing about why, still found the `NaN` and
+  // refused. That refusal claimed the kit had convicted the lexer of nothing, over exactly the
+  // truncation nonconformance the panic below is about.
+  //
+  // Its reflexive twin is `an_error_that_becomes_a_token_on_append_is_falsified` above:
+  // `FlippingErrLexer` carries the same defect with a payload that equals itself, and it has
+  // always reported the ordinary tag. The two differ in the payload and in nothing else.
+  let panicked = std::panic::catch_unwind(|| {
+    Harness::<NanErrFlipLexer<'_>>::over(["abz"]).run_partial();
+  })
+  .unwrap_err();
+  let msg = panicked
+    .downcast_ref::<String>()
+    .expect("the kit panics with a formatted message");
+  assert!(
+    msg.contains(
+      "partial-equivalence] split k=2, position 0: prefix item diverges from the complete prefix: expected token"
+    ),
+    "the truncation nonconformance must be reported, got: {msg}"
+  );
+  assert!(
+    !msg.contains("non-reflexive-payload"),
+    "a divergence the DISCRIMINANT decided consults no caller equality and must not be refused, got: {msg}"
+  );
+}
+
+#[test]
+fn a_divergence_the_span_decided_is_reported_beside_a_payload_that_will_not_compare() {
+  // The counterexample's second shape, and the one that says the rule is about the OPERATION
+  // rather than about the discriminant alone: both sides are tokens, the payloads are `NaN` on
+  // both, and what differs is the SPAN — bounded `Ord`, so the comparison that decided the
+  // verdict is sound and there is nothing to refuse. A scan reached the payload first and
+  // refused, hiding a real divergence behind a diagnosis it had not established.
+  use super::Item;
+  let item = |end: usize| Item::<NanPayloadLexer<'_>> {
+    item: Ok(FTok(f64::NAN)),
+    span: SimpleSpan::new(0, end),
+    slice: &"nn"[..end],
+    end,
+    state: (),
+  };
+  let panicked = std::panic::catch_unwind(|| {
+    super::assert_run_eq::<NanPayloadLexer<'_>>(0, "replay-identity", &[item(1)], &[item(2)]);
+  })
+  .unwrap_err();
+  let msg = panicked
+    .downcast_ref::<String>()
+    .expect("the kit panics with a formatted message");
+  assert!(
+    msg.contains("replay-identity] position 0: item mismatch"),
+    "the span divergence must be reported, got: {msg}"
+  );
+  assert!(
+    !msg.contains("non-reflexive-payload"),
+    "the comparison was decided by the span, which is reflexive, got: {msg}"
+  );
+}
+
+#[test]
+#[should_panic(
+  expected = "non-reflexive-payload] partial-equivalence split k=1, position 0: INCONCLUSIVE — the lexer error payload"
+)]
+fn a_non_reflexive_error_payload_is_still_refused_when_it_is_what_decided_the_comparison() {
+  // The other side of the same coin, and the #295 half of the mandate: two items on the SAME arm
+  // whose spans agree, so the error payload is the operation that decided the comparison — and it
+  // is the one that will not equal itself. The refusal must still fire, and it must still name
+  // the error payload.
+  use super::PartialItem;
+  let nan =
+    || PartialItem::<NanErrFlipLexer<'_>>::LexerError(SimpleSpan::new(0, 1), FErr(f64::NAN));
+  super::assert_partial_prefix_of::<NanErrFlipLexer<'_>>(0, 1, &[nan()], &[nan()]);
+}
+
+#[test]
+#[should_panic(
+  expected = "non-reflexive-payload] partial-equivalence split k=18446744073709551615, position 0: INCONCLUSIVE — the lexer error payload"
+)]
+fn the_error_arm_is_refused_at_the_final_leg_too() {
+  // `assert_partial_stream_eq`'s comparison over the error arm, reached directly: the final leg
+  // fires before the split loop, so a lexer whose FINAL drain errors with a `NaN` arrives here.
+  use super::PartialItem;
+  let nan =
+    || PartialItem::<NanErrFlipLexer<'_>>::LexerError(SimpleSpan::new(0, 1), FErr(f64::NAN));
+  super::assert_partial_stream_eq::<NanErrFlipLexer<'_>>(0, usize::MAX, &[nan()], &[nan()]);
+}
+
+// ── The cache tier's two comparisons, pinned where the harness cannot reach them ────
+//
+// Both cells call the repaired comparison directly, and they have to: on the cache tier a value
+// that will not equal itself is refused at the FIRST entry comparison the sweep makes — check 2's
+// accepted `push_front` into a fresh cache — because on a conforming cache every span agrees and
+// the non-reflexive component is the only thing that can fail. So no cache defect reachable
+// through `CacheHarness::run` is ever compared *beside* such a value, and the difference between
+// asking the component that decided and scanning the whole entry has nothing to show there.
+// Reachability is an argument about check order; the rule the cells pin is not.
+
+#[test]
+fn a_cache_entry_divergence_the_span_decided_is_not_refused_over_a_nan_token() {
+  // A permuted cache — the right token at the wrong span — beside a payload that will not compare.
+  // The span is bounded `Ord`, so the comparison that produced the verdict is sound and the entry
+  // message must stand. A whole-entry scan reached the token first and refused, hiding a real
+  // cache defect behind a diagnosis nothing had established.
+  use super::cache::{EntryPart, triple_compare};
+  let want = (SimpleSpan::new(0, 1), FTok(f64::NAN), ());
+  let got = (SimpleSpan::new(1, 2), FTok(f64::NAN), ());
+  let (part, decided) =
+    triple_compare::<NanPayloadLexer<'_>>((&want.0, &want.1, &want.2), (&got.0, &got.1, &got.2))
+      .expect("the two entries differ");
+  assert_eq!(part, EntryPart::Span, "the span is what differs");
+  assert!(
+    decided.expected().is_none() && decided.got().is_none(),
+    "the span decided it and a span is reflexive, so there is nothing to refuse"
+  );
+}
+
+#[test]
+fn a_cache_entry_divergence_the_token_decided_is_still_refused() {
+  // The #295 half at the same site: the spans agree, so the token payload is the operation that
+  // decided the comparison — and it is the one that will not equal itself. Both sides refuse.
+  use super::cache::{EntryPart, triple_compare};
+  let entry = || (SimpleSpan::new(0, 1), FTok(f64::NAN), ());
+  let (want, got) = (entry(), entry());
+  let (part, decided) =
+    triple_compare::<NanPayloadLexer<'_>>((&want.0, &want.1, &want.2), (&got.0, &got.1, &got.2))
+      .expect("a NaN payload does not equal itself");
+  assert_eq!(part, EntryPart::Token);
+  assert_eq!(decided.expected(), Some("the token payload"));
+  assert_eq!(decided.got(), Some("the token payload"));
+}
+
+#[test]
+fn two_peeked_runs_that_differ_only_in_length_are_refused_nothing() {
+  // The purity comparison. A count is not a comparison of caller values, so a run that is longer
+  // than the one before it settles the verdict with no `PartialEq` involved — and a scan of one
+  // run still found the `NaN` in it and refused, over a `peek` that genuinely is not pure.
+  use super::cache::runs_decided;
+  let entry = || (SimpleSpan::new(0, 1), FTok(f64::NAN), ());
+  let first = [entry()];
+  let second: [(SimpleSpan, FTok, ()); 0] = [];
+  assert!(
+    runs_decided::<NanPayloadLexer<'_>>(&first, &second).is_none(),
+    "a length divergence consults no caller equality, so there is nothing to refuse"
+  );
+}
+
+#[test]
+fn a_peeked_run_is_probed_at_the_position_the_two_runs_disagree_at() {
+  // And where they do disagree at a position, the question is asked THERE. A scan answered from
+  // the first non-reflexive entry anywhere in one run, which need not be — and here is not — the
+  // position the two runs actually differ at.
+  use super::cache::runs_decided;
+  let head = || (SimpleSpan::new(0, 1), FTok(1.0), ());
+  let middle = |end: usize| (SimpleSpan::new(1, end), FTok(2.0), ());
+  let nan = || (SimpleSpan::new(4, 5), FTok(f64::NAN), ());
+  let first = [head(), middle(2), nan()];
+  let second = [head(), middle(3), nan()];
+  let (i, decided) =
+    runs_decided::<NanPayloadLexer<'_>>(&first, &second).expect("position 1 differs in its span");
+  assert_eq!(i, 1, "the divergence is at position 1, not at the NaN in 2");
+  assert!(
+    decided.expected().is_none() && decided.got().is_none(),
+    "a span decided position 1, and a span is reflexive"
+  );
+}

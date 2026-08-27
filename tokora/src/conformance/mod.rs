@@ -109,12 +109,24 @@
 //! promises symmetry and transitivity but **not** reflexivity: a payload holding an `f64` that can
 //! be `NaN` is not equal to itself. Every comparison any tier draws a verdict from — the two in
 //! the trait tier, the two in the partial tier, the committed-stream one in the integration tier,
-//! and the entry and purity comparisons in [`cache`] — therefore asks, once it has already
-//! failed, whether either side is equal to itself. A side that is not gets a refusal tagged
-//! `non-reflexive-payload` naming the component and the obligation, instead of a conformance
-//! verdict whose expected-vs-got renders identically on both sides (#295). The obligation itself
-//! is unchanged and is the caller's: such a type hand-writes the impl that says what equality
-//! means for it.
+//! and the entry and purity comparisons in [`cache`] — therefore answers with the **component
+//! that decided it**, and asks, once it has already failed, whether *that* operation is equal to
+//! itself. A side whose is not gets a refusal tagged `non-reflexive-payload` naming the component
+//! and the obligation, instead of a conformance verdict whose expected-vs-got renders identically
+//! on both sides (#295). The obligation itself is unchanged and is the caller's: such a type
+//! hand-writes the impl that says what equality means for it.
+//!
+//! **The converse is the same rule, and it is what a `bool` could not express.** A comparison
+//! settled by something other than a caller's `PartialEq` is reported directly and terminally: a
+//! difference at the **discriminant** — an item that is a lexer error on one side and a committed
+//! token on the other — or at a component bounded to a *total* equality, or a difference in item
+//! **count**, consults no partial equality at all, so there is nothing there to refuse. Answering
+//! `false` and then scanning the whole item for a non-reflexive value asked a different question
+//! from the one the comparison had asked, and it hid the truncation nonconformance the partial
+//! tier exists to report behind a refusal saying the kit had convicted the lexer of nothing. The
+//! kit never reports an identity it did not check, and it never withholds a verdict it did
+//! establish; those are one rule, and [`Comparison`] is where it is enforced rather than
+//! remembered.
 
 pub mod cache;
 pub mod emitter;
@@ -412,7 +424,7 @@ where
   L: Lexer<'inp>,
   // Semantic equality on the two values every trait-tier comparison is drawn from. These are the
   // only bounds this entry point asks for beyond `Lexer` itself; see `run`'s own docs for who
-  // pays and what the alternatives cost, and `Item::sig_eq` for why a `Debug` rendering and a
+  // pays and what the alternatives cost, and `Item::compare` for why a `Debug` rendering and a
   // `kind` projection are each the wrong key.
   L::Token: PartialEq,
   <L::Token as Token<'inp>>::Error: PartialEq,
@@ -502,7 +514,7 @@ where
   <L::Token as Token<'inp>>::Kind: PartialEq + core::fmt::Debug,
   // Semantic equality on the compared values. Since 0.10.0 `run` asks for these two as well, so
   // what separates the tiers is the three above and nothing about equality. See
-  // `PartialItem::sig_eq` for why a `Debug` rendering cannot stand in, and `run_partial`'s own
+  // `PartialItem::compare` for why a `Debug` rendering cannot stand in, and `run_partial`'s own
   // docs for who pays.
   L::Token: PartialEq,
   <L::Token as Token<'inp>>::Error: PartialEq,
@@ -1352,7 +1364,20 @@ where
   }
 
   /// Whether two items agree on discriminant, span, and **value** — the token itself on one arm,
-  /// the error payload on the other.
+  /// the error payload on the other — and, when they do not, **which of those decided it**.
+  ///
+  /// # The order the components are consulted in, and what rests on it
+  ///
+  /// Discriminant, then the components bounded to a *total* equality ([`kind`](Token::kind) is
+  /// `Eq`, the span is `Ord`), then the payload, whose [`PartialEq`] promises no reflexivity.
+  /// Two sides can differ in several components at once, and this names the first one in that
+  /// order: a divergence a total equality can settle is never attributed to a partial one, and
+  /// the answer is a true statement about a comparison that really failed either way.
+  ///
+  /// Nothing about **correctness** rests on the order, which is the point of stating it. The
+  /// refusal asks its question of whichever component is named, so it fires exactly when the
+  /// operation that produced the verdict is unsound — under this order or any other. What the
+  /// order buys is a *diagnosis*: the strongest evidence available gets to speak.
   ///
   /// # Semantically, never by rendering
   ///
@@ -1380,59 +1405,44 @@ where
   /// ignores a field [`kind`](Token::kind) reads is coarser than the classification the parser
   /// sees, and this comparison is the only thing standing between that and a silent pass. It can
   /// only ever red *more*.
-  fn sig_eq(&self, other: &Self) -> bool
+  fn compare(&self, other: &Self) -> Comparison
   where
     <L::Token as Token<'inp>>::Kind: PartialEq,
     L::Token: PartialEq,
     <L::Token as Token<'inp>>::Error: PartialEq,
   {
     match (self, other) {
-      (Self::Token(a, sa), Self::Token(b, sb)) => a.kind() == b.kind() && a == b && sa == sb,
-      (Self::LexerError(sa, a), Self::LexerError(sb, b)) => sa == sb && a == b,
-      _ => false,
-    }
-  }
-
-  /// The first component of this item that fails to compare equal to **itself**, named for a
-  /// reader. `None` when every one of them is reflexive.
-  ///
-  /// This tier is where the defect was found (#295): its final leg compares the complete stream
-  /// against a final drain of the **same source**, so a payload that is not equal to itself fails
-  /// a stream against itself, and both sides of the report render identically. See
-  /// [`refuse_non_reflexive`].
-  fn non_reflexive(&self) -> Option<&'static str>
-  where
-    <L::Token as Token<'inp>>::Kind: PartialEq,
-    L::Token: PartialEq,
-    <L::Token as Token<'inp>>::Error: PartialEq,
-  {
-    match self {
-      Self::Token(tok, span) => {
-        if !self_equal(&tok.kind()) {
-          return Some("the token's `Kind`");
+      (Self::Token(a, sa), Self::Token(b, sb)) => {
+        let (ka, kb) = (a.kind(), b.kind());
+        if ka != kb {
+          return Comparison::Differs(decided_by(Decided::KIND, &ka, &kb));
         }
-        if !self_equal(tok) {
-          return Some("the token payload");
+        if sa != sb {
+          return Comparison::Differs(decided_by(Decided::SPAN, sa, sb));
         }
-        if !self_equal(span) {
-          return Some("the span");
+        if a != b {
+          return Comparison::Differs(decided_by(Decided::TOKEN_PAYLOAD, a, b));
         }
+        Comparison::Equal
       }
-      Self::LexerError(span, payload) => {
-        if !self_equal(payload) {
-          return Some("the lexer error payload");
+      (Self::LexerError(sa, a), Self::LexerError(sb, b)) => {
+        if sa != sb {
+          return Comparison::Differs(decided_by(Decided::SPAN, sa, sb));
         }
-        if !self_equal(span) {
-          return Some("the span");
+        if a != b {
+          return Comparison::Differs(decided_by(Decided::ERROR_PAYLOAD, a, b));
         }
+        Comparison::Equal
       }
+      // A committed token against a lexer error. This tier exists to catch exactly that, and no
+      // caller equality was consulted to find it — see [`Decided::Discriminant`].
+      _ => Comparison::Differs(Decided::Discriminant),
     }
-    None
   }
 
   /// A human-readable one-line rendering for panic context.
   ///
-  /// `Debug` is the right tool *here* and the wrong one in [`sig_eq`](Self::sig_eq): this text is
+  /// `Debug` is the right tool *here* and the wrong one in [`compare`](Self::compare): this text is
   /// read by a person diagnosing a failure, and nothing is decided from it.
   fn describe(&self) -> String
   where
@@ -1485,7 +1495,7 @@ type PartialLog<'inp, L> = Rc<RefCell<Vec<PartialItem<'inp, L>>>>;
 /// properties a comparison key has to have, and `Debug` has neither: it is not injective, so a
 /// payload that really does move can render identically and pass; and it is not stable, so a
 /// payload rendering an address or a counter reds on a conforming lexer. See
-/// [`PartialItem::sig_eq`] for the full argument and for what the bound on
+/// [`PartialItem::compare`] for the full argument and for what the bound on
 /// [`run_partial`](Harness::run_partial) buys.
 struct PartialRecorder<'inp, L>
 where
@@ -1742,21 +1752,21 @@ fn assert_partial_stream_eq<'inp, L>(
 {
   let n = expected.len().min(got.len());
   for i in 0..n {
-    if !expected[i].sig_eq(&got[i]) {
+    if let Comparison::Differs(decided) = expected[i].compare(&got[i]) {
       // The final leg compares the complete stream against a final drain of the SAME source, so
       // this is the site #295 arrived through. See `refuse_non_reflexive`: reached only after the
-      // comparison has already failed, so it re-labels a failure and never creates one.
+      // comparison has already failed, so it re-labels a failure and never creates one — and it
+      // is asked about the component that failed, so a divergence the discriminant settled falls
+      // straight through to the verdict below.
       let at = format!("split k={k}, position {i}");
-      for (side, item) in [("expected", &expected[i]), ("got", &got[i])] {
-        refuse_non_reflexive(
-          idx,
-          "partial-equivalence",
-          &at,
-          side,
-          item.non_reflexive(),
-          &item.describe(),
-        );
-      }
+      refuse_decided(
+        idx,
+        "partial-equivalence",
+        &at,
+        &decided,
+        &expected[i].describe(),
+        &got[i].describe(),
+      );
       panic!(
         "tokora conformance [input #{idx} partial-equivalence] split k={k}, position {i}: prefix item diverges from the complete prefix: expected {}, got {}",
         expected[i].describe(),
@@ -1790,21 +1800,23 @@ fn assert_partial_prefix_of<'inp, L>(
 {
   let n = expected.len().min(got.len());
   for i in 0..n {
-    if !expected[i].sig_eq(&got[i]) {
+    if let Comparison::Differs(decided) = expected[i].compare(&got[i]) {
       // The sibling guard to `assert_partial_stream_eq`'s. A guard at one comparison and not the
       // other is the same defect relocated: this leg compares two different drains, so a payload
       // that will not equal itself fails here too, and reads as a truncation defect.
+      //
+      // And this is the leg where the whole-item scan cost the most: an error on the truncated
+      // buffer against a token on the full one is what the panic below is *about*, and a scan
+      // that found a `NaN` on either side buried it under a refusal.
       let at = format!("split k={k}, position {i}");
-      for (side, item) in [("expected", &expected[i]), ("got", &got[i])] {
-        refuse_non_reflexive(
-          idx,
-          "partial-equivalence",
-          &at,
-          side,
-          item.non_reflexive(),
-          &item.describe(),
-        );
-      }
+      refuse_decided(
+        idx,
+        "partial-equivalence",
+        &at,
+        &decided,
+        &expected[i].describe(),
+        &got[i].describe(),
+      );
       panic!(
         "tokora conformance [input #{idx} partial-equivalence] split k={k}, position {i}: prefix item diverges from the complete prefix: expected {}, got {}. An item that is an ERROR on the truncated buffer and a TOKEN on the full one — or an error whose payload moved — was decided from bytes that had not arrived.",
         expected[i].describe(),
@@ -1847,6 +1859,132 @@ where
   value == mirror
 }
 
+/// What a verdict-drawing comparison found: the two sides agreed, or they differed and the
+/// answer says **which operation decided it**.
+///
+/// A `bool` said only *whether*. The refusal below then had to guess *why*, and the only tool it
+/// had was a scan of everything the item holds — a second question, asked of values the
+/// comparison may never have looked at. Nothing linked the two, and the gap is not academic: a
+/// committed token on one side and a lexer error on the other differ at the **discriminant**,
+/// with no caller comparison run at all, and a whole-item scan still found a `NaN` in the payload
+/// and refused. That refusal states a diagnosis the kit did not establish, over exactly the
+/// truncation nonconformance the partial tier exists to report.
+enum Comparison {
+  /// Every component the comparison consults agreed.
+  Equal,
+  /// The two sides differ, and [`Decided`] names the operation the verdict rests on.
+  Differs(Decided),
+}
+
+/// The operation a failed comparison was decided by, carrying the reflexivity question asked of
+/// **that** operation — and of nothing else — on each side.
+///
+/// The probe is computed by [`decided_by`] from the same two values the failed comparison was
+/// drawn from, on the same statement. That adjacency is the repair: a refusal can no longer speak
+/// about a component the comparison never consulted, because the only way to build one is from
+/// the comparison that ran.
+enum Decided {
+  /// The kit's own `match` on the two discriminants: a committed token on one side and a lexer
+  /// error on the other.
+  ///
+  /// **No caller comparison ran.** There is no equality behind this to be non-reflexive, so
+  /// there is nothing to refuse and the divergence is reported directly — which is right, since
+  /// an item that is an error on a truncated buffer and a token on the full one is precisely the
+  /// truncation nonconformance the partial tier is for.
+  Discriminant,
+  /// One named component's comparison decided it, and it is sound on whichever side is marked
+  /// reflexive.
+  Component {
+    /// The component, named as the refusal names it.
+    name: &'static str,
+    /// Whether the expected side's `name` compares equal to itself.
+    expected_reflexive: bool,
+    /// Whether the got side's `name` compares equal to itself.
+    got_reflexive: bool,
+  },
+}
+
+impl Decided {
+  /// ``"the token's `Kind`"`` — bounded [`Eq`], so a refusal naming it is a broken **total**
+  /// equality promise rather than the partial one a payload carries.
+  const KIND: &'static str = "the token's `Kind`";
+  /// `"the span"` — [`Lexer::Span`] is bounded `Ord`, so this too is a total promise.
+  const SPAN: &'static str = "the span";
+  /// `"the slice"` — [`Slice`] is bounded `Eq`, so this too is a total promise.
+  const SLICE: &'static str = "the slice";
+  /// `"the token payload"` — the caller's [`PartialEq`] on [`Lexer::Token`], where reflexivity is
+  /// promised by nothing. This is #295's home.
+  const TOKEN_PAYLOAD: &'static str = "the token payload";
+  /// `"the lexer error payload"` — the caller's [`PartialEq`] on [`Token::Error`], the other half
+  /// of that population.
+  const ERROR_PAYLOAD: &'static str = "the lexer error payload";
+  /// ``"the `L::State`"`` — the caller's [`PartialEq`] on [`Lexer::State`], which only the cache
+  /// tier compares.
+  const STATE: &'static str = "the `L::State`";
+
+  /// The component to refuse over on the **expected** side, and `None` when the operation that
+  /// failed is sound there — or when no caller comparison ran at all.
+  const fn expected(&self) -> Option<&'static str> {
+    match self {
+      Self::Discriminant => None,
+      Self::Component {
+        name,
+        expected_reflexive,
+        ..
+      } => {
+        if *expected_reflexive {
+          None
+        } else {
+          Some(*name)
+        }
+      }
+    }
+  }
+
+  /// [`expected`](Self::expected) on the **got** side.
+  const fn got(&self) -> Option<&'static str> {
+    match self {
+      Self::Discriminant => None,
+      Self::Component {
+        name,
+        got_reflexive,
+        ..
+      } => {
+        if *got_reflexive {
+          None
+        } else {
+          Some(*name)
+        }
+      }
+    }
+  }
+}
+
+/// One component's comparison that **failed**, together with the reflexivity question asked of
+/// that same comparison on both sides.
+///
+/// Every [`Decided::Component`] in the kit is built here, from the two values the caller has just
+/// compared, so the probe and the failure cannot be about different operations. Reached only on
+/// the failure path, so a passing comparison pays for none of it.
+fn decided_by<T>(name: &'static str, expected: &T, got: &T) -> Decided
+where
+  T: PartialEq + ?Sized,
+{
+  Decided::Component {
+    name,
+    expected_reflexive: self_equal(expected),
+    got_reflexive: self_equal(got),
+  }
+}
+
+/// Both sides' [`refuse_non_reflexive`] for one failed item comparison, asked of the operation
+/// that decided it. Shared by the four item-comparing sites so the rule cannot come to hold at
+/// one of them and not at another.
+fn refuse_decided(idx: usize, op: &str, at: &str, decided: &Decided, expected: &str, got: &str) {
+  refuse_non_reflexive(idx, op, at, "expected", decided.expected(), expected);
+  refuse_non_reflexive(idx, op, at, "got", decided.got(), got);
+}
+
 /// Refuses to draw a conformance verdict from a comparison that a value decided by failing to
 /// equal itself, and returns without a word when there is nothing to refuse.
 ///
@@ -1864,10 +2002,22 @@ where
 /// **render identically** (`NaN` and `NaN`). That was #295, and 38 corpus queries in one
 /// downstream reached it.
 ///
-/// So before a tier reports divergence it asks each side whether it is equal to itself, and a
-/// side that is not gets this refusal instead — a distinct tag, the component that will not
-/// compare, and the obligation it comes from. The kit says what it cannot check rather than
-/// naming a culprit it has not identified.
+/// So before a tier reports divergence it asks whether the **operation that decided it** is equal
+/// to itself, and a side whose is not gets this refusal instead — a distinct tag, the component
+/// that will not compare, and the obligation it comes from. The kit says what it cannot check
+/// rather than naming a culprit it has not identified.
+///
+/// # It asks about the comparison that ran, and about nothing else
+///
+/// `component` comes from [`Decided`], which every [`Comparison`] in the kit produces from the
+/// two values whose comparison failed. It is never a scan of the item, and the difference is the
+/// whole of what a scan got wrong: a scan runs afterwards and knows nothing about *why*, so a
+/// divergence settled at the **discriminant** — a committed token on one side, a lexer error on
+/// the other, no caller equality consulted at all — still turned up a `NaN` somewhere in the
+/// payload and was refused. That is a diagnosis stated without having been established, and the
+/// thing it hid is the truncation nonconformance the partial tier is built to report. A
+/// difference at the discriminant, or at a component whose comparison is sound, is therefore
+/// terminal here: this returns without a word and the ordinary verdict follows.
 ///
 /// # It can only ever re-label a failure, never create one
 ///
@@ -1911,7 +2061,7 @@ where
   ///
   /// [`Lexer::lex`] hands this back owned, so keeping it costs *less* than the pair it replaced —
   /// a `format!("{err:?}")` `String` allocated per error item, plus the kind projected out of the
-  /// token. See [`sig_eq`](Self::sig_eq) for why the value and never a rendering of it.
+  /// token. See [`compare`](Self::compare) for why the value and never a rendering of it.
   item: Result<L::Token, <L::Token as Token<'inp>>::Error>,
   /// The item's span.
   span: L::Span,
@@ -1932,13 +2082,17 @@ where
     self.item.as_ref().ok().map(Token::kind)
   }
 
-  /// Whether two items agree on discriminant, **value**, span and slice.
+  /// Whether two items agree on discriminant, **value**, span and slice — and, when they do not,
+  /// **which of those decided it**.
+  ///
+  /// The components are consulted in [`PartialItem::compare`]'s order and for its reason, with
+  /// the slice — bounded [`Eq`], another total promise — between the span and the payload.
   ///
   /// # Semantically, never by rendering
   ///
   /// This compared `format!("{err:?}")` on the error arm, and the token's
   /// [`kind`](Token::kind) alone on the token arm, until 0.10.0 — and both halves reported an
-  /// identity the kit had not checked (#269). The argument is [`PartialItem::sig_eq`]'s,
+  /// identity the kit had not checked (#269). The argument is [`PartialItem::compare`]'s,
   /// verbatim, and it had already been made there for the partial tier:
   ///
   /// - `Debug` is not **injective**, so two distinct error payloads may render identically — a
@@ -1956,59 +2110,61 @@ where
   /// The module header states check 1 as identity of the *item*, and identity of a rendering or
   /// of a projection is a weaker claim wearing that word. Value equality is the claim, which is
   /// what [`run`](Harness::run) now asks `PartialEq` for.
-  fn sig_eq(&self, other: &Self) -> bool
+  fn compare(&self, other: &Self) -> Comparison
   where
     L::Token: PartialEq,
     <L::Token as Token<'inp>>::Error: PartialEq,
   {
-    self.span == other.span
-      && self.slice == other.slice
-      && match (&self.item, &other.item) {
-        // The kind is compared as well as the token, for [`PartialItem::sig_eq`]'s reason: the
+    match (&self.item, &other.item) {
+      (Ok(a), Ok(b)) => {
+        // The kind is compared as well as the token, for [`PartialItem::compare`]'s reason: the
         // two are independent caller code, and a `PartialEq` coarser than the classification the
         // parser sees is exactly what this comparison stands between.
-        (Ok(a), Ok(b)) => a.kind() == b.kind() && a == b,
-        (Err(a), Err(b)) => a == b,
-        _ => false,
+        let (ka, kb) = (a.kind(), b.kind());
+        if ka != kb {
+          return Comparison::Differs(decided_by(Decided::KIND, &ka, &kb));
+        }
+        if let Comparison::Differs(decided) = self.compare_shared(other) {
+          return Comparison::Differs(decided);
+        }
+        if a != b {
+          return Comparison::Differs(decided_by(Decided::TOKEN_PAYLOAD, a, b));
+        }
+        Comparison::Equal
       }
+      (Err(a), Err(b)) => {
+        if let Comparison::Differs(decided) = self.compare_shared(other) {
+          return Comparison::Differs(decided);
+        }
+        if a != b {
+          return Comparison::Differs(decided_by(Decided::ERROR_PAYLOAD, a, b));
+        }
+        Comparison::Equal
+      }
+      // A token on one side and a lexer error on the other — see [`Decided::Discriminant`].
+      _ => Comparison::Differs(Decided::Discriminant),
+    }
   }
 
-  /// The first component of this item that fails to compare equal to **itself**, named for a
-  /// reader. `None` when every one of them is reflexive.
+  /// The span and the slice — the two components both arms of
+  /// [`compare`](Self::compare) share, consulted in its order and answering in its terms.
   ///
-  /// See [`refuse_non_reflexive`] for what this is read for and why.
-  fn non_reflexive(&self) -> Option<&'static str>
-  where
-    L::Token: PartialEq,
-    <L::Token as Token<'inp>>::Error: PartialEq,
-  {
-    match &self.item {
-      Ok(tok) => {
-        if !self_equal(&tok.kind()) {
-          return Some("the token's `Kind`");
-        }
-        if !self_equal(tok) {
-          return Some("the token payload");
-        }
-      }
-      Err(err) => {
-        if !self_equal(err) {
-          return Some("the lexer error payload");
-        }
-      }
+  /// Both are bounded to a *total* equality (the span is `Ord`, the slice is `Eq`), which is why
+  /// they are asked before either payload: a divergence one of them can settle is never
+  /// attributed to a `PartialEq` that promises no reflexivity.
+  fn compare_shared(&self, other: &Self) -> Comparison {
+    if self.span != other.span {
+      return Comparison::Differs(decided_by(Decided::SPAN, &self.span, &other.span));
     }
-    if !self_equal(&self.span) {
-      return Some("the span");
+    if self.slice != other.slice {
+      return Comparison::Differs(decided_by(Decided::SLICE, &self.slice, &other.slice));
     }
-    if !self_equal(&self.slice) {
-      return Some("the slice");
-    }
-    None
+    Comparison::Equal
   }
 
   /// A human-readable one-line rendering for panic context.
   ///
-  /// `Debug` is the right tool *here* and the wrong one in [`sig_eq`](Self::sig_eq): this text is
+  /// `Debug` is the right tool *here* and the wrong one in [`compare`](Self::compare): this text is
   /// read by a person diagnosing a failure, and nothing is decided from it.
   fn describe(&self) -> String {
     match &self.item {
@@ -2129,14 +2285,19 @@ where
 {
   let n = expected.len().min(got.len());
   for i in 0..n {
-    if !expected[i].sig_eq(&got[i]) {
-      // Before naming a culprit, ask whether either side is even comparable to itself. See
-      // `refuse_non_reflexive`: this is reached only once the comparison has failed, so it can
-      // re-label this failure and can never manufacture one.
+    if let Comparison::Differs(decided) = expected[i].compare(&got[i]) {
+      // Before naming a culprit, ask whether the comparison that decided this is even comparable
+      // to itself. See `refuse_non_reflexive`: reached only once the comparison has failed, so it
+      // can re-label this failure and can never manufacture one.
       let at = format!("position {i}");
-      for (side, item) in [("expected", &expected[i]), ("got", &got[i])] {
-        refuse_non_reflexive(idx, op, &at, side, item.non_reflexive(), &item.describe());
-      }
+      refuse_decided(
+        idx,
+        op,
+        &at,
+        &decided,
+        &expected[i].describe(),
+        &got[i].describe(),
+      );
       panic!(
         "tokora conformance [input #{idx} {op}] position {i}: item mismatch: expected {}, got {}",
         expected[i].describe(),
@@ -2277,20 +2438,19 @@ fn check_resume<'inp, L>(
 
       match reference.get(k + produced) {
         Some(expected) => {
-          if !expected.sig_eq(&observed) {
+          if let Comparison::Differs(decided) = expected.compare(&observed) {
             // The same guard `assert_run_eq` carries, for the same reason and under the same
-            // "only after a failed comparison" rule. See `refuse_non_reflexive`.
+            // "only after a failed comparison, and only about the comparison that failed" rule.
+            // See `refuse_non_reflexive`.
             let at = format!("resume-from k={k}, position {produced}");
-            for (side, item) in [("expected", expected), ("got", &observed)] {
-              refuse_non_reflexive(
-                idx,
-                "state-resume",
-                &at,
-                side,
-                item.non_reflexive(),
-                &item.describe(),
-              );
-            }
+            refuse_decided(
+              idx,
+              "state-resume",
+              &at,
+              &decided,
+              &expected.describe(),
+              &observed.describe(),
+            );
             panic!(
               "tokora conformance [input #{idx} state-resume] resume-from k={k}, position {produced}: resumed item diverges from the original suffix: expected {}, got {}",
               expected.describe(),
@@ -2553,27 +2713,31 @@ fn check_integration<'inp, L>(
   assert_stream_eq::<L>(idx, "nested-savepoints", &straight, &nested);
 }
 
-/// The first component of a committed `(kind, span)` pair that fails to compare equal to
-/// **itself**, named for a reader. `None` when both are reflexive.
+/// Which component of a committed `(kind, span)` pair decided a comparison of two of them, in
+/// [`Item::compare`]'s order and answering in its terms.
 ///
 /// Both components are bounded stronger than [`PartialEq`] — [`Token::Kind`] is `Eq` and
-/// [`Lexer::Span`] is `Ord` — so an answer other than `None` here means an implementation claiming
-/// a total equality it does not have. That is a *worse* caller defect than the partial one
-/// [`Item::non_reflexive`] answers for, and reporting it as a divergence of the committed stream
-/// is exactly as wrong. See [`refuse_non_reflexive`].
-fn stream_pair_non_reflexive<'inp, L>(
-  pair: &(<L::Token as Token<'inp>>::Kind, L::Span),
-) -> Option<&'static str>
+/// [`Lexer::Span`] is `Ord` — so a refusal drawn from either means an implementation claiming a
+/// total equality it does not have. That is a *worse* caller defect than the partial one a token
+/// or error payload carries, and reporting it as a divergence of the committed stream is exactly
+/// as wrong. See [`refuse_non_reflexive`].
+///
+/// The pair has no discriminant, so [`Decided::Discriminant`] cannot arise here: the two
+/// components are the whole observable, and one of them decides every failure.
+fn stream_pair_compare<'inp, L>(
+  expected: &(<L::Token as Token<'inp>>::Kind, L::Span),
+  got: &(<L::Token as Token<'inp>>::Kind, L::Span),
+) -> Comparison
 where
   L: Lexer<'inp>,
 {
-  if !self_equal(&pair.0) {
-    return Some("the token's `Kind`");
+  if expected.0 != got.0 {
+    return Comparison::Differs(decided_by(Decided::KIND, &expected.0, &got.0));
   }
-  if !self_equal(&pair.1) {
-    return Some("the span");
+  if expected.1 != got.1 {
+    return Comparison::Differs(decided_by(Decided::SPAN, &expected.1, &got.1));
   }
-  None
+  Comparison::Equal
 }
 
 /// Asserts two committed (kind, span) token streams are identical, with position context.
@@ -2587,7 +2751,7 @@ fn assert_stream_eq<'inp, L>(
 {
   let n = expected.len().min(got.len());
   for i in 0..n {
-    if expected[i] != got[i] {
+    if let Comparison::Differs(decided) = stream_pair_compare::<L>(&expected[i], &got[i]) {
       // The third member of the same population. `Token::Kind` is bounded `Eq` and `Lexer::Span`
       // is bounded `Ord`, so non-reflexivity here is a broken TOTAL-equality promise rather than
       // the partial one the token and error payloads carry — a stronger caller defect, and the
@@ -2595,16 +2759,14 @@ fn assert_stream_eq<'inp, L>(
       // the fifth is the defect relocated, and this one costs a call on a path already panicking.
       let op = format!("integration/{sched}");
       let at = format!("position {i}");
-      for (side, pair) in [("expected", &expected[i]), ("got", &got[i])] {
-        refuse_non_reflexive(
-          idx,
-          &op,
-          &at,
-          side,
-          stream_pair_non_reflexive::<L>(pair),
-          &format!("{pair:?}"),
-        );
-      }
+      refuse_decided(
+        idx,
+        &op,
+        &at,
+        &decided,
+        &format!("{:?}", expected[i]),
+        &format!("{:?}", got[i]),
+      );
       panic!(
         "tokora conformance [input #{idx} integration/{sched}] position {i}: committed token stream diverges: expected {:?}, got {:?}",
         expected[i], got[i]

@@ -266,6 +266,7 @@ use generic_arraydeque::{
 };
 use mayber::Maybe;
 
+use super::{Decided, NON_REFLEXIVE_BODY, decided_by};
 use crate::{
   Lexer, Slice, Source, Span, Window,
   cache::{
@@ -364,50 +365,105 @@ where
   (*tok.token().span_ref()).clone()
 }
 
-/// The first component of a cached entry that fails to compare equal to **itself**, named for a
-/// reader. `None` when all three are reflexive.
+/// Which third of a cached entry a comparison of two of them was decided by.
+///
+/// Each third fails with its own message and its own tag (#183), so the component the reflexivity
+/// refusal is asked about and the message the reader gets are chosen from the **same** answer.
+/// Nothing pairs them by hand.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum EntryPart {
+  /// The span — bounded `Ord`, and always reported first. See
+  /// [`assert_entry_eq`](CacheHarness::assert_entry_eq).
+  Span,
+  /// The token payload — the caller's [`PartialEq`], where reflexivity is promised by nothing.
+  Token,
+  /// The [`Lexer::State`] — likewise.
+  State,
+}
+
+impl EntryPart {
+  /// The component's name, as the refusal names it. The trait and partial tiers spell the same
+  /// three components, and both read the spelling from the same constants.
+  pub(super) const fn component(self) -> &'static str {
+    match self {
+      Self::Span => Decided::SPAN,
+      Self::Token => Decided::TOKEN_PAYLOAD,
+      Self::State => Decided::STATE,
+    }
+  }
+}
+
+/// Compares two cached entries component by component — **span first, always** — and answers with
+/// the component that decided a difference, `None` when all three agree.
 ///
 /// The cache kit's observable is the whole `(span, token, state)` triple, and two of the three are
 /// caller values the harness only asks [`PartialEq`] of — so this tier draws its verdicts from
 /// exactly the population `conformance`'s trait and partial tiers do, and needs the same guard for
-/// the same reason (#295). [`Lexer::Span`] is bounded `Ord` and so is reflexive by contract; it is
-/// scanned anyway, because a component left out of the scan is a component whose failure is
-/// reported as a cache defect.
+/// the same reason (#295). [`Lexer::Span`] is bounded `Ord` and so is reflexive by contract; it
+/// gets a probe anyway, because a component whose comparison can decide a verdict and cannot be
+/// refused is a component whose failure is reported as a cache defect.
 ///
-/// See [`refuse_non_reflexive`](CacheHarness::refuse_non_reflexive).
-fn entry_non_reflexive<'inp, L>(
-  span: &L::Span,
-  token: &L::Token,
-  state: &L::State,
-) -> Option<&'static str>
+/// What it is **not** is a scan of the entry. That was the shape the trait and partial tiers
+/// carried until the discriminant counterexample, and it answers a different question from the
+/// one the comparison asked: a permuted cache diverges at the *span*, and an entry scan that
+/// found a `NaN` in the token beside it refused, hiding a real cache defect behind a diagnosis
+/// nothing had established. See [`refuse_non_reflexive`](CacheHarness::refuse_non_reflexive) and
+/// [`Decided`].
+pub(super) fn triple_compare<'inp, L>(
+  want: (&L::Span, &L::Token, &L::State),
+  got: (&L::Span, &L::Token, &L::State),
+) -> Option<(EntryPart, Decided)>
 where
   L: Lexer<'inp>,
   L::Token: PartialEq,
   L::State: PartialEq,
 {
-  if !super::self_equal(token) {
-    return Some("the token payload");
+  if want.0 != got.0 {
+    return Some((
+      EntryPart::Span,
+      decided_by(EntryPart::Span.component(), want.0, got.0),
+    ));
   }
-  if !super::self_equal(state) {
-    return Some("the `L::State`");
+  if want.1 != got.1 {
+    return Some((
+      EntryPart::Token,
+      decided_by(EntryPart::Token.component(), want.1, got.1),
+    ));
   }
-  if !super::self_equal(span) {
-    return Some("the span");
+  if want.2 != got.2 {
+    return Some((
+      EntryPart::State,
+      decided_by(EntryPart::State.component(), want.2, got.2),
+    ));
   }
   None
 }
 
-/// [`entry_non_reflexive`] over a whole peeked run, with the position of the offending entry —
-/// what the purity laws, which compare two runs as vectors, need to say *where*.
-fn run_non_reflexive<'inp, L>(run: &[PeekedTriple<'inp, L>]) -> Option<(usize, &'static str)>
+/// [`triple_compare`] over two whole peeked runs: the **first position they actually disagree
+/// at**, and the component that decided that disagreement — what the purity laws, which compare
+/// two runs as vectors rather than entry by entry, need in order to say *where*.
+///
+/// `None` when every shared position agrees, and that includes two runs which differ only in
+/// **length**: a count is not a comparison of caller values, so there is nothing there that could
+/// fail to equal itself and nothing to refuse. A scan of one run had neither property — it
+/// answered from an entry the two runs might well agree on, at a position the divergence is not
+/// at, and it answered at all when a length settled the verdict.
+pub(super) fn runs_decided<'inp, L>(
+  first: &[PeekedTriple<'inp, L>],
+  second: &[PeekedTriple<'inp, L>],
+) -> Option<(usize, Decided)>
 where
   L: Lexer<'inp>,
   L::Token: PartialEq,
   L::State: PartialEq,
 {
-  run.iter().enumerate().find_map(|(i, entry)| {
-    entry_non_reflexive::<L>(&entry.0, &entry.1, &entry.2).map(|component| (i, component))
-  })
+  first
+    .iter()
+    .zip(second)
+    .enumerate()
+    .find_map(|(i, (a, b))| {
+      triple_compare::<L>((&a.0, &a.1, &a.2), (&b.0, &b.1, &b.2)).map(|(_, decided)| (i, decided))
+    })
 }
 
 /// The `L::State` a peeked entry carries, whichever arm of [`Maybe`] it arrived on.
@@ -1345,38 +1401,66 @@ where
        {component} of the {side} entry {rendered} is not equal to ITSELF, so the comparison that \
        just failed was decided by the value type and not by the cache, which this kit has \
        therefore not convicted of anything. {}",
-      super::NON_REFLEXIVE_BODY
+      NON_REFLEXIVE_BODY
     )
   }
 
-  /// The reflexivity guard for one entry comparison, asked of both sides.
+  /// The reflexivity guard for one entry comparison, asked of both sides about the component
+  /// [`triple_compare`] says decided it — and about no other.
   fn guard_entry(
     &self,
     site: &str,
+    decided: &Decided,
     got: (&L::Span, &L::Token, &L::State),
     want: (&L::Span, &L::Token, &L::State),
   ) {
-    for (side, (span, token, state)) in [("got", got), ("expected", want)] {
+    for (side, component, (span, token, state)) in [
+      ("got", decided.got(), got),
+      ("expected", decided.expected(), want),
+    ] {
       self.refuse_non_reflexive(
         site,
         side,
-        entry_non_reflexive::<L>(span, token, state),
+        component,
         &format!("({span:?}, {token:?}, {state:?})"),
       );
     }
   }
 
-  /// The reflexivity guard for a whole peeked run — what the purity laws, which compare two runs
-  /// as vectors rather than entry by entry, need in order to say *where*.
-  fn guard_run(&self, site: &str, side: &str, run: &[PeekedTriple<'inp, L>]) {
-    if let Some((i, component)) = run_non_reflexive::<L>(run) {
-      self.refuse_non_reflexive(
-        &format!("{site}, position {i}"),
-        side,
-        Some(component),
-        &format!("{:?}", run[i]),
-      );
-    }
+  /// The reflexivity guard for a purity comparison over two whole peeked runs — what the purity
+  /// laws, which compare two runs as vectors rather than entry by entry, need in order to say
+  /// *where*.
+  ///
+  /// The question is asked at the first position the two runs actually disagree at, about the
+  /// component that decided that disagreement, and nowhere else. Two runs that agree
+  /// position-for-position and differ only in **length** reach this and are refused nothing: see
+  /// [`runs_decided`]. Called with a pair that turns out to be equal — which the prefilled law
+  /// does, since either half of its condition can be the one that fired — it likewise says
+  /// nothing.
+  fn guard_runs(
+    &self,
+    site: &str,
+    first_label: &str,
+    first: &[PeekedTriple<'inp, L>],
+    second_label: &str,
+    second: &[PeekedTriple<'inp, L>],
+  ) {
+    let Some((i, decided)) = runs_decided::<L>(first, second) else {
+      return;
+    };
+    let at = format!("{site}, position {i}");
+    self.refuse_non_reflexive(
+      &at,
+      first_label,
+      decided.expected(),
+      &format!("{:?}", first[i]),
+    );
+    self.refuse_non_reflexive(
+      &at,
+      second_label,
+      decided.got(),
+      &format!("{:?}", second[i]),
+    );
   }
 
   /// The kit's fundamental comparison: a cached entry is the triple (span, token, state), and a
@@ -1406,32 +1490,31 @@ where
     state_note: &str,
   ) {
     let name = self.label();
-    let (got_span, got_token, got_state) = got;
+    let (_, got_token, got_state) = got;
     // Bound rather than chained: `token()` builds a `Spanned<&T, &Span>` by value, so reading
     // through it in the assertion below would borrow from a temporary that is gone by the time
     // the message is formatted.
     let want_entry = want.token();
     let want_span: &L::Span = want_entry.span_ref();
     let want_token: &L::Token = want_entry.data();
-    // Each comparison keeps its own message and its own tag, and each is now written as an `if`
-    // rather than an `assert!` so that the reflexivity guard sits on the failure path and only
-    // there. See `refuse_non_reflexive`.
-    if got_span != want_span {
-      self.guard_entry(site, got, (want_span, want_token, want.state()));
-      panic!("{span_msg}");
-    }
-    if got_token != want_token {
-      self.guard_entry(site, got, (want_span, want_token, want.state()));
-      panic!(
+    // One comparison, one answer. `triple_compare` names the component it actually compared, and
+    // the message below is chosen from the same answer — so the reflexivity guard and the verdict
+    // cannot come to speak about different operations. Each third keeps its own message and its
+    // own tag, and the guard sits on the failure path and only there. See `refuse_non_reflexive`.
+    let want_triple = (want_span, want_token, want.state());
+    let Some((part, decided)) = triple_compare::<L>(want_triple, got) else {
+      return;
+    };
+    self.guard_entry(site, &decided, got, want_triple);
+    match part {
+      EntryPart::Span => panic!("{span_msg}"),
+      EntryPart::Token => panic!(
         "tokora cache conformance [{name} entry-token] {site}: the entry at {want_span:?} is a DIFFERENT token from the one stored there — expected {want_token:?}, got {got_token:?}. A cached entry is the triple (span, token, state); a right span with someone else's token beside it is a permuted cache, not a conforming one."
-      );
-    }
-    if got_state != want.state() {
-      self.guard_entry(site, got, (want_span, want_token, want.state()));
-      panic!(
+      ),
+      EntryPart::State => panic!(
         "tokora cache conformance [{name} entry-state] {site}: the entry at {want_span:?} carries a DIFFERENT L::State from the one stored there — expected {:?}, got {got_state:?}.{state_note}",
         want.state()
-      );
+      ),
     }
   }
 
@@ -2540,8 +2623,7 @@ where
     let second = self.peeked_entries(cache);
     if second != first {
       let site = format!("pure-peek against {state}");
-      self.guard_run(&site, "first", &first);
-      self.guard_run(&site, "second", &second);
+      self.guard_runs(&site, "first", &first, "second", &second);
       panic!(
         "tokora cache conformance [{name} pure-peek] against {state}: two peeks on an unchanged cache disagreed: {first:?} then {second:?}. `peek` takes &self and must be logically pure. The comparison is over whole (span, token, state) entries, so a peek that is stable in its spans and unstable in the tokens or the states behind them disagrees here too."
       );
@@ -2585,8 +2667,13 @@ where
     let one_second: Option<PeekedTriple<'inp, L>> = self.peeked_one(cache);
     if one_second != one_first {
       let site = format!("pure-peek-one against {state}");
-      self.guard_run(&site, "first", one_first.as_slice());
-      self.guard_run(&site, "second", one_second.as_slice());
+      self.guard_runs(
+        &site,
+        "first",
+        one_first.as_slice(),
+        "second",
+        one_second.as_slice(),
+      );
       panic!(
         "tokora cache conformance [{name} pure-peek-one] against {state}: two peek_one() calls on an unchanged cache disagreed: {one_first:?} then {one_second:?}. `peek_one` takes &self and must be logically pure, exactly as `peek` must."
       );
@@ -2683,8 +2770,7 @@ where
     let second = self.peeked_entries_through::<W>(cache);
     if second != first {
       let site = format!("pure-peek/window {window} against {state}");
-      self.guard_run(&site, "first", &first);
-      self.guard_run(&site, "second", &second);
+      self.guard_runs(&site, "first", &first, "second", &second);
       panic!(
         "tokora cache conformance [{name} pure-peek/window {window}] against {state}: two peeks on an unchanged cache disagreed: {first:?} then {second:?}. `peek` takes &self and must be logically pure at every window, not only at the kit's own."
       );
@@ -2765,15 +2851,24 @@ where
     let (prefix_again, appended_again) =
       self.peeked_entries_after_prefill(cache, self.prefill(cap, depth, from));
     if prefix_again != prefix_after || appended_again != appended {
+      // Either half of the condition above can be the one that fired, so both pairs are asked and
+      // the pair that agrees says nothing — which is the component-aware rule and not a
+      // convenience: a run scanned on its own answers about an entry the two runs may agree on.
       let site = format!("pure-peek/{tag} at depth {depth} against {state}");
-      for (side, run) in [
-        ("first prefix", prefix_after.as_slice()),
-        ("second prefix", prefix_again.as_slice()),
-        ("first appended", appended.as_slice()),
-        ("second appended", appended_again.as_slice()),
-      ] {
-        self.guard_run(&site, side, run);
-      }
+      self.guard_runs(
+        &site,
+        "first prefix",
+        &prefix_after,
+        "second prefix",
+        &prefix_again,
+      );
+      self.guard_runs(
+        &site,
+        "first appended",
+        &appended,
+        "second appended",
+        &appended_again,
+      );
       panic!(
         "tokora cache conformance [{name} pure-peek/{tag} at depth {depth}] against {state}: two prefilled peeks on an unchanged cache disagreed: prefix {prefix_after:?} then {prefix_again:?}, appended {appended:?} then {appended_again:?}. `peek` takes &self and must be logically pure against every shape of buffer, not only against an empty one."
       );

@@ -1815,25 +1815,43 @@ and will red until they do.
   The obligation is unchanged and is the caller's: `run_partial`'s documentation has said since
   0.10.0 that such a type must hand-write the impl that says what equality means for it, and value
   equality is deliberate. What moves is the **diagnosis**. Every comparison any tier draws a
-  verdict from asks, once it has already failed, whether either side is equal to itself, and a
-  side that is not gets a refusal tagged `non-reflexive-payload` naming the component — the token
-  payload, the error payload, the `Kind`, the `L::State`, the span — and the obligation.
+  verdict from now answers with the **component that decided it** rather than with a `bool`, and
+  asks, once it has already failed, whether *that* operation is equal to itself; a side whose is
+  not gets a refusal tagged `non-reflexive-payload` naming the component — the token payload, the
+  error payload, the `Kind`, the `L::State`, the span, the slice — and the obligation.
+
+  **The refusal is asked about the comparison that ran, and about nothing else.** The first draft
+  of this repair answered `bool` and then scanned the whole item for a non-reflexive value, which
+  is a different question: the scan runs afterwards and knows nothing about *why*. So a divergence
+  settled at the **discriminant** — an item that is a lexer error on the truncated buffer and a
+  committed token on the full one, where no caller equality is consulted at all — still turned up
+  a `NaN` in the payload beside it and was refused, and the refusal said the kit had convicted the
+  lexer of nothing. It had: that is precisely the truncation nonconformance the partial tier
+  exists to report, and the panic one line below says so. The fix for a false red had produced a
+  false green. A difference at the discriminant, at a component bounded to a *total* equality, or
+  in item **count** is now terminal, because none of those is a partial equality that could fail
+  against itself.
 
   **The sweep is the population and not the reported site.** Six comparisons: `assert_run_eq` and
   `check_resume` in the trait tier, `assert_partial_stream_eq` and `assert_partial_prefix_of` in
   the partial tier, the committed-stream comparison in the integration tier, and the cache kit's
   entry and purity comparisons, whose observable is the `(span, token, state)` triple and which
   asks `PartialEq` of two of the three. A guard at one and not the others is the same defect one
-  relocation away. `Token::Kind` is bounded `Eq` and `Lexer::Span` is bounded `Ord`, so a failure
-  from those two is a broken *total*-equality promise rather than a partial one; both are scanned
-  anyway, because a component left out of the scan is a component whose failure is reported as a
-  defect of the thing under test.
+  relocation away — and so is a component-aware rule at one and a whole-item scan at another, so
+  all of them decide from what failed at that site. `Token::Kind` is bounded `Eq`, `Lexer::Span`
+  is bounded `Ord` and `Source::Slice` is bounded `Eq`, so a refusal drawn from any of those three
+  is a broken *total*-equality promise rather than a partial one; each still gets a probe when it
+  is the component that decided, because a component that can decide a verdict and cannot be
+  refused is a component whose failure is reported as a defect of the thing under test.
 
   **It can only ever re-label a failure, never create one.** Every guard sits on a path its own
   comparison has already taken to failure, so a reflexive value never reaches one. That is what
-  keeps the repair from trading a false red for a false green, and it is pinned by a control: a
-  genuinely non-conforming lexer over the same float payload type, never `NaN`, still reds
-  `partial-equivalence` with two distinguishable values in the message.
+  keeps the repair from trading a false red for a false green, and it is pinned by two controls
+  that pull in opposite directions: a genuinely non-conforming lexer over the same float payload
+  type, never `NaN`, still reds `partial-equivalence` with two distinguishable values in the
+  message; and a `NaN` payload that is what decided its comparison is still refused. The
+  discriminant counterexample is a third: the same truncation defect with a `NaN` error payload
+  and with a reflexive one now report identically.
 
 - **A borrowed token keeps its punctuation and pratt capabilities** (#268). `Token`,
   `IdentifierToken`, `KeywordToken` and every `LitToken` predicate forward from `T` to `&'a T`;
