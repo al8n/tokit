@@ -138,8 +138,16 @@
 //! population of honest failures. All of those are **conclusive**, and a conclusive difference
 //! outranks an inconclusive one wherever both are available: the first inconclusive difference is
 //! retained as a fallback while the search continues into the remaining components of the item,
-//! the later positions of the stream, and the item count, and it is reported only if nothing
-//! conclusive is found anywhere. `Ranking` carries that rule and the argument for it.
+//! the later positions of the stream, the item count, and — where a law is decided by two whole
+//! answers rather than by components — the second arm of the integration tier's observation and
+//! the second half of a prefilled peek's buffer. It is reported only if nothing conclusive is
+//! found anywhere. `Ranking` carries that rule and the argument for it.
+//!
+//! The search is bounded by one **verdict**, and that is the honest edge of it. Two checks under
+//! two different tags are two laws, and the kit keeps its assert-with-context posture across
+//! them: a refusal at replay identity ends the run without asking what state-resume would have
+//! said. Widening that would make the harness accumulate failures instead of stopping at the
+//! first, which is a different tool from the one this module says it is.
 //!
 //! Both halves were learned from the same failure, one direction at a time. Answering `false` and
 //! then scanning the whole item for a non-reflexive value asked a different question from the one
@@ -2251,8 +2259,9 @@ where
 }
 
 /// Both sides' [`refuse_non_reflexive`] for one failed item comparison, asked of the operation
-/// that decided it. Shared by the four item-comparing sites so the rule cannot come to hold at
-/// one of them and not at another.
+/// that decided it. Shared by every site that compares two items — no count is given, because a
+/// count in a comment is a thing that drifts and this branch has already had to correct one: the
+/// population is whichever sites call this, and calling it is the only way to reach the refusal.
 fn refuse_decided(idx: usize, op: &str, at: &str, decided: &Decided, expected: &str, got: &str) {
   refuse_component(idx, op, at, "item", decided, expected, got);
 }

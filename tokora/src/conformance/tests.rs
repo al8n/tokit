@@ -3350,8 +3350,8 @@ fn a_kind_that_does_not_equal_itself_is_diagnosed_and_not_blamed_on_the_lexer() 
 )]
 fn a_kind_that_does_not_equal_itself_is_diagnosed_at_the_committed_stream_comparison() {
   // The integration tier's comparison, reached directly: `run` rejects such a `Kind` at replay
-  // identity, three checks earlier, so nothing arrives here through the entry point. Guarding four
-  // comparisons and not the fifth would leave the same defect one relocation away.
+  // identity, three checks earlier, so nothing arrives here through the entry point. Guarding some
+  // of the comparisons and not the rest would leave the same defect one relocation away.
   let stream = [super::StreamItem::<LyingKindLexer<'_>>::Token(
     LTok,
     SimpleSpan::new(0, 1),
