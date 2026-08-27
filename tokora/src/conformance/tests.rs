@@ -5046,3 +5046,28 @@ fn a_prefilled_impurity_the_appended_run_decided_is_not_withheld_over_a_nan_in_t
     "a span settled the appended half, so there is nothing to refuse, got: {msg}"
   );
 }
+
+#[test]
+fn one_side_that_will_not_equal_itself_is_enough_to_make_a_difference_inconclusive() {
+  // Pins the AND in `Decided::is_conclusive`. Reflexivity is asked of both sides and either one
+  // failing makes the comparison unusable: `NaN != 2.0` is `false` for two reasons at once and
+  // the kit cannot tell them apart. An OR here would call position 0 conclusive, refuse over it,
+  // and withhold the ordinary divergence at position 1 — which is the finding again, reached
+  // through the one-sided case the other cells do not cover.
+  let msg = panic_message(|| {
+    super::assert_run_eq::<NanPayloadLexer<'_>>(
+      0,
+      "replay-identity",
+      &[float_item(f64::NAN, 0, 1), float_item(1.0, 1, 2)],
+      &[float_item(2.0, 0, 1), float_item(3.0, 1, 2)],
+    );
+  });
+  assert!(
+    msg.contains("[input #0 replay-identity] position 1: item mismatch: expected"),
+    "position 0 is inconclusive on one side, so position 1 is what the kit established, got: {msg}"
+  );
+  assert!(
+    !msg.contains("non-reflexive-payload"),
+    "a conclusive difference exists, so nothing is refused, got: {msg}"
+  );
+}
