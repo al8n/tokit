@@ -484,8 +484,10 @@ where
   /// One caveat that comes with value equality rather than with this kit, and it is the same one
   /// [`run_partial`](Self::run_partial) carries: a payload holding an `f64` that can be `NaN` is
   /// not equal to itself, and such a type must hand-write an impl that says what it means. Until
-  /// it does, this kit will not pretend to have checked it — it refuses, tagged
-  /// `non-reflexive-payload`, rather than reporting the lexer as non-conforming.
+  /// it does, this kit will not pretend to have checked it — where nothing conclusive outranks
+  /// that comparison it refuses, tagged `non-reflexive-payload`, rather than reporting the lexer
+  /// as non-conforming. The same holds for a `Kind`, span, slice or offset whose `Eq` or `Ord`
+  /// breaks the reflexivity those traits promise.
   ///
   /// # Panics
   ///
@@ -586,9 +588,9 @@ where
   /// or a hand-written impl where derivation is wrong.
   /// One caveat that comes with value equality rather than with this kit: a payload holding a
   /// `f64` that can be `NaN` is not equal to itself, and such a type must hand-write an impl that
-  /// says what it means. The kit does not silently accept one — a comparison it decides is
-  /// refused, tagged `non-reflexive-payload`, rather than reported as a conformance failure of
-  /// the lexer (#295).
+  /// says what it means. The kit does not silently accept one — a comparison such a value decides,
+  /// and that nothing conclusive outranks, is refused, tagged `non-reflexive-payload`, rather than
+  /// reported as a conformance failure of the lexer (#295, #324).
   ///
   /// This is where a lexer that is not faithful under truncation is caught — one whose item
   /// identity depends on input beyond what it reports having read (lookahead past a token that
