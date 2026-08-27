@@ -912,9 +912,10 @@ where
   S: Source<usize> + ?Sized + core::ops::Index<core::ops::RangeTo<usize>, Output = S>,
 {
   fn buffer(&self, _idx: usize, src: &'inp S, k: usize) -> Option<&'inp S> {
-    // No filtering: the kit asks only where `is_boundary` already said yes, and this driver's
-    // whole claim is that it narrows nothing.
-    Some(&src[..k])
+    // This driver's whole claim is that it narrows nothing, so the only `None` is the position no
+    // buffer exists at. The kit already filters those out before asking; the guard is here so that
+    // the impl is total for a caller who reaches it another way, rather than a panic on `[..k]`.
+    src.is_boundary(k).then(|| &src[..k])
   }
 }
 
@@ -3422,11 +3423,11 @@ where
   assert!(
     admissible == 0 || exercised > 0,
     "tokora conformance [input #{idx} refill-coverage] the RefillDriver admitted none of the \
-     {admissible} cut positions this source offers, so every schedule is the whole source in one \
-     sealed leg and no lexer state ever crosses a change of buffer. This input certified nothing, \
-     and the kit refuses rather than report a pass it did not earn — it is not a verdict on the \
-     lexer, which has not been convicted of anything. Widen the cut rule, or take this input out \
-     of the refill corpus."
+     {admissible} cut positions this source offers, so every leg of every schedule runs over the \
+     whole source and no lexer state ever crosses a change of buffer. This input certified \
+     nothing, and the kit refuses rather than report a pass it did not earn — it is not a verdict \
+     on the lexer, which has not been convicted of anything. Widen the cut rule, or take this \
+     input out of the refill corpus."
   );
 
   let relocated = <L::Source as Source<usize>>::REFERENT_IS_BYTES.then_some(relocated);
