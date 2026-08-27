@@ -13,7 +13,11 @@
 //! **Trait tier** — driving the [`Lexer`] surface directly:
 //!
 //! 1. **Replay identity** — two fresh `L::new(src)` runs produce the identical
-//!    token/error + span + slice sequence, to exhaustion.
+//!    token/error + span + slice sequence, to exhaustion. **Identical by value**: the whole
+//!    [`Token`], the whole [`Token::Error`], never a rendering of either and never the token's
+//!    [`kind`](Token::kind) standing in for the token. That is what
+//!    [`run`](crate::conformance::Harness::run)'s two `PartialEq` bounds buy, and what a green
+//!    from it did not mean before 0.10.0 — see `run`'s own docs for who pays.
 //! 2. **State-resume faithfulness** — for *every* position `k`, capturing the lexer
 //!    [`State`] there and resuming with
 //!    `L::with_state(src, saved)` + [`bump`](crate::Lexer::bump) to `k`'s offset
@@ -72,14 +76,16 @@
 //! refusal leaves no token behind, so a lexer that errors on a truncated prefix and tokenizes the
 //! full input showed up as "nothing yielded yet", which is a legal prefix.
 //!
-//! Both arms are compared on **value**: a token contributes its kind, its span and the **token
-//! itself**; an error contributes that it *was* an error, its span and the **payload itself**. Not
-//! a rendering — `run_partial` asks for `PartialEq` on both and compares the values, because a
-//! `Debug` string is neither injective (two payloads can render alike, so a real drift passes) nor
-//! stable (a rendering carrying an address or a counter fails on a conforming lexer). Comparing
-//! only the token's *kind* had the same shape on the other arm: a payload decided by a byte that
-//! has not arrived kept its kind and its span, so both runs passed while the value a parser
-//! callback receives changed.
+//! Both arms are compared on **value**, and this is the rule for *every* tier rather than for
+//! this one: a token contributes its kind, its span and the **token itself**; an error contributes
+//! that it *was* an error, its span and the **payload itself**. Not a rendering — both
+//! `run` and `run_partial` ask for `PartialEq` on the token and the error and compare the values,
+//! because a `Debug` string is neither injective (two payloads can render alike, so a real drift
+//! passes) nor stable (a rendering carrying an address or a counter fails on a conforming lexer).
+//! Comparing only the token's *kind* had the same shape on the other arm: a payload decided by a
+//! byte that has not arrived kept its kind and its span, so both runs passed while the value a
+//! parser callback receives changed. The trait tier held the weaker key for one release longer
+//! than the partial tier did, and that gap was #269.
 //!
 //! Nothing from the *diagnostic* channel is compared: no rendered message, no
 //! [`Severity`](crate::emitter::Severity), no label stack.
@@ -97,6 +103,18 @@
 //! A failing check is a bug in the *lexer* (or a mismatch with the documented
 //! contract), surfaced loudly. The kit never mutates the lexer's behavior; it only
 //! observes and asserts.
+//!
+//! **And it never reports a failure that is a fact about a payload type rather than about the
+//! lexer.** Value equality is drawn from caller [`PartialEq`] implementations, and `PartialEq`
+//! promises symmetry and transitivity but **not** reflexivity: a payload holding an `f64` that can
+//! be `NaN` is not equal to itself. Every comparison any tier draws a verdict from — the two in
+//! the trait tier, the two in the partial tier, the committed-stream one in the integration tier,
+//! and the entry and purity comparisons in [`cache`] — therefore asks, once it has already
+//! failed, whether either side is equal to itself. A side that is not gets a refusal tagged
+//! `non-reflexive-payload` naming the component and the obligation, instead of a conformance
+//! verdict whose expected-vs-got renders identically on both sides (#295). The obligation itself
+//! is unchanged and is the caller's: such a type hand-writes the impl that says what equality
+//! means for it.
 
 pub mod cache;
 pub mod emitter;
@@ -355,7 +373,85 @@ where
     self
   }
 
+  /// The anti-hang budget for `src`: `budget_multiple * source_units + BUDGET_FLOOR`.
+  ///
+  /// Checked, not saturating. Saturation here would hand back [`usize::MAX`], and the guards built
+  /// out of this number do not all survive that value: [`instance_ceiling`] adds one to it and
+  /// **overflows** — wrapping to a ceiling of `0` in release, which refuses every lexer on its
+  /// first attempt — and the item guards `out.len() > budget` become comparisons no `Vec` length
+  /// can satisfy. (The aggregate tally is unaffected: it derives its own `u128` ceiling from this
+  /// number rather than using it, so it would still fire.) One broken guard is enough, and a
+  /// budget that has stopped describing the source it came from is not a budget in any case.
+  /// [`MAX_BUDGET_MULTIPLE`] already bounds the multiple; this bounds the product, which on a
+  /// 32-bit target the multiple alone does not.
+  ///
+  /// # Panics
+  ///
+  /// Panics when `budget_multiple * source_units + 64` does not fit in a `usize` with room above
+  /// it for the exhaustion probe. Reaching it needs a source of more than `usize::MAX / 65536`
+  /// units — 256 TiB on a 64-bit target — so what this replaces is not a run that used to work: it
+  /// is a budget silently swapped for one the caller never asked for.
+  fn budget(&self, src: &'inp L::Source) -> usize {
+    let units = src.slice(..).map(|s| s.len()).unwrap_or(0);
+    representable_budget(self.budget_multiple, units).unwrap_or_else(|| {
+      panic!(
+        "tokora conformance: the anti-hang budget for a source of {units} units at a multiple of \
+         {} does not fit in a usize. This is a limit of the kit's arithmetic and not a verdict on \
+         the lexer, which has not been run. Lower the multiple with Harness::budget_multiple: an \
+         unrepresentable budget has to be replaced by some other number, and every replacement is \
+         wrong — usize::MAX overflows the per-instance ceiling derived from it and puts the item \
+         guards past any Vec length, and anything smaller certifies a budget you did not ask for.",
+        self.budget_multiple
+      )
+    })
+  }
+}
+
+impl<'inp, L> Harness<'inp, L>
+where
+  L: Lexer<'inp>,
+  // Semantic equality on the two values every trait-tier comparison is drawn from. These are the
+  // only bounds this entry point asks for beyond `Lexer` itself; see `run`'s own docs for who
+  // pays and what the alternatives cost, and `Item::sig_eq` for why a `Debug` rendering and a
+  // `kind` projection are each the wrong key.
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
+{
   /// Runs every check against every input, panicking on the first violation.
+  ///
+  /// # Who pays for `PartialEq`, and what a green means without it
+  ///
+  /// This asks for `L::Token: PartialEq` and `<L::Token as Token>::Error: PartialEq`. Before
+  /// 0.10.0 it asked for nothing beyond [`Lexer`], and **that is what the defect was** (#269):
+  /// check 1 is documented as identity of the item, and with no equality to call the kit
+  /// substituted the two things it could reach — the error's `Debug` rendering and the token's
+  /// [`kind`](Token::kind). Neither is an equality relation. A rendering is not injective, so two
+  /// unequal error values that print alike replayed green; it is not stable either, so a payload
+  /// rendering a counter or an address reddened a *conforming* lexer; and a kind is a projection,
+  /// so a token payload could move between two fresh runs with the kind, the span and the slice
+  /// all holding still. A certificate that says "identical" and checks something weaker is worth
+  /// less than no certificate, because the caller stops looking.
+  ///
+  /// The alternative to the bound is a caller-supplied comparator or key, and
+  /// [`run_partial`](Self::run_partial) already settled that trade for the other tier: a
+  /// hand-written projection is silently escaped by the next field added, which is the failure
+  /// mode the rendering had. The bound is the narrower obligation and the stronger guarantee.
+  ///
+  /// **What it excludes.** A vocabulary whose token or error type cannot be `PartialEq` — a
+  /// payload holding an `Arc<dyn Error>`, a closure, a handle — loses this entry point outright,
+  /// and with it the whole kit, since every tier hangs off `run` or
+  /// [`run_partial`](Self::run_partial) and the latter already required both bounds. Recovering
+  /// it costs a `#[derive(PartialEq)]`, or a hand-written impl where derivation is wrong, or a
+  /// newtype whose equality is the one the vocabulary means. Nothing about the *lexer* has to
+  /// change. There is no in-tree vocabulary among the excluded: this crate ships no concrete
+  /// [`Token`] implementation at all, and the bundled logos adapter is transparent —
+  /// `LogosLexer<T>` takes its `Token` and `Error` from the caller and constrains neither.
+  ///
+  /// One caveat that comes with value equality rather than with this kit, and it is the same one
+  /// [`run_partial`](Self::run_partial) carries: a payload holding an `f64` that can be `NaN` is
+  /// not equal to itself, and such a type must hand-write an impl that says what it means. Until
+  /// it does, this kit will not pretend to have checked it — it refuses, tagged
+  /// `non-reflexive-payload`, rather than reporting the lexer as non-conforming.
   ///
   /// # Panics
   ///
@@ -393,39 +489,6 @@ where
       check_integration::<L>(idx, src, &reference, budget);
     }
   }
-
-  /// The anti-hang budget for `src`: `budget_multiple * source_units + BUDGET_FLOOR`.
-  ///
-  /// Checked, not saturating. Saturation here would hand back [`usize::MAX`], and the guards built
-  /// out of this number do not all survive that value: [`instance_ceiling`] adds one to it and
-  /// **overflows** — wrapping to a ceiling of `0` in release, which refuses every lexer on its
-  /// first attempt — and the item guards `out.len() > budget` become comparisons no `Vec` length
-  /// can satisfy. (The aggregate tally is unaffected: it derives its own `u128` ceiling from this
-  /// number rather than using it, so it would still fire.) One broken guard is enough, and a
-  /// budget that has stopped describing the source it came from is not a budget in any case.
-  /// [`MAX_BUDGET_MULTIPLE`] already bounds the multiple; this bounds the product, which on a
-  /// 32-bit target the multiple alone does not.
-  ///
-  /// # Panics
-  ///
-  /// Panics when `budget_multiple * source_units + 64` does not fit in a `usize` with room above
-  /// it for the exhaustion probe. Reaching it needs a source of more than `usize::MAX / 65536`
-  /// units — 256 TiB on a 64-bit target — so what this replaces is not a run that used to work: it
-  /// is a budget silently swapped for one the caller never asked for.
-  fn budget(&self, src: &'inp L::Source) -> usize {
-    let units = src.slice(..).map(|s| s.len()).unwrap_or(0);
-    representable_budget(self.budget_multiple, units).unwrap_or_else(|| {
-      panic!(
-        "tokora conformance: the anti-hang budget for a source of {units} units at a multiple of \
-         {} does not fit in a usize. This is a limit of the kit's arithmetic and not a verdict on \
-         the lexer, which has not been run. Lower the multiple with Harness::budget_multiple: an \
-         unrepresentable budget has to be replaced by some other number, and every replacement is \
-         wrong — usize::MAX overflows the per-instance ceiling derived from it and puts the item \
-         guards past any Vec length, and anything smaller certifies a budget you did not ask for.",
-        self.budget_multiple
-      )
-    })
-  }
 }
 
 impl<'inp, L> Harness<'inp, L>
@@ -437,9 +500,10 @@ where
   // lexer honest truncations without a growable source.
   L::Source: core::ops::Index<core::ops::RangeTo<usize>, Output = L::Source>,
   <L::Token as Token<'inp>>::Kind: PartialEq + core::fmt::Debug,
-  // Semantic equality on the compared values, and the only two bounds this tier asks for beyond
-  // what `run` needs. See `PartialItem::sig_eq` for why a `Debug` rendering cannot stand in, and
-  // `run_partial`'s own docs for who pays.
+  // Semantic equality on the compared values. Since 0.10.0 `run` asks for these two as well, so
+  // what separates the tiers is the three above and nothing about equality. See
+  // `PartialItem::sig_eq` for why a `Debug` rendering cannot stand in, and `run_partial`'s own
+  // docs for who pays.
   L::Token: PartialEq,
   <L::Token as Token<'inp>>::Error: PartialEq,
 {
@@ -463,9 +527,10 @@ where
   ///
   /// # Who pays for `PartialEq`, and what it buys
   ///
-  /// This entry point requires `L::Token: PartialEq` and `<L::Token as Token>::Error: PartialEq`,
-  /// which [`run`](Self::run) does not. That is a deliberate choice between the two ways to compare
-  /// a value the kit does not own:
+  /// This entry point requires `L::Token: PartialEq` and `<L::Token as Token>::Error: PartialEq`.
+  /// It asked for them one release before [`run`](Self::run) did, which is why the argument is
+  /// written out here; it is a deliberate choice between the two ways to compare a value the kit
+  /// does not own:
   ///
   /// - a **bound**, as here: the caller derives `PartialEq` — one line for the overwhelming
   ///   majority of vocabularies, which are plain data — and the comparison is then *total*. Every
@@ -477,16 +542,19 @@ where
   ///   this closes. That failure mode is the one the `Debug` rendering already had.
   ///
   /// The bound is the narrower of the two obligations in practice and the stronger guarantee, so it
-  /// is what this asks for. It is also the *restricted* entry point already —
-  /// [`Offset = usize`](crate::Lexer::Offset), a prefix-sliceable source and `L::State: Clone` are
-  /// all required here and not by [`run`](Self::run) — so it is the right place to ask.
+  /// is what this asks for. What still separates this entry point from [`run`](Self::run) is
+  /// [`Offset = usize`](crate::Lexer::Offset), a prefix-sliceable source and `L::State: Clone` —
+  /// all required here and not there. Equality is no longer part of that list: `run` compared an
+  /// error's `Debug` rendering and a token's kind until 0.10.0, and reported an identity it had
+  /// not checked for it (#269), so both entry points now ask for the same two bounds.
   ///
-  /// **A vocabulary with neither** loses this tier and keeps everything else: the trait tier and
-  /// the integration tier both run from [`run`](Self::run), whose bounds are unchanged. Recovering
-  /// this tier costs a `#[derive(PartialEq)]`, or a hand-written impl where derivation is wrong.
+  /// **A vocabulary with neither** loses the kit. Recovering it costs a `#[derive(PartialEq)]`,
+  /// or a hand-written impl where derivation is wrong.
   /// One caveat that comes with value equality rather than with this kit: a payload holding a
   /// `f64` that can be `NaN` is not equal to itself, and such a type must hand-write an impl that
-  /// says what it means.
+  /// says what it means. The kit does not silently accept one — a comparison it decides is
+  /// refused, tagged `non-reflexive-payload`, rather than reported as a conformance failure of
+  /// the lexer (#295).
   ///
   /// This is where a lexer that is not faithful under truncation is caught — one whose item
   /// identity depends on input beyond what it reports having read (lookahead past a token that
@@ -1325,6 +1393,43 @@ where
     }
   }
 
+  /// The first component of this item that fails to compare equal to **itself**, named for a
+  /// reader. `None` when every one of them is reflexive.
+  ///
+  /// This tier is where the defect was found (#295): its final leg compares the complete stream
+  /// against a final drain of the **same source**, so a payload that is not equal to itself fails
+  /// a stream against itself, and both sides of the report render identically. See
+  /// [`refuse_non_reflexive`].
+  fn non_reflexive(&self) -> Option<&'static str>
+  where
+    <L::Token as Token<'inp>>::Kind: PartialEq,
+    L::Token: PartialEq,
+    <L::Token as Token<'inp>>::Error: PartialEq,
+  {
+    match self {
+      Self::Token(tok, span) => {
+        if !self_equal(&tok.kind()) {
+          return Some("the token's `Kind`");
+        }
+        if !self_equal(tok) {
+          return Some("the token payload");
+        }
+        if !self_equal(span) {
+          return Some("the span");
+        }
+      }
+      Self::LexerError(span, payload) => {
+        if !self_equal(payload) {
+          return Some("the lexer error payload");
+        }
+        if !self_equal(span) {
+          return Some("the span");
+        }
+      }
+    }
+    None
+  }
+
   /// A human-readable one-line rendering for panic context.
   ///
   /// `Debug` is the right tool *here* and the wrong one in [`sig_eq`](Self::sig_eq): this text is
@@ -1638,6 +1743,20 @@ fn assert_partial_stream_eq<'inp, L>(
   let n = expected.len().min(got.len());
   for i in 0..n {
     if !expected[i].sig_eq(&got[i]) {
+      // The final leg compares the complete stream against a final drain of the SAME source, so
+      // this is the site #295 arrived through. See `refuse_non_reflexive`: reached only after the
+      // comparison has already failed, so it re-labels a failure and never creates one.
+      let at = format!("split k={k}, position {i}");
+      for (side, item) in [("expected", &expected[i]), ("got", &got[i])] {
+        refuse_non_reflexive(
+          idx,
+          "partial-equivalence",
+          &at,
+          side,
+          item.non_reflexive(),
+          &item.describe(),
+        );
+      }
       panic!(
         "tokora conformance [input #{idx} partial-equivalence] split k={k}, position {i}: prefix item diverges from the complete prefix: expected {}, got {}",
         expected[i].describe(),
@@ -1672,6 +1791,20 @@ fn assert_partial_prefix_of<'inp, L>(
   let n = expected.len().min(got.len());
   for i in 0..n {
     if !expected[i].sig_eq(&got[i]) {
+      // The sibling guard to `assert_partial_stream_eq`'s. A guard at one comparison and not the
+      // other is the same defect relocated: this leg compares two different drains, so a payload
+      // that will not equal itself fails here too, and reads as a truncation defect.
+      let at = format!("split k={k}, position {i}");
+      for (side, item) in [("expected", &expected[i]), ("got", &got[i])] {
+        refuse_non_reflexive(
+          idx,
+          "partial-equivalence",
+          &at,
+          side,
+          item.non_reflexive(),
+          &item.describe(),
+        );
+      }
       panic!(
         "tokora conformance [input #{idx} partial-equivalence] split k={k}, position {i}: prefix item diverges from the complete prefix: expected {}, got {}. An item that is an ERROR on the truncated buffer and a TOKEN on the full one — or an error whose payload moved — was decided from bytes that had not arrived.",
         expected[i].describe(),
@@ -1688,18 +1821,98 @@ fn assert_partial_prefix_of<'inp, L>(
   }
 }
 
+/// The second half of every `non-reflexive-payload` refusal, shared by the trait/partial tiers
+/// here and by the cache kit in [`cache`] so that the two cannot drift apart on what the
+/// diagnosis means or on what it asks the caller to do about it.
+const NON_REFLEXIVE_BODY: &str = "`PartialEq` is partial: it promises symmetry and transitivity, \
+   never reflexivity, and a payload holding an `f64` that can be `NaN` is the case that reaches \
+   this kit. Such a type must hand-write the impl that says what equality means for it — \
+   `Harness::run_partial`'s documentation has carried that obligation since the value comparison \
+   landed. Until it does, this kit cannot tell a value that will not compare from an \
+   implementation that diverges, and the failure it would otherwise report renders expected and \
+   got identically.";
+
+/// Whether `value` compares equal to **itself**.
+///
+/// Written as a call rather than as `value == value` because the two read as opposites: the
+/// operator form is a tautology — `clippy::eq_op` refuses it, and rightly, in the code this kit is
+/// made of — while here the answer really can be `false`. [`PartialEq`] is *partial*, and it
+/// promises symmetry and transitivity and **not** reflexivity; a payload holding an `f64` that can
+/// be `NaN` is the case that reaches this kit.
+fn self_equal<T>(value: &T) -> bool
+where
+  T: PartialEq + ?Sized,
+{
+  let mirror = value;
+  value == mirror
+}
+
+/// Refuses to draw a conformance verdict from a comparison that a value decided by failing to
+/// equal itself, and returns without a word when there is nothing to refuse.
+///
+/// # Why the kit refuses instead of reporting the failure it found
+///
+/// Every tier here decides pass/fail with `PartialEq` on values it does not own — the token, the
+/// lexer's error payload, and in the cache kit the lexer state. Reflexivity is the one law of an
+/// equivalence relation that `PartialEq` does not promise, and when a payload breaks it the
+/// comparison fails for a reason that is a **fact about the payload type** and not about the
+/// lexer, the cache or the input layer under test.
+///
+/// The failure that produced is not merely mislabelled, it is unreadable: a final partial drain
+/// compares a stream against itself, so `expected` and `got` are the same item, and the
+/// `partial-equivalence` panic hands the consumer a red accusing their lexer with two values that
+/// **render identically** (`NaN` and `NaN`). That was #295, and 38 corpus queries in one
+/// downstream reached it.
+///
+/// So before a tier reports divergence it asks each side whether it is equal to itself, and a
+/// side that is not gets this refusal instead — a distinct tag, the component that will not
+/// compare, and the obligation it comes from. The kit says what it cannot check rather than
+/// naming a culprit it has not identified.
+///
+/// # It can only ever re-label a failure, never create one
+///
+/// Every call site reaches this **after** its own comparison has already failed, so a run that
+/// passes cannot be turned red by it and a run this refuses was already going to be reported as a
+/// failure. That is what keeps the repair from trading a false red for a false green: a
+/// genuinely non-conforming lexer whose payloads *are* reflexive never reaches this line and
+/// still fails the ordinary way, with the ordinary tag.
+///
+/// # This is not a relaxation of the contract
+///
+/// The obligation predates the report: [`Harness::run_partial`]'s documentation has said since
+/// 0.10.0 that a payload holding a `NaN`-capable `f64` must hand-write the impl that says what
+/// equality means for it. Nothing here excuses that. What changes is the *diagnosis* — the kit
+/// stops calling an unmet obligation a lexer defect.
+fn refuse_non_reflexive(
+  idx: usize,
+  op: &str,
+  at: &str,
+  side: &str,
+  component: Option<&'static str>,
+  rendered: &str,
+) {
+  let Some(component) = component else {
+    return;
+  };
+  panic!(
+    "tokora conformance [input #{idx} non-reflexive-payload] {op} {at}: INCONCLUSIVE — \
+     {component} of the {side} item {rendered} is not equal to ITSELF, so the comparison that \
+     just failed was decided by the payload type and not by the lexer, which this kit has \
+     therefore not convicted of anything. {NON_REFLEXIVE_BODY}"
+  )
+}
+
 /// One observed lexer item, captured with everything the checks compare or resume from.
 struct Item<'inp, L>
 where
   L: Lexer<'inp>,
 {
-  /// `true` if the item was an [`Err`], `false` for a token.
-  is_error: bool,
-  /// The token kind (for a token) or `None` (for an error).
-  kind: Option<<L::Token as Token<'inp>>::Kind>,
-  /// The error's `Debug` rendering (for an error) or empty (for a token). `Token::Error`
-  /// is only `Debug`, not `PartialEq`, so its `Debug` string is the comparison key.
-  err_dbg: String,
+  /// The item **itself**, by value: the token the lexer yielded or the error it raised.
+  ///
+  /// [`Lexer::lex`] hands this back owned, so keeping it costs *less* than the pair it replaced —
+  /// a `format!("{err:?}")` `String` allocated per error item, plus the kind projected out of the
+  /// token. See [`sig_eq`](Self::sig_eq) for why the value and never a rendering of it.
+  item: Result<L::Token, <L::Token as Token<'inp>>::Error>,
   /// The item's span.
   span: L::Span,
   /// The item's slice.
@@ -1714,21 +1927,99 @@ impl<'inp, L> Item<'inp, L>
 where
   L: Lexer<'inp>,
 {
-  /// Whether two items agree on discriminant, kind/error, span, and slice.
-  fn sig_eq(&self, other: &Self) -> bool {
-    self.is_error == other.is_error
-      && self.kind == other.kind
-      && self.err_dbg == other.err_dbg
-      && self.span == other.span
+  /// The token kind (for a token) or `None` (for an error).
+  fn kind(&self) -> Option<<L::Token as Token<'inp>>::Kind> {
+    self.item.as_ref().ok().map(Token::kind)
+  }
+
+  /// Whether two items agree on discriminant, **value**, span and slice.
+  ///
+  /// # Semantically, never by rendering
+  ///
+  /// This compared `format!("{err:?}")` on the error arm, and the token's
+  /// [`kind`](Token::kind) alone on the token arm, until 0.10.0 — and both halves reported an
+  /// identity the kit had not checked (#269). The argument is [`PartialItem::sig_eq`]'s,
+  /// verbatim, and it had already been made there for the partial tier:
+  ///
+  /// - `Debug` is not **injective**, so two distinct error payloads may render identically — a
+  ///   hand-written `Debug` printing one label for a family of variants is legal and not rare —
+  ///   and then a lexer whose error *value* changes between two fresh runs passes replay
+  ///   identity.
+  /// - `Debug` is not **stable**, so a rendering carrying an address, a counter or any other
+  ///   incidental differs between the two separately constructed lexers and reds a **conforming**
+  ///   one. Both directions have in-tree cells; a rendering is the wrong key in each of them, and
+  ///   no amount of care with the rendering fixes both, because they run in opposite directions.
+  /// - the token arm compared only the kind, so a payload that moved between two fresh runs kept
+  ///   its kind, its span and its slice — everything this looked at — while the value a parser
+  ///   callback receives changed.
+  ///
+  /// The module header states check 1 as identity of the *item*, and identity of a rendering or
+  /// of a projection is a weaker claim wearing that word. Value equality is the claim, which is
+  /// what [`run`](Harness::run) now asks `PartialEq` for.
+  fn sig_eq(&self, other: &Self) -> bool
+  where
+    L::Token: PartialEq,
+    <L::Token as Token<'inp>>::Error: PartialEq,
+  {
+    self.span == other.span
       && self.slice == other.slice
+      && match (&self.item, &other.item) {
+        // The kind is compared as well as the token, for [`PartialItem::sig_eq`]'s reason: the
+        // two are independent caller code, and a `PartialEq` coarser than the classification the
+        // parser sees is exactly what this comparison stands between.
+        (Ok(a), Ok(b)) => a.kind() == b.kind() && a == b,
+        (Err(a), Err(b)) => a == b,
+        _ => false,
+      }
+  }
+
+  /// The first component of this item that fails to compare equal to **itself**, named for a
+  /// reader. `None` when every one of them is reflexive.
+  ///
+  /// See [`refuse_non_reflexive`] for what this is read for and why.
+  fn non_reflexive(&self) -> Option<&'static str>
+  where
+    L::Token: PartialEq,
+    <L::Token as Token<'inp>>::Error: PartialEq,
+  {
+    match &self.item {
+      Ok(tok) => {
+        if !self_equal(&tok.kind()) {
+          return Some("the token's `Kind`");
+        }
+        if !self_equal(tok) {
+          return Some("the token payload");
+        }
+      }
+      Err(err) => {
+        if !self_equal(err) {
+          return Some("the lexer error payload");
+        }
+      }
+    }
+    if !self_equal(&self.span) {
+      return Some("the span");
+    }
+    if !self_equal(&self.slice) {
+      return Some("the slice");
+    }
+    None
   }
 
   /// A human-readable one-line rendering for panic context.
+  ///
+  /// `Debug` is the right tool *here* and the wrong one in [`sig_eq`](Self::sig_eq): this text is
+  /// read by a person diagnosing a failure, and nothing is decided from it.
   fn describe(&self) -> String {
-    format!(
-      "{{ error={}, kind={:?}, err={:?}, span={:?}, slice={:?} }}",
-      self.is_error, self.kind, self.err_dbg, self.span, self.slice
-    )
+    match &self.item {
+      Ok(tok) => format!(
+        "token {:?}@{:?} (payload {tok:?}, slice {:?})",
+        tok.kind(),
+        self.span,
+        self.slice
+      ),
+      Err(err) => format!("lexer error {err:?}@{:?} (slice {:?})", self.span, self.slice),
+    }
   }
 }
 
@@ -1814,14 +2105,8 @@ where
       );
     }
 
-    let (is_error, kind, err_dbg) = match res {
-      Ok(tok) => (false, Some(tok.kind()), String::new()),
-      Err(err) => (true, None, format!("{err:?}")),
-    };
     out.push(Item {
-      is_error,
-      kind,
-      err_dbg,
+      item: res,
       span,
       slice,
       end,
@@ -1836,10 +2121,19 @@ where
 fn assert_run_eq<'inp, L>(idx: usize, op: &str, expected: &[Item<'inp, L>], got: &[Item<'inp, L>])
 where
   L: Lexer<'inp>,
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
 {
   let n = expected.len().min(got.len());
   for i in 0..n {
     if !expected[i].sig_eq(&got[i]) {
+      // Before naming a culprit, ask whether either side is even comparable to itself. See
+      // `refuse_non_reflexive`: this is reached only once the comparison has failed, so it can
+      // re-label this failure and can never manufacture one.
+      let at = format!("position {i}");
+      for (side, item) in [("expected", &expected[i]), ("got", &got[i])] {
+        refuse_non_reflexive(idx, op, &at, side, item.non_reflexive(), &item.describe());
+      }
       panic!(
         "tokora conformance [input #{idx} {op}] position {i}: item mismatch: expected {}, got {}",
         expected[i].describe(),
@@ -1944,6 +2238,8 @@ fn check_resume<'inp, L>(
   budget: usize,
 ) where
   L: Lexer<'inp>,
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
 {
   for k in 0..=reference.len() {
     // The resume point before item k: for k == 0 the initial state at offset 0, else
@@ -1967,15 +2263,9 @@ fn check_resume<'inp, L>(
       let Some(res) = resumed.lex() else { break };
       let span = resumed.span();
       let slice = resumed.slice();
-      let (is_error, kind, err_dbg) = match res {
-        Ok(tok) => (false, Some(tok.kind()), String::new()),
-        Err(err) => (true, None, format!("{err:?}")),
-      };
       let end = span.end_ref().clone();
       let observed = Item::<L> {
-        is_error,
-        kind,
-        err_dbg,
+        item: res,
         span,
         slice,
         end,
@@ -1985,6 +2275,19 @@ fn check_resume<'inp, L>(
       match reference.get(k + produced) {
         Some(expected) => {
           if !expected.sig_eq(&observed) {
+            // The same guard `assert_run_eq` carries, for the same reason and under the same
+            // "only after a failed comparison" rule. See `refuse_non_reflexive`.
+            let at = format!("resume-from k={k}, position {produced}");
+            for (side, item) in [("expected", expected), ("got", &observed)] {
+              refuse_non_reflexive(
+                idx,
+                "state-resume",
+                &at,
+                side,
+                item.non_reflexive(),
+                &item.describe(),
+              );
+            }
             panic!(
               "tokora conformance [input #{idx} state-resume] resume-from k={k}, position {produced}: resumed item diverges from the original suffix: expected {}, got {}",
               expected.describe(),
@@ -2151,7 +2454,7 @@ fn check_integration<'inp, L>(
   // (errors are skipped by `next()`, so filter the reference to its Ok items).
   let raw_tokens: Vec<(<L::Token as Token<'inp>>::Kind, L::Span)> = reference
     .iter()
-    .filter_map(|it| it.kind.map(|k| (k, it.span.clone())))
+    .filter_map(|it| it.kind().map(|k| (k, it.span.clone())))
     .collect();
   assert_stream_eq::<L>(idx, "raw-lex-vs-next", &raw_tokens, &straight);
 
@@ -2247,6 +2550,29 @@ fn check_integration<'inp, L>(
   assert_stream_eq::<L>(idx, "nested-savepoints", &straight, &nested);
 }
 
+/// The first component of a committed `(kind, span)` pair that fails to compare equal to
+/// **itself**, named for a reader. `None` when both are reflexive.
+///
+/// Both components are bounded stronger than [`PartialEq`] — [`Token::Kind`] is `Eq` and
+/// [`Lexer::Span`] is `Ord` — so an answer other than `None` here means an implementation claiming
+/// a total equality it does not have. That is a *worse* caller defect than the partial one
+/// [`Item::non_reflexive`] answers for, and reporting it as a divergence of the committed stream
+/// is exactly as wrong. See [`refuse_non_reflexive`].
+fn stream_pair_non_reflexive<'inp, L>(
+  pair: &(<L::Token as Token<'inp>>::Kind, L::Span),
+) -> Option<&'static str>
+where
+  L: Lexer<'inp>,
+{
+  if !self_equal(&pair.0) {
+    return Some("the token's `Kind`");
+  }
+  if !self_equal(&pair.1) {
+    return Some("the span");
+  }
+  None
+}
+
 /// Asserts two committed (kind, span) token streams are identical, with position context.
 fn assert_stream_eq<'inp, L>(
   idx: usize,
@@ -2259,6 +2585,23 @@ fn assert_stream_eq<'inp, L>(
   let n = expected.len().min(got.len());
   for i in 0..n {
     if expected[i] != got[i] {
+      // The third member of the same population. `Token::Kind` is bounded `Eq` and `Lexer::Span`
+      // is bounded `Ord`, so non-reflexivity here is a broken TOTAL-equality promise rather than
+      // the partial one the token and error payloads carry — a stronger caller defect, and the
+      // same wrong verdict to report as a stream divergence. Guarding four comparisons and not
+      // the fifth is the defect relocated, and this one costs a call on a path already panicking.
+      let op = format!("integration/{sched}");
+      let at = format!("position {i}");
+      for (side, pair) in [("expected", &expected[i]), ("got", &got[i])] {
+        refuse_non_reflexive(
+          idx,
+          &op,
+          &at,
+          side,
+          stream_pair_non_reflexive::<L>(pair),
+          &format!("{pair:?}"),
+        );
+      }
       panic!(
         "tokora conformance [input #{idx} integration/{sched}] position {i}: committed token stream diverges: expected {:?}, got {:?}",
         expected[i], got[i]

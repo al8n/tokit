@@ -2727,3 +2727,588 @@ mod recorded_value {
     Harness::<HonestLexer<'_>>::over(["1.5", "1.", "12 34", "1.5 2.5"]).run_partial();
   }
 }
+
+// ── #269: the trait tier compares the ITEM, and a rendering is not the item ─────────────
+//
+// Three cells over the two comparisons `run` draws a verdict from, plus the conforming-lexer
+// control that the rendering key reddened. The partial tier already had this repair and its own
+// three cells (`a_colliding_debug_...`, `an_unstable_debug_...`, `a_token_payload_that_changes_...`
+// above); these are the same defects one tier over, where they survived a release longer.
+
+/// Which `Collide` variant the next fresh construction hands out. Flipped by `new` alone, so two
+/// *fresh* runs alternate while a `with_state` resume reproduces the run it was captured from —
+/// which isolates the replay comparison from the resume one.
+static ALT_FLIP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// A lexer's choice, carried in `L::State` so a resume inherits it rather than re-flipping.
+#[derive(Clone, Copy, Debug)]
+struct AltChoice(bool);
+
+impl crate::State for AltChoice {
+  type Error = Infallible;
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+}
+
+/// The first item is always an error and *which* error alternates between fresh constructions.
+/// Spans, slices, kinds, item count and the error-vs-token discriminant are all held constant, so
+/// the only thing that moves is the payload — and `Collide`'s `Debug` renders both as `LexError`.
+struct AltErrLexer<'a> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: AltChoice,
+}
+
+impl<'a> Lexer<'a> for AltErrLexer<'a> {
+  type State = AltChoice;
+  type Source = str;
+  type Token = CTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    let pick = ALT_FLIP.fetch_xor(true, core::sync::atomic::Ordering::Relaxed);
+    Self { src, start: 0, end: 0, state: AltChoice(pick) }
+  }
+  fn with_state(src: &'a str, state: AltChoice) -> Self {
+    Self { src, start: 0, end: 0, state }
+  }
+  fn check(&self) -> Result<(), Collide> {
+    Ok(())
+  }
+  fn state(&self) -> &AltChoice {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut AltChoice {
+    &mut self.state
+  }
+  fn into_state(self) -> AltChoice {
+    self.state
+  }
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<CTok, Collide>> {
+    self.start = self.end;
+    if self.start >= self.src.len() {
+      return None;
+    }
+    self.end = boundary_after(self.src, self.start);
+    if self.start == 0 {
+      return Some(Err(if self.state.0 { Collide::Junk } else { Collide::Cut }));
+    }
+    Some(Ok(CTok))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+#[test]
+#[should_panic(expected = "replay-identity] position 0: item mismatch: expected lexer error")]
+fn an_error_value_that_changes_between_fresh_runs_is_falsified() {
+  ALT_FLIP.store(false, core::sync::atomic::Ordering::Relaxed);
+  // The observation the check has to make, made directly first: the two public error VALUES
+  // differ and their `Debug` renderings do not. `run()` compared the rendering and passed (#269).
+  let ea = AltErrLexer::new("ab").lex().unwrap().unwrap_err();
+  let eb = AltErrLexer::new("ab").lex().unwrap().unwrap_err();
+  assert_ne!(ea, eb);
+  assert_eq!(format!("{ea:?}"), format!("{eb:?}"));
+
+  ALT_FLIP.store(false, core::sync::atomic::Ordering::Relaxed);
+  Harness::<AltErrLexer<'_>>::new("ab").run();
+}
+
+#[test]
+fn a_conforming_lexer_with_an_unstable_debug_passes_run() {
+  // The other direction, and the reason correcting the docs to describe rendering-equality would
+  // not have been a fix either: `TickingErrLexer` is conforming in every respect the contract
+  // names, and its payload's `Debug` never renders the same way twice. Comparing the rendering
+  // reddened it — `expected err="junk#0", got err="junk#1"` — on a lexer with no defect at all.
+  Harness::<TickingErrLexer<'_>>::over(["a?b", "??", "?", ""]).run();
+}
+
+/// Which token payload the next fresh construction hands out; the token twin of [`ALT_FLIP`].
+static ALT_TOK_FLIP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// [`AltErrLexer`]'s defect on the token arm: same kind, same span, same slice, same item count,
+/// and a **payload** that alternates between fresh runs. Nothing the trait tier used to compare
+/// moves, so this passed `run()` for the third reason the kind projection is not the token.
+struct AltTokLexer<'a> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: AltChoice,
+}
+
+impl<'a> Lexer<'a> for AltTokLexer<'a> {
+  type State = AltChoice;
+  type Source = str;
+  type Token = VTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    let pick = ALT_TOK_FLIP.fetch_xor(true, core::sync::atomic::Ordering::Relaxed);
+    Self { src, start: 0, end: 0, state: AltChoice(pick) }
+  }
+  fn with_state(src: &'a str, state: AltChoice) -> Self {
+    Self { src, start: 0, end: 0, state }
+  }
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+  fn state(&self) -> &AltChoice {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut AltChoice {
+    &mut self.state
+  }
+  fn into_state(self) -> AltChoice {
+    self.state
+  }
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<VTok, Infallible>> {
+    self.start = self.end;
+    if self.start >= self.src.len() {
+      return None;
+    }
+    self.end = boundary_after(self.src, self.start);
+    Some(Ok(VTok(u8::from(self.state.0))))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+#[test]
+#[should_panic(expected = "replay-identity] position 0: item mismatch: expected token VKind")]
+fn a_token_payload_that_changes_between_fresh_runs_is_falsified() {
+  ALT_TOK_FLIP.store(false, core::sync::atomic::Ordering::Relaxed);
+  Harness::<AltTokLexer<'_>>::new("ab").run();
+}
+
+/// Conforming under two fresh `new`s and **not** under a resume: `with_state` flips the choice,
+/// so the suffix a restore reproduces carries the other `Collide` variant at the same span and
+/// slice. Isolates `check_resume`'s comparison from `assert_run_eq`'s — replay identity passes.
+struct ResumeDriftErrLexer<'a> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: AltChoice,
+}
+
+impl<'a> Lexer<'a> for ResumeDriftErrLexer<'a> {
+  type State = AltChoice;
+  type Source = str;
+  type Token = CTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self { src, start: 0, end: 0, state: AltChoice(false) }
+  }
+  fn with_state(src: &'a str, _state: AltChoice) -> Self {
+    // The defect: a rebuilt lexer decides the error differently from the one that saved the state.
+    Self { src, start: 0, end: 0, state: AltChoice(true) }
+  }
+  fn check(&self) -> Result<(), Collide> {
+    Ok(())
+  }
+  fn state(&self) -> &AltChoice {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut AltChoice {
+    &mut self.state
+  }
+  fn into_state(self) -> AltChoice {
+    self.state
+  }
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<CTok, Collide>> {
+    self.start = self.end;
+    if self.start >= self.src.len() {
+      return None;
+    }
+    self.end = boundary_after(self.src, self.start);
+    if self.start == 0 {
+      return Some(Err(if self.state.0 { Collide::Junk } else { Collide::Cut }));
+    }
+    Some(Ok(CTok))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+#[test]
+#[should_panic(expected = "state-resume] resume-from k=0, position 0: resumed item diverges")]
+fn a_resumed_error_value_that_moved_is_falsified() {
+  // Check 1 passes here — both fresh runs say `Cut` — so this reds `check_resume`'s comparison
+  // and only that one. Prefix replay is the assumption the whole input layer rests on.
+  Harness::<ResumeDriftErrLexer<'_>>::over(["ab"]).run();
+}
+
+// ── #295: a payload that will not equal itself is not a lexer defect ────────────────────
+//
+// One cell per comparison the sweep guarded, the two controls that say the guard has not traded
+// a false red for a false green, and the direct-call cells for the two comparisons an earlier
+// check reaches first. Every guard sits on a path that has ALREADY failed its comparison, so a
+// reflexive payload can never reach one — which is what makes the controls structural rather
+// than lucky.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct FKind;
+
+impl core::fmt::Display for FKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str("f")
+  }
+}
+
+/// A payload holding an `f64`. Its derived `PartialEq` is **non-reflexive** exactly when the float
+/// is `NaN` — the case 38 pql corpus queries reached — and reflexive at every other value, which
+/// is what lets the control differ from the plant in one thing only.
+#[derive(Clone, Debug, PartialEq)]
+struct FTok(f64);
+
+impl Token<'_> for FTok {
+  type Kind = FKind;
+  type Error = Infallible;
+
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
+
+  fn kind(&self) -> FKind {
+    FKind
+  }
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// `NaN` for `n`, the byte's own value otherwise.
+fn float_of(b: u8) -> f64 {
+  if b == b'n' { f64::NAN } else { f64::from(b) }
+}
+
+/// [`ValueLexer`] over a float payload, at the same two modes: `OWN_BYTE` is conforming and
+/// `LAST_BYTE` reads the payload off the end of the buffer.
+struct FloatLexer<'a, const MODE: u8> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: (),
+}
+
+impl<'a, const MODE: u8> Lexer<'a> for FloatLexer<'a, MODE> {
+  type State = ();
+  type Source = str;
+  type Token = FTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self { src, start: 0, end: 0, state: () }
+  }
+  fn with_state(src: &'a str, state: ()) -> Self {
+    Self { src, start: 0, end: 0, state }
+  }
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+  fn state(&self) -> &() {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut () {
+    &mut self.state
+  }
+  fn into_state(self) {}
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<FTok, Infallible>> {
+    self.start = self.end;
+    if self.start >= self.src.len() {
+      return None;
+    }
+    self.end = boundary_after(self.src, self.start);
+    let bytes = self.src.as_bytes();
+    let byte = match MODE {
+      OWN_BYTE => bytes[self.start],
+      _ => *bytes.last().expect("the source is non-empty here"),
+    };
+    Some(Ok(FTok(float_of(byte))))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+type NanPayloadLexer<'a> = FloatLexer<'a, OWN_BYTE>;
+type DriftingFloatLexer<'a> = FloatLexer<'a, LAST_BYTE>;
+
+#[test]
+#[should_panic(
+  expected = "non-reflexive-payload] partial-equivalence split k=18446744073709551615, position 0: INCONCLUSIVE — the token payload"
+)]
+fn a_nan_payload_is_diagnosed_and_not_blamed_on_the_lexer() {
+  // The filed case. The final leg compares the complete stream against a final drain of the SAME
+  // source, so before this it reported `partial-equivalence` — a red accusing the lexer, with
+  // `expected token FKind@0..1 (payload FTok(NaN)), got token FKind@0..1 (payload FTok(NaN))`:
+  // two things that render identically.
+  Harness::<NanPayloadLexer<'_>>::over(["n"]).run_partial();
+}
+
+#[test]
+#[should_panic(
+  expected = "non-reflexive-payload] replay-identity position 0: INCONCLUSIVE — the token payload"
+)]
+fn a_nan_payload_is_diagnosed_in_the_trait_tier_too() {
+  // The trait tier compared a `kind` and a `Debug` string, so a `NaN` payload was invisible to it
+  // and this was green. #269's repair is what puts the value in front of a comparison here — the
+  // guard has to arrive with it, or the repair introduces the defect one tier over.
+  Harness::<NanPayloadLexer<'_>>::over(["n"]).run();
+}
+
+#[test]
+#[should_panic(
+  expected = "non-reflexive-payload] state-resume resume-from k=0, position 0: INCONCLUSIVE — the token payload"
+)]
+fn a_nan_payload_is_diagnosed_at_the_resume_comparison() {
+  // `check_resume`'s comparison, reached directly because `run` runs replay identity first and a
+  // non-reflexive payload reds every comparison it reaches — so no lexer can arrive here through
+  // the entry point. A guard that is unreachable through one order of checks is still a guard:
+  // reachability is an argument about check ORDER, not a bound.
+  let budget = 8 * "n".len() + 64;
+  let reference = super::lex_run::<NanPayloadLexer<'_>>(0, "n", budget);
+  super::check_resume::<NanPayloadLexer<'_>>(0, "n", &reference, budget);
+}
+
+#[test]
+#[should_panic(
+  expected = "non-reflexive-payload] partial-equivalence split k=1, position 0: INCONCLUSIVE — the token payload"
+)]
+fn a_nan_payload_is_diagnosed_at_the_prefix_comparison() {
+  // `assert_partial_prefix_of`'s comparison, reached directly for `check_resume`'s reason: the
+  // final leg runs before the split loop and fires first.
+  use super::PartialItem;
+  let nan = || PartialItem::<NanPayloadLexer<'_>>::Token(FTok(f64::NAN), SimpleSpan::new(0, 1));
+  super::assert_partial_prefix_of::<NanPayloadLexer<'_>>(0, 1, &[nan()], &[nan()]);
+}
+
+#[test]
+fn a_reflexive_payload_of_the_same_type_still_fails_the_ordinary_way() {
+  // THE CONTROL, and the whole point of it: same payload type, same lexer shape, same source
+  // length, genuinely non-conforming — its payload is read off the end of the buffer — and never
+  // `NaN`. It must still red `partial-equivalence`, or the repair has traded a false red for a
+  // false green. It is structural rather than lucky: every guard sits on a path a failed
+  // comparison has already taken, and a reflexive value never fails against itself.
+  let panicked = std::panic::catch_unwind(|| {
+    Harness::<DriftingFloatLexer<'_>>::over(["abz"]).run_partial();
+  })
+  .unwrap_err();
+  let msg = panicked
+    .downcast_ref::<String>()
+    .expect("the kit panics with a formatted message");
+  assert!(
+    msg.contains("partial-equivalence] split k=2, position 0: prefix item diverges"),
+    "the control must keep the ORDINARY tag, got: {msg}"
+  );
+  assert!(
+    !msg.contains("non-reflexive-payload"),
+    "the control must not be re-labelled as a payload problem, got: {msg}"
+  );
+  // And expected-vs-got must be two distinguishable values, unlike the NaN cell's.
+  assert!(msg.contains("FTok(122.0)") && msg.contains("FTok(98.0)"), "{msg}");
+}
+
+#[test]
+fn a_conforming_lexer_over_the_same_float_payload_passes_both_tiers() {
+  // The positive control: the payload TYPE is not what any of this rejects.
+  Harness::<NanPayloadLexer<'_>>::over(["ab", "a", ""]).run();
+  Harness::<NanPayloadLexer<'_>>::over(["ab", "a", ""]).run_partial();
+}
+
+/// A `Kind` that claims `Eq` and answers `false` to every comparison, itself included.
+///
+/// `Token::Kind` is bounded `Eq`, so this is a **broken total-equality promise** rather than the
+/// partial one a token or error payload carries — a stronger caller defect, and exactly as wrong
+/// to report as a stream divergence. It stands in for the whole `Eq`/`Ord` half of the population:
+/// `Lexer::Span` is bounded `Ord` and can lie the same way.
+#[derive(Clone, Copy, Debug, Hash)]
+struct LyingKind;
+
+impl PartialEq for LyingKind {
+  fn eq(&self, _: &Self) -> bool {
+    false
+  }
+}
+
+impl Eq for LyingKind {}
+
+impl core::fmt::Display for LyingKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.write_str("lying")
+  }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct LTok;
+
+impl Token<'_> for LTok {
+  type Kind = LyingKind;
+  type Error = Infallible;
+
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::Unbounded;
+
+  fn kind(&self) -> LyingKind {
+    LyingKind
+  }
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// A per-character lexer, conforming in everything the contract names, over [`LyingKind`].
+struct LyingKindLexer<'a> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: (),
+}
+
+impl<'a> Lexer<'a> for LyingKindLexer<'a> {
+  type State = ();
+  type Source = str;
+  type Token = LTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self { src, start: 0, end: 0, state: () }
+  }
+  fn with_state(src: &'a str, state: ()) -> Self {
+    Self { src, start: 0, end: 0, state }
+  }
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+  fn state(&self) -> &() {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut () {
+    &mut self.state
+  }
+  fn into_state(self) {}
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<LTok, Infallible>> {
+    self.start = self.end;
+    if self.start >= self.src.len() {
+      return None;
+    }
+    self.end = boundary_after(self.src, self.start);
+    Some(Ok(LTok))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+#[test]
+#[should_panic(
+  expected = "non-reflexive-payload] replay-identity position 0: INCONCLUSIVE — the token's `Kind`"
+)]
+fn a_kind_that_does_not_equal_itself_is_diagnosed_and_not_blamed_on_the_lexer() {
+  Harness::<LyingKindLexer<'_>>::over(["ab"]).run();
+}
+
+#[test]
+#[should_panic(
+  expected = "non-reflexive-payload] integration/peek-heavy position 0: INCONCLUSIVE — the token's `Kind`"
+)]
+fn a_kind_that_does_not_equal_itself_is_diagnosed_at_the_committed_stream_comparison() {
+  // The integration tier's comparison, reached directly: `run` rejects such a `Kind` at replay
+  // identity, three checks earlier, so nothing arrives here through the entry point. Guarding four
+  // comparisons and not the fifth would leave the same defect one relocation away.
+  let stream = [(LyingKind, SimpleSpan::new(0, 1))];
+  super::assert_stream_eq::<LyingKindLexer<'_>>(0, "peek-heavy", &stream, &stream);
+}
+
+#[test]
+#[should_panic(expected = "cache conformance [cache non-reflexive-payload]")]
+fn the_cache_kit_diagnoses_a_non_reflexive_token_instead_of_blaming_the_cache() {
+  // The cache tier draws its verdicts from the same population — its observable is the whole
+  // `(span, token, state)` triple and it asks `PartialEq` of two of the three — so it needs the
+  // same guard, or the sweep stops one tier short. Eight `NaN`-payload tokens, a conforming
+  // cache: before this the kit reported `entry-token`, "the entry at 0..1 is a DIFFERENT token
+  // from the one stored there — expected FTok(NaN), got FTok(NaN)".
+  crate::conformance::cache::CacheHarness::<
+    NanPayloadLexer<'_>,
+    crate::cache::DefaultCache<'_, NanPayloadLexer<'_>>,
+  >::new("nnnnnnnn")
+  .run();
+}
+
+#[test]
+fn the_cache_kit_still_runs_over_a_reflexive_payload_of_the_same_type() {
+  // The cache tier's control, and it is the same shape as the partial tier's: the payload TYPE is
+  // not what the guard rejects, only a value that will not equal itself.
+  crate::conformance::cache::CacheHarness::<
+    NanPayloadLexer<'_>,
+    crate::cache::DefaultCache<'_, NanPayloadLexer<'_>>,
+  >::new("abcdefgh")
+  .run();
+}

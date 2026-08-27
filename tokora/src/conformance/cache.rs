@@ -364,6 +364,52 @@ where
   (*tok.token().span_ref()).clone()
 }
 
+/// The first component of a cached entry that fails to compare equal to **itself**, named for a
+/// reader. `None` when all three are reflexive.
+///
+/// The cache kit's observable is the whole `(span, token, state)` triple, and two of the three are
+/// caller values the harness only asks [`PartialEq`] of — so this tier draws its verdicts from
+/// exactly the population `conformance`'s trait and partial tiers do, and needs the same guard for
+/// the same reason (#295). [`Lexer::Span`] is bounded `Ord` and so is reflexive by contract; it is
+/// scanned anyway, because a component left out of the scan is a component whose failure is
+/// reported as a cache defect.
+///
+/// See [`refuse_non_reflexive`](CacheHarness::refuse_non_reflexive).
+fn entry_non_reflexive<'inp, L>(
+  span: &L::Span,
+  token: &L::Token,
+  state: &L::State,
+) -> Option<&'static str>
+where
+  L: Lexer<'inp>,
+  L::Token: PartialEq,
+  L::State: PartialEq,
+{
+  if !super::self_equal(token) {
+    return Some("the token payload");
+  }
+  if !super::self_equal(state) {
+    return Some("the `L::State`");
+  }
+  if !super::self_equal(span) {
+    return Some("the span");
+  }
+  None
+}
+
+/// [`entry_non_reflexive`] over a whole peeked run, with the position of the offending entry —
+/// what the purity laws, which compare two runs as vectors, need to say *where*.
+fn run_non_reflexive<'inp, L>(run: &[PeekedTriple<'inp, L>]) -> Option<(usize, &'static str)>
+where
+  L: Lexer<'inp>,
+  L::Token: PartialEq,
+  L::State: PartialEq,
+{
+  run.iter().enumerate().find_map(|(i, entry)| {
+    entry_non_reflexive::<L>(&entry.0, &entry.1, &entry.2).map(|component| (i, component))
+  })
+}
+
 /// The `L::State` a peeked entry carries, whichever arm of [`Maybe`] it arrived on.
 ///
 /// [`PeekedTokenExt`] reaches the token and the span arm-blind and deliberately does not reach the
@@ -1272,6 +1318,67 @@ where
 
   // ── the entry comparison every oracle reads its answers through ─────────────────
 
+  /// Refuses to draw a cache verdict from a comparison that a value decided by failing to equal
+  /// **itself**, and returns without a word when there is nothing to refuse.
+  ///
+  /// The trait-tier twin is `conformance::refuse_non_reflexive`, and both interpolate the same
+  /// `NON_REFLEXIVE_BODY` so the diagnosis cannot come to mean one thing in one tier and
+  /// something else in the other.
+  ///
+  /// Like it, every call site reaches this **after** its own comparison has already failed, so it
+  /// can re-label a failure and can never manufacture one: a genuinely non-conforming cache whose
+  /// token and state values *are* reflexive never reaches this line and still fails the ordinary
+  /// way, with the ordinary tag.
+  fn refuse_non_reflexive(
+    &self,
+    site: &str,
+    side: &str,
+    component: Option<&'static str>,
+    rendered: &str,
+  ) {
+    let Some(component) = component else {
+      return;
+    };
+    let name = self.label();
+    panic!(
+      "tokora cache conformance [{name} non-reflexive-payload] {site}: INCONCLUSIVE — \
+       {component} of the {side} entry {rendered} is not equal to ITSELF, so the comparison that \
+       just failed was decided by the value type and not by the cache, which this kit has \
+       therefore not convicted of anything. {}",
+      super::NON_REFLEXIVE_BODY
+    )
+  }
+
+  /// The reflexivity guard for one entry comparison, asked of both sides.
+  fn guard_entry(
+    &self,
+    site: &str,
+    got: (&L::Span, &L::Token, &L::State),
+    want: (&L::Span, &L::Token, &L::State),
+  ) {
+    for (side, (span, token, state)) in [("got", got), ("expected", want)] {
+      self.refuse_non_reflexive(
+        site,
+        side,
+        entry_non_reflexive::<L>(span, token, state),
+        &format!("({span:?}, {token:?}, {state:?})"),
+      );
+    }
+  }
+
+  /// The reflexivity guard for a whole peeked run — what the purity laws, which compare two runs
+  /// as vectors rather than entry by entry, need in order to say *where*.
+  fn guard_run(&self, site: &str, side: &str, run: &[PeekedTriple<'inp, L>]) {
+    if let Some((i, component)) = run_non_reflexive::<L>(run) {
+      self.refuse_non_reflexive(
+        &format!("{site}, position {i}"),
+        side,
+        Some(component),
+        &format!("{:?}", run[i]),
+      );
+    }
+  }
+
   /// The kit's fundamental comparison: a cached entry is the triple (span, token, state), and a
   /// cache that hands one back has to hand back all three of them (#183).
   ///
@@ -1306,16 +1413,26 @@ where
     let want_entry = want.token();
     let want_span: &L::Span = want_entry.span_ref();
     let want_token: &L::Token = want_entry.data();
-    assert!(got_span == want_span, "{span_msg}");
-    assert!(
-      got_token == want_token,
-      "tokora cache conformance [{name} entry-token] {site}: the entry at {want_span:?} is a DIFFERENT token from the one stored there — expected {want_token:?}, got {got_token:?}. A cached entry is the triple (span, token, state); a right span with someone else's token beside it is a permuted cache, not a conforming one."
-    );
-    assert!(
-      got_state == want.state(),
-      "tokora cache conformance [{name} entry-state] {site}: the entry at {want_span:?} carries a DIFFERENT L::State from the one stored there — expected {:?}, got {got_state:?}.{state_note}",
-      want.state()
-    );
+    // Each comparison keeps its own message and its own tag, and each is now written as an `if`
+    // rather than an `assert!` so that the reflexivity guard sits on the failure path and only
+    // there. See `refuse_non_reflexive`.
+    if got_span != want_span {
+      self.guard_entry(site, got, (want_span, want_token, want.state()));
+      panic!("{span_msg}");
+    }
+    if got_token != want_token {
+      self.guard_entry(site, got, (want_span, want_token, want.state()));
+      panic!(
+        "tokora cache conformance [{name} entry-token] {site}: the entry at {want_span:?} is a DIFFERENT token from the one stored there — expected {want_token:?}, got {got_token:?}. A cached entry is the triple (span, token, state); a right span with someone else's token beside it is a permuted cache, not a conforming one."
+      );
+    }
+    if got_state != want.state() {
+      self.guard_entry(site, got, (want_span, want_token, want.state()));
+      panic!(
+        "tokora cache conformance [{name} entry-state] {site}: the entry at {want_span:?} carries a DIFFERENT L::State from the one stored there — expected {:?}, got {got_state:?}.{state_note}",
+        want.state()
+      );
+    }
   }
 
   /// [`assert_entry_eq`](Self::assert_entry_eq) against an **owned** entry — what `pop_front`,
@@ -2421,10 +2538,14 @@ where
     // Purity: the cache is unchanged, and a second peek reads the same.
     self.assert_resident(cache, cap, want, &format!("after peek() against {state}"));
     let second = self.peeked_entries(cache);
-    assert!(
-      second == first,
-      "tokora cache conformance [{name} pure-peek] against {state}: two peeks on an unchanged cache disagreed: {first:?} then {second:?}. `peek` takes &self and must be logically pure. The comparison is over whole (span, token, state) entries, so a peek that is stable in its spans and unstable in the tokens or the states behind them disagrees here too."
-    );
+    if second != first {
+      let site = format!("pure-peek against {state}");
+      self.guard_run(&site, "first", &first);
+      self.guard_run(&site, "second", &second);
+      panic!(
+        "tokora cache conformance [{name} pure-peek] against {state}: two peeks on an unchanged cache disagreed: {first:?} then {second:?}. `peek` takes &self and must be logically pure. The comparison is over whole (span, token, state) entries, so a peek that is stable in its spans and unstable in the tokens or the states behind them disagrees here too."
+      );
+    }
 
     // `peek_one` is the single-slot case: it names the front, and it names nothing where a
     // drained cache has no front left to name.
@@ -2462,10 +2583,14 @@ where
       (None, None) => {}
     }
     let one_second: Option<PeekedTriple<'inp, L>> = self.peeked_one(cache);
-    assert!(
-      one_second == one_first,
-      "tokora cache conformance [{name} pure-peek-one] against {state}: two peek_one() calls on an unchanged cache disagreed: {one_first:?} then {one_second:?}. `peek_one` takes &self and must be logically pure, exactly as `peek` must."
-    );
+    if one_second != one_first {
+      let site = format!("pure-peek-one against {state}");
+      self.guard_run(&site, "first", one_first.as_slice());
+      self.guard_run(&site, "second", one_second.as_slice());
+      panic!(
+        "tokora cache conformance [{name} pure-peek-one] against {state}: two peek_one() calls on an unchanged cache disagreed: {one_first:?} then {one_second:?}. `peek_one` takes &self and must be logically pure, exactly as `peek` must."
+      );
+    }
 
     // ── the same law against a buffer that is NOT empty ───────────────────────────
     //
@@ -2556,10 +2681,14 @@ where
       &format!("bounded-peek/window {window} against {state}"),
     );
     let second = self.peeked_entries_through::<W>(cache);
-    assert!(
-      second == first,
-      "tokora cache conformance [{name} pure-peek/window {window}] against {state}: two peeks on an unchanged cache disagreed: {first:?} then {second:?}. `peek` takes &self and must be logically pure at every window, not only at the kit's own."
-    );
+    if second != first {
+      let site = format!("pure-peek/window {window} against {state}");
+      self.guard_run(&site, "first", &first);
+      self.guard_run(&site, "second", &second);
+      panic!(
+        "tokora cache conformance [{name} pure-peek/window {window}] against {state}: two peeks on an unchanged cache disagreed: {first:?} then {second:?}. `peek` takes &self and must be logically pure at every window, not only at the kit's own."
+      );
+    }
   }
 
   /// Check 6's prefilled half at one prefill depth: `peek` into a buffer that already holds
@@ -2635,10 +2764,20 @@ where
     );
     let (prefix_again, appended_again) =
       self.peeked_entries_after_prefill(cache, self.prefill(cap, depth, from));
-    assert!(
-      prefix_again == prefix_after && appended_again == appended,
-      "tokora cache conformance [{name} pure-peek/{tag} at depth {depth}] against {state}: two prefilled peeks on an unchanged cache disagreed: prefix {prefix_after:?} then {prefix_again:?}, appended {appended:?} then {appended_again:?}. `peek` takes &self and must be logically pure against every shape of buffer, not only against an empty one."
-    );
+    if prefix_again != prefix_after || appended_again != appended {
+      let site = format!("pure-peek/{tag} at depth {depth} against {state}");
+      for (side, run) in [
+        ("first prefix", prefix_after.as_slice()),
+        ("second prefix", prefix_again.as_slice()),
+        ("first appended", appended.as_slice()),
+        ("second appended", appended_again.as_slice()),
+      ] {
+        self.guard_run(&site, side, run);
+      }
+      panic!(
+        "tokora cache conformance [{name} pure-peek/{tag} at depth {depth}] against {state}: two prefilled peeks on an unchanged cache disagreed: prefix {prefix_after:?} then {prefix_again:?}, appended {appended:?} then {appended_again:?}. `peek` takes &self and must be logically pure against every shape of buffer, not only against an empty one."
+      );
+    }
     self.assert_resident(
       cache,
       cap,
