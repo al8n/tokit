@@ -1941,7 +1941,7 @@ fn a_checkpoint_restore_does_not_refund_the_tally() {
 
   let plain = super::LexTally::new(0, "test", SRC.len(), ceiling, instance);
   super::drive::<TileLexer<'_>, _>(SRC, &plain, |ir| {
-    while ir.next().expect("Silent never returns Err").is_some() {}
+    while ir.next().expect(super::NEVER_ERRS).is_some() {}
   });
   let once = plain.spent();
   // A floor with a reason, not `> 0`: `TileLexer` tiles the source one character per token, so a
@@ -1957,9 +1957,9 @@ fn a_checkpoint_restore_does_not_refund_the_tally() {
   let replayed = super::LexTally::new(0, "test", SRC.len(), ceiling, instance);
   super::drive::<TileLexer<'_>, _>(SRC, &replayed, |ir| {
     let ckp = ir.save();
-    while ir.next().expect("Silent never returns Err").is_some() {}
+    while ir.next().expect(super::NEVER_ERRS).is_some() {}
     ir.restore(ckp);
-    while ir.next().expect("Silent never returns Err").is_some() {}
+    while ir.next().expect(super::NEVER_ERRS).is_some() {}
   });
 
   assert!(
@@ -3181,8 +3181,8 @@ fn a_nan_payload_is_diagnosed_at_the_resume_comparison() {
 fn a_nan_payload_is_diagnosed_at_the_prefix_comparison() {
   // `assert_partial_prefix_of`'s comparison, reached directly for `check_resume`'s reason: the
   // final leg runs before the split loop and fires first.
-  use super::PartialItem;
-  let nan = || PartialItem::<NanPayloadLexer<'_>>::Token(FTok(f64::NAN), SimpleSpan::new(0, 1));
+  use super::StreamItem;
+  let nan = || StreamItem::<NanPayloadLexer<'_>>::Token(FTok(f64::NAN), SimpleSpan::new(0, 1));
   super::assert_partial_prefix_of::<NanPayloadLexer<'_>>(0, 1, &[nan()], &[nan()]);
 }
 
@@ -3352,8 +3352,249 @@ fn a_kind_that_does_not_equal_itself_is_diagnosed_at_the_committed_stream_compar
   // The integration tier's comparison, reached directly: `run` rejects such a `Kind` at replay
   // identity, three checks earlier, so nothing arrives here through the entry point. Guarding four
   // comparisons and not the fifth would leave the same defect one relocation away.
-  let stream = [(LyingKind, SimpleSpan::new(0, 1))];
-  super::assert_stream_eq::<LyingKindLexer<'_>>(0, "peek-heavy", &stream, &stream);
+  let stream = [super::StreamItem::<LyingKindLexer<'_>>::Token(
+    LTok,
+    SimpleSpan::new(0, 1),
+  )];
+  super::assert_stream_eq::<LyingKindLexer<'_>>(
+    0,
+    "peek-heavy",
+    super::COMMITTED,
+    &stream,
+    &stream,
+  );
+}
+
+// ── #269 at the integration tier: the committed stream is the ITEM, not a projection of it ──
+//
+// The trait tier compares the whole item, the partial tier compares the whole item, and the
+// integration tier reduced every committed token to `(kind, span)` — the same projection #269
+// removed one tier over, on streams whose full `L::Token` values were already in hand.
+
+/// How many `Lexer::new` constructions the kit has made in the cell below. `run()` spends a fixed
+/// number of them on the trait tier and then exactly one per integration schedule (`drive` →
+/// `seeded` → `L::new(src).into_state()`; every lexer the input layer itself builds comes through
+/// `with_state`), so the instance index is a stable handle on WHICH of the five integration
+/// streams a token belongs to.
+static FLIP_INSTANCE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// The instance index the payload flips at, calibrated so that every trait-tier construction and
+/// the straight integration drive fall below it and `peek-heavy` is the first above.
+const FLIP_AT: usize = 6;
+
+/// The lexer's choice, carried in `L::State` so a `with_state` resume — which is every lexer the
+/// input layer builds — inherits the payload of the drive it belongs to rather than re-deciding.
+#[derive(Clone, Copy, Debug)]
+struct InstanceChoice(u8);
+
+impl crate::State for InstanceChoice {
+  type Error = Infallible;
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+}
+
+/// A one-token-per-character lexer whose kind, span, slice, item count and state resume are all
+/// exactly what a conforming lexer produces, and whose token **payload** is decided by which
+/// `L::new` instance the stream came from.
+struct InstanceFlipLexer<'a> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: InstanceChoice,
+}
+
+impl<'a> Lexer<'a> for InstanceFlipLexer<'a> {
+  type State = InstanceChoice;
+  type Source = str;
+  type Token = VTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    let n = FLIP_INSTANCE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: InstanceChoice(u8::from(n >= FLIP_AT)),
+    }
+  }
+  fn with_state(src: &'a str, state: InstanceChoice) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+  fn state(&self) -> &InstanceChoice {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut InstanceChoice {
+    &mut self.state
+  }
+  fn into_state(self) -> InstanceChoice {
+    self.state
+  }
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<VTok, Infallible>> {
+    self.start = self.end;
+    if self.start >= self.src.len() {
+      return None;
+    }
+    self.end = boundary_after(self.src, self.start);
+    Some(Ok(VTok(self.state.0)))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+#[test]
+#[should_panic(
+  expected = "integration/peek-heavy] position 0: committed token stream diverges: expected token"
+)]
+fn a_token_payload_that_moves_between_two_integration_schedules_is_falsified() {
+  // The observation the tier has to make, made directly first and without spending an instance:
+  // the two streams' tokens agree on the kind and the span — everything this tier compared before
+  // 0.11.0 — and hold different values. `with_state` is the door every lexer the input layer
+  // builds comes through, so this is literally the pair the two drives lex with.
+  let low = InstanceFlipLexer::with_state("x", InstanceChoice(0))
+    .lex()
+    .expect("the source has one token")
+    .expect("this lexer never errors");
+  let high = InstanceFlipLexer::with_state("x", InstanceChoice(1))
+    .lex()
+    .expect("the source has one token")
+    .expect("this lexer never errors");
+  assert_eq!(low.kind(), high.kind(), "the kind is what held still");
+  assert_ne!(low, high, "the value is what moved");
+
+  FLIP_INSTANCE.store(0, core::sync::atomic::Ordering::Relaxed);
+  // Every trait-tier check passes: two fresh runs, the resume at every position and the sticky
+  // and span-after-exhaustion probes all fall below the flip. The straight integration drive is
+  // the sixth construction and `peek-heavy` the seventh, so the two committed streams hold
+  // `VTok(0)` and `VTok(1)` at the same kind, the same span and the same length — and the tier
+  // reported them equal until it stopped comparing `(kind, span)`.
+  Harness::<InstanceFlipLexer<'_>>::new("x").run();
+}
+
+/// [`InstanceFlipLexer`]'s defect on the **error** arm: one refused region per input, whose
+/// payload is decided by which `L::new` instance the drive came from.
+///
+/// The token arm and the error arm are the two halves of an item, and until 0.11.0 the
+/// integration tier held neither: it compared the token through a projection and ran under
+/// [`Silent`](crate::emitter::Silent), which discards a refusal outright. A refusal leaves no
+/// trace in the token stream, so this lexer's five schedules produced five *identical* (empty)
+/// token streams while the value a parser's error channel receives changed.
+struct InstanceFlipErrLexer<'a> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: InstanceChoice,
+}
+
+impl<'a> Lexer<'a> for InstanceFlipErrLexer<'a> {
+  type State = InstanceChoice;
+  type Source = str;
+  type Token = ETok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    let n = ERR_FLIP_INSTANCE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: InstanceChoice(u8::from(n >= FLIP_AT)),
+    }
+  }
+  fn with_state(src: &'a str, state: InstanceChoice) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), BadByte> {
+    Ok(())
+  }
+  fn state(&self) -> &InstanceChoice {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut InstanceChoice {
+    &mut self.state
+  }
+  fn into_state(self) -> InstanceChoice {
+    self.state
+  }
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<ETok, BadByte>> {
+    self.start = self.end;
+    if self.start >= self.src.len() {
+      return None;
+    }
+    self.end = boundary_after(self.src, self.start);
+    Some(Err(BadByte {
+      reason: if self.state.0 == 0 { "low" } else { "high" },
+    }))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+/// [`FLIP_INSTANCE`]'s twin for the error-arm fixture; separate so the two cells can run
+/// concurrently without either one moving the other's instance index.
+static ERR_FLIP_INSTANCE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[test]
+#[should_panic(
+  expected = "integration/peek-heavy] error position 0: raised lexer-error stream diverges: expected lexer error"
+)]
+fn an_error_payload_that_moves_between_two_integration_schedules_is_falsified() {
+  let low = InstanceFlipErrLexer::with_state("?", InstanceChoice(0))
+    .lex()
+    .expect("the source has one item")
+    .expect_err("this lexer only errors");
+  let high = InstanceFlipErrLexer::with_state("?", InstanceChoice(1))
+    .lex()
+    .expect("the source has one item")
+    .expect_err("this lexer only errors");
+  assert_ne!(low, high, "the error payload is what moved");
+
+  ERR_FLIP_INSTANCE.store(0, core::sync::atomic::Ordering::Relaxed);
+  // Both committed TOKEN streams are empty and every span agrees, so nothing the tier compared
+  // before 0.11.0 — under `Silent`, which never handed it a refusal at all — could see this.
+  Harness::<InstanceFlipErrLexer<'_>>::new("?").run();
 }
 
 #[test]
@@ -3556,9 +3797,8 @@ fn a_non_reflexive_error_payload_is_still_refused_when_it_is_what_decided_the_co
   // whose spans agree, so the error payload is the operation that decided the comparison — and it
   // is the one that will not equal itself. The refusal must still fire, and it must still name
   // the error payload.
-  use super::PartialItem;
-  let nan =
-    || PartialItem::<NanErrFlipLexer<'_>>::LexerError(SimpleSpan::new(0, 1), FErr(f64::NAN));
+  use super::StreamItem;
+  let nan = || StreamItem::<NanErrFlipLexer<'_>>::LexerError(SimpleSpan::new(0, 1), FErr(f64::NAN));
   super::assert_partial_prefix_of::<NanErrFlipLexer<'_>>(0, 1, &[nan()], &[nan()]);
 }
 
@@ -3569,9 +3809,8 @@ fn a_non_reflexive_error_payload_is_still_refused_when_it_is_what_decided_the_co
 fn the_error_arm_is_refused_at_the_final_leg_too() {
   // `assert_partial_stream_eq`'s comparison over the error arm, reached directly: the final leg
   // fires before the split loop, so a lexer whose FINAL drain errors with a `NaN` arrives here.
-  use super::PartialItem;
-  let nan =
-    || PartialItem::<NanErrFlipLexer<'_>>::LexerError(SimpleSpan::new(0, 1), FErr(f64::NAN));
+  use super::StreamItem;
+  let nan = || StreamItem::<NanErrFlipLexer<'_>>::LexerError(SimpleSpan::new(0, 1), FErr(f64::NAN));
   super::assert_partial_stream_eq::<NanErrFlipLexer<'_>>(0, usize::MAX, &[nan()], &[nan()]);
 }
 

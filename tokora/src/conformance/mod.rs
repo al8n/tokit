@@ -46,8 +46,17 @@
 //! **Integration tier** — driving an `Input` session through the machinery itself over
 //! a fixed set of named, deterministic save/peek/drain/restore schedules
 //! (`peek-heavy`, `save-early-restore-late`, `drain-then-restore-across-cache`,
-//! `nested-savepoints`) and requiring the committed token stream to equal the
-//! straight-lex stream. No randomness — the schedules are enumerated.
+//! `nested-savepoints`) and requiring every schedule to observe the layer the way the straight
+//! drain did: the same **committed tokens** and the same **raised lexer errors**, both by value.
+//! The straight drain's tokens are additionally required to equal the raw-lex tokens. No
+//! randomness — the schedules are enumerated.
+//!
+//! The two arms are compared as two sequences rather than as one interleaved stream, and the
+//! error arm is not cross-checked against the raw lexer. Both are facts about the input layer,
+//! not weaker claims: a `peek` reports a refusal the moment it lexes the region, so where an
+//! error sits *between* two committed tokens varies by schedule on a conforming lexer; and the
+//! layer reports each refused region once, so a lexer that errors repeatedly over one span is
+//! conforming while the layer raises one error. See `check_integration`.
 //!
 //! **Partial-input tier** (`run_partial`, a separate entry point for
 //! `usize`-offset `str` / `[u8]` sources) — driving the input in
@@ -108,8 +117,9 @@
 //! lexer.** Value equality is drawn from caller [`PartialEq`] implementations, and `PartialEq`
 //! promises symmetry and transitivity but **not** reflexivity: a payload holding an `f64` that can
 //! be `NaN` is not equal to itself. Every comparison any tier draws a verdict from — the two in
-//! the trait tier, the two in the partial tier, the committed-stream one in the integration tier,
-//! and the entry and purity comparisons in [`cache`] — therefore answers with the **component
+//! the trait tier, the two in the partial tier, the committed-token and raised-error ones in the
+//! integration tier, and the entry and purity comparisons in [`cache`] — therefore answers with
+//! the **component
 //! that decided it**, and asks, once it has already failed, whether *that* operation is equal to
 //! itself. A side whose is not gets a refusal tagged `non-reflexive-payload` naming the component
 //! and the obligation, instead of a conformance verdict whose expected-vs-got renders identically
@@ -143,7 +153,7 @@ use std::{format, rc::Rc, string::String, vec, vec::Vec};
 use crate::{
   Lexer, ReadFrontier, Slice, Source, Span, Token,
   cache::DefaultCache,
-  emitter::{Emitter, Silent},
+  emitter::Emitter,
   error::{Incomplete, MaybeIncomplete, token::UnexpectedTokenOf},
   input::{Complete, Cursor, Input, InputRef, Partial},
   span::Spanned,
@@ -516,7 +526,7 @@ where
   <L::Token as Token<'inp>>::Kind: PartialEq + core::fmt::Debug,
   // Semantic equality on the compared values. Since 0.10.0 `run` asks for these two as well, so
   // what separates the tiers is the three above and nothing about equality. See
-  // `PartialItem::compare` for why a `Debug` rendering cannot stand in, and `run_partial`'s own
+  // `StreamItem::compare` for why a `Debug` rendering cannot stand in, and `run_partial`'s own
   // docs for who pays.
   L::Token: PartialEq,
   <L::Token as Token<'inp>>::Error: PartialEq,
@@ -1297,8 +1307,9 @@ fn lex_attempt_ceiling(drains: usize, budget: usize) -> AttemptCeiling {
 
 /// The emitter error the partial check surfaces: the input layer builds it from the frontier
 /// [`Incomplete`] (via [`SurfaceIncomplete`](crate::input::SurfaceIncomplete)), and it is the only
-/// thing that reaches the `Err` channel — [`PartialRecorder`] never rejects a diagnostic. The
+/// thing that reaches the `Err` channel — [`ItemRecorder`] never rejects a diagnostic. The
 /// check never inspects the payload, only that `next` returned `Err` at the frontier.
+#[derive(Debug)]
 enum PartialProbe {
   Incomplete,
 }
@@ -1317,15 +1328,22 @@ impl MaybeIncomplete for PartialProbe {
   }
 }
 
-/// One item of the sequence the partial tier compares — the unit chunked equivalence is a
-/// statement *about*.
+/// One item of a committed stream — the unit **both** tiers that drive an `Input` compare, the
+/// partial one and the integration one.
 ///
 /// A committed **token** and a **lexer error** are both items, because the input layer lexes bytes
 /// and then either commits a token or refuses the region and reports it. Truncation can turn one
 /// into the other, and a comparison over tokens alone cannot see that: a refusal leaves no trace
 /// in the token stream at all. So the error is an item here, and the prefix property is asked of
 /// the interleaved sequence.
-enum PartialItem<'inp, L>
+///
+/// The integration tier holds the same values in the same enum, and reached them a release later:
+/// it reduced every committed token to `(kind, span)` and discarded the `L::Token` its drain loop
+/// already had in hand, which is #269's projection surviving at the one tier neither #269 nor
+/// #295 touched. The two tiers differ in *how* they sequence the arms and not in what an item is
+/// or in how two of them are compared — see [`check_integration`] for the sequencing difference
+/// and why it is a property of the input layer rather than of this type.
+enum StreamItem<'inp, L>
 where
   L: Lexer<'inp>,
 {
@@ -1338,11 +1356,11 @@ where
   /// AST changed. The token is `Clone`, so keeping it costs a clone per item in a test kit.
   Token(L::Token, L::Span),
   /// A lexer error the input layer raised over bytes it lexed and refused: its span and the
-  /// **payload itself** — see [`PartialRecorder`] for what that does and does not assert.
+  /// **payload itself** — see [`ItemRecorder`] for what that does and does not assert.
   LexerError(L::Span, <L::Token as Token<'inp>>::Error),
 }
 
-impl<'inp, L> Clone for PartialItem<'inp, L>
+impl<'inp, L> Clone for StreamItem<'inp, L>
 where
   L: Lexer<'inp>,
 {
@@ -1354,7 +1372,7 @@ where
   }
 }
 
-impl<'inp, L> PartialItem<'inp, L>
+impl<'inp, L> StreamItem<'inp, L>
 where
   L: Lexer<'inp>,
 {
@@ -1457,18 +1475,24 @@ where
   }
 }
 
-/// The shared, ordered log both partial-tier drains append to: [`PartialRecorder`] pushes each
+/// The shared, ordered log both partial-tier drains append to: [`ItemRecorder`] pushes each
 /// lexer error the input layer reports, the drain loop pushes each token `next` hands back, and
 /// because the layer reports an error during the very `next` call that goes on to find the
 /// following token, the vector ends up being the interleaved item stream in production order.
-type PartialLog<'inp, L> = Rc<RefCell<Vec<PartialItem<'inp, L>>>>;
+type StreamLog<'inp, L> = Rc<RefCell<Vec<StreamItem<'inp, L>>>>;
 
-/// The emitter the partial tier drives, and the reason it is not [`Silent`].
+/// The emitter **both** `Input`-driving tiers run under, and the reason neither is [`Silent`].
 ///
 /// `Silent` discards every lexer error, which made the whole error arm invisible to chunked
 /// equivalence: a lexer could refuse a region on a truncated buffer and tokenize the same region
 /// once the missing bytes arrived, and the check saw an empty token list on one side and a token
 /// on the other — a legal *prefix*, and green.
+///
+/// The integration tier ran under `Silent` for one release longer, and the same sentence applies
+/// to it with "truncated buffer" replaced by "schedule": a refusal raised by the straight drain
+/// and not by `peek-heavy` — or raised by both with a payload that moved — left the two token
+/// streams identical, so the whole error arm of the committed stream was outside every one of
+/// that tier's five comparisons. See [`check_integration`].
 ///
 /// # What it compares, and what it deliberately does not
 ///
@@ -1497,16 +1521,16 @@ type PartialLog<'inp, L> = Rc<RefCell<Vec<PartialItem<'inp, L>>>>;
 /// properties a comparison key has to have, and `Debug` has neither: it is not injective, so a
 /// payload that really does move can render identically and pass; and it is not stable, so a
 /// payload rendering an address or a counter reds on a conforming lexer. See
-/// [`PartialItem::compare`] for the full argument and for what the bound on
+/// [`StreamItem::compare`] for the full argument and for what the bound on
 /// [`run_partial`](Harness::run_partial) buys.
-struct PartialRecorder<'inp, L>
+struct ItemRecorder<'inp, L>
 where
   L: Lexer<'inp>,
 {
-  log: PartialLog<'inp, L>,
+  log: StreamLog<'inp, L>,
 }
 
-impl<'inp, L> Emitter<'inp, L> for PartialRecorder<'inp, L>
+impl<'inp, L> Emitter<'inp, L> for ItemRecorder<'inp, L>
 where
   L: Lexer<'inp>,
 {
@@ -1520,7 +1544,7 @@ where
     self
       .log
       .borrow_mut()
-      .push(PartialItem::LexerError(span, payload));
+      .push(StreamItem::LexerError(span, payload));
     Ok(())
   }
 
@@ -1533,9 +1557,11 @@ where
   }
 
   /// A recording emitter owes the log the same rollback discipline a collecting one does, so the
-  /// mark is the log's length and a rewind truncates to it. Both drains here are straight forward
-  /// drains and never save or restore, so nothing calls this today; implementing it means a later
-  /// schedule that does backtrack cannot silently accumulate phantom items.
+  /// mark is the log's length and a rewind truncates to it. The partial tier's two drains are
+  /// straight forward drains and never save or restore, so this was written for a schedule that
+  /// did not exist yet; three of the integration tier's five now do exactly that, and the
+  /// discipline is what makes their error streams comparable at all — a restore that rewinds the
+  /// dedup watermark without rewinding the log would leave every re-lexed refusal recorded twice.
   fn checkpoint(&mut self) -> u64 {
     self.log.borrow().len() as u64
   }
@@ -1545,8 +1571,14 @@ where
   }
 }
 
-/// The partial-check context: a [`PartialRecorder`] over [`PartialProbe`] and the default cache.
-type PartialConfCtx<'inp, L> = (PartialRecorder<'inp, L>, DefaultCache<'inp, L>);
+/// The context both `Input`-driving tiers parse under: an [`ItemRecorder`] over [`PartialProbe`]
+/// and the default cache.
+///
+/// One alias for both, because the tiers differ in the input's *completeness mode* and in nothing
+/// the context carries. [`PartialProbe`] is uninhabited on the integration tier — its only
+/// constructor is `From<Incomplete>`, which a [`Complete`](crate::input::Complete) input never
+/// raises — so a `next()` there still cannot fail, exactly as it could not under [`Silent`].
+type RecordingCtx<'inp, L> = (ItemRecorder<'inp, L>, DefaultCache<'inp, L>);
 
 /// Seeds the state every drive in this module starts from: the caller's lexer state under the
 /// tier's shared [`LexTally`].
@@ -1573,14 +1605,14 @@ fn partial_stream<'inp, L>(
   is_final: bool,
   budget: usize,
   idx: usize,
-) -> (Vec<PartialItem<'inp, Bud<'inp, L>>>, bool)
+) -> (Vec<StreamItem<'inp, Bud<'inp, L>>>, bool)
 where
   L: Lexer<'inp>,
   L::State: Clone,
 {
-  let log: PartialLog<'inp, Bud<'inp, L>> = Rc::new(RefCell::new(Vec::new()));
+  let log: StreamLog<'inp, Bud<'inp, L>> = Rc::new(RefCell::new(Vec::new()));
   let context = crate::input::InputContext::new(
-    PartialRecorder {
+    ItemRecorder {
       log: Rc::clone(&log),
     },
     DefaultCache::<'inp, Bud<'inp, L>>::default(),
@@ -1589,7 +1621,7 @@ where
   let mut input = Input::<
     'inp,
     Bud<'inp, L>,
-    PartialConfCtx<'inp, Bud<'inp, L>>,
+    RecordingCtx<'inp, Bud<'inp, L>>,
     (),
     Partial,
   >::with_state_and_context(src, state, context);
@@ -1607,7 +1639,7 @@ where
     match ir.next() {
       Ok(Some(spanned)) => {
         let (span, tok) = spanned.into_components();
-        log.borrow_mut().push(PartialItem::Token(tok, span));
+        log.borrow_mut().push(StreamItem::Token(tok, span));
       }
       Ok(None) => break false,
       Err(_) => break true,
@@ -1624,14 +1656,14 @@ fn complete_stream<'inp, L>(
   tally: &Rc<LexTally>,
   budget: usize,
   idx: usize,
-) -> Vec<PartialItem<'inp, Bud<'inp, L>>>
+) -> Vec<StreamItem<'inp, Bud<'inp, L>>>
 where
   L: Lexer<'inp>,
   L::State: Clone,
 {
-  let log: PartialLog<'inp, Bud<'inp, L>> = Rc::new(RefCell::new(Vec::new()));
+  let log: StreamLog<'inp, Bud<'inp, L>> = Rc::new(RefCell::new(Vec::new()));
   let context = crate::input::InputContext::new(
-    PartialRecorder {
+    ItemRecorder {
       log: Rc::clone(&log),
     },
     DefaultCache::<'inp, Bud<'inp, L>>::default(),
@@ -1640,7 +1672,7 @@ where
   let mut input = Input::<
     'inp,
     Bud<'inp, L>,
-    PartialConfCtx<'inp, Bud<'inp, L>>,
+    RecordingCtx<'inp, Bud<'inp, L>>,
     (),
     Complete,
   >::with_state_and_context(src, state, context);
@@ -1657,7 +1689,7 @@ where
     {
       Some(spanned) => {
         let (span, tok) = spanned.into_components();
-        log.borrow_mut().push(PartialItem::Token(tok, span));
+        log.borrow_mut().push(StreamItem::Token(tok, span));
       }
       None => break,
     }
@@ -1744,8 +1776,8 @@ where
 fn assert_partial_stream_eq<'inp, L>(
   idx: usize,
   k: usize,
-  expected: &[PartialItem<'inp, L>],
-  got: &[PartialItem<'inp, L>],
+  expected: &[StreamItem<'inp, L>],
+  got: &[StreamItem<'inp, L>],
 ) where
   L: Lexer<'inp>,
   <L::Token as Token<'inp>>::Kind: PartialEq + core::fmt::Debug,
@@ -1792,8 +1824,8 @@ fn assert_partial_stream_eq<'inp, L>(
 fn assert_partial_prefix_of<'inp, L>(
   idx: usize,
   k: usize,
-  expected: &[PartialItem<'inp, L>],
-  got: &[PartialItem<'inp, L>],
+  expected: &[StreamItem<'inp, L>],
+  got: &[StreamItem<'inp, L>],
 ) where
   L: Lexer<'inp>,
   <L::Token as Token<'inp>>::Kind: PartialEq + core::fmt::Debug,
@@ -2079,22 +2111,17 @@ impl<'inp, L> Item<'inp, L>
 where
   L: Lexer<'inp>,
 {
-  /// The token kind (for a token) or `None` (for an error).
-  fn kind(&self) -> Option<<L::Token as Token<'inp>>::Kind> {
-    self.item.as_ref().ok().map(Token::kind)
-  }
-
   /// Whether two items agree on discriminant, **value**, span and slice — and, when they do not,
   /// **which of those decided it**.
   ///
-  /// The components are consulted in [`PartialItem::compare`]'s order and for its reason, with
+  /// The components are consulted in [`StreamItem::compare`]'s order and for its reason, with
   /// the slice — bounded [`Eq`], another total promise — between the span and the payload.
   ///
   /// # Semantically, never by rendering
   ///
   /// This compared `format!("{err:?}")` on the error arm, and the token's
   /// [`kind`](Token::kind) alone on the token arm, until 0.10.0 — and both halves reported an
-  /// identity the kit had not checked (#269). The argument is [`PartialItem::compare`]'s,
+  /// identity the kit had not checked (#269). The argument is [`StreamItem::compare`]'s,
   /// verbatim, and it had already been made there for the partial tier:
   ///
   /// - `Debug` is not **injective**, so two distinct error payloads may render identically — a
@@ -2119,7 +2146,7 @@ where
   {
     match (&self.item, &other.item) {
       (Ok(a), Ok(b)) => {
-        // The kind is compared as well as the token, for [`PartialItem::compare`]'s reason: the
+        // The kind is compared as well as the token, for [`StreamItem::compare`]'s reason: the
         // two are independent caller code, and a `PartialEq` coarser than the classification the
         // parser sees is exactly what this comparison stands between.
         let (ka, kb) = (a.kind(), b.kind());
@@ -2523,40 +2550,96 @@ where
   }
 }
 
-/// The parse context the integration tier drives the input machinery under: a
-/// [`Silent`] emitter (so a lexer error never aborts a run) over the default cache.
-type ConfCtx<'inp, L> = (
-  Silent<<<L as Lexer<'inp>>::Token as Token<'inp>>::Error>,
-  DefaultCache<'inp, L>,
-);
-
-/// Builds a fresh `Input` session over `src` and hands its [`InputRef`] to `f`.
-fn drive<'inp, L, R>(
-  src: &'inp L::Source,
-  tally: &Rc<LexTally>,
-  f: impl FnOnce(&mut InputRef<'inp, '_, Bud<'inp, L>, ConfCtx<'inp, Bud<'inp, L>>, ()>) -> R,
-) -> R
+/// One integration schedule's observation of the input layer: the **committed token** stream it
+/// drained and the **lexer errors** the layer raised underneath it, both as [`StreamItem`]s and
+/// both compared by value.
+///
+/// Two vectors rather than one interleaved log, and that is a fact about the input layer rather
+/// than a weaker claim. The layer emits a refusal the moment it *lexes* the region — a
+/// `peek` that fills the cache past the drain position reports the errors it finds there
+/// immediately, so a peek-and-stop caller never loses them (see the input layer's
+/// `emit_lexer_error_deduped`). The interleaving is therefore schedule-dependent **by design**:
+/// on `"a?b"` the straight drain records `token, error, token` and `peek-heavy` records
+/// `error, token, token`, and both are conforming. What is *not* schedule-dependent is either
+/// sequence taken on its own — the dedup watermark makes the recorded refusals strictly
+/// increasing in span end under every schedule, and a restore rewinds the watermark and the log
+/// together. Comparing the interleaving would red a conforming lexer, which is the failure
+/// direction this module refuses to trade for reach.
+struct Observed<'inp, L>
 where
   L: Lexer<'inp>,
 {
+  /// The committed tokens `next()` handed back, in drain order.
+  tokens: Vec<StreamItem<'inp, L>>,
+  /// The lexer errors the layer raised, in the order it raised them.
+  errors: Vec<StreamItem<'inp, L>>,
+}
+
+/// Builds a fresh `Input` session over `src`, hands its [`InputRef`] to `f`, and returns `f`'s
+/// value beside the lexer errors the layer raised while it ran.
+///
+/// The errors come back from the emitter rather than from `f` because `f` cannot see them: the
+/// layer commits or refuses on its own, and a refusal is reported to the emitter and leaves no
+/// trace in what `next()` hands back. That is the whole reason [`Silent`](crate::emitter::Silent)
+/// was the wrong choice here — a discarded arm is not an arm a schedule comparison can check.
+fn drive<'inp, L, R>(
+  src: &'inp L::Source,
+  tally: &Rc<LexTally>,
+  f: impl FnOnce(&mut InputRef<'inp, '_, Bud<'inp, L>, RecordingCtx<'inp, Bud<'inp, L>>, ()>) -> R,
+) -> (R, Vec<StreamItem<'inp, Bud<'inp, L>>>)
+where
+  L: Lexer<'inp>,
+{
+  let log: StreamLog<'inp, Bud<'inp, L>> = Rc::new(RefCell::new(Vec::new()));
   let context = crate::input::InputContext::new(
-    Silent::<<L::Token as Token<'inp>>::Error>::new(),
+    ItemRecorder {
+      log: Rc::clone(&log),
+    },
     DefaultCache::<'inp, Bud<'inp, L>>::default(),
   );
   let state = seeded::<L>(src, tally);
   let mut input =
-    Input::<'inp, Bud<'inp, L>, ConfCtx<'inp, Bud<'inp, L>>, ()>::with_state_and_context(
+    Input::<'inp, Bud<'inp, L>, RecordingCtx<'inp, Bud<'inp, L>>, ()>::with_state_and_context(
       src, state, context,
     );
-  let mut input_ref = input.as_ref();
-  f(&mut input_ref)
+  let out = {
+    let mut input_ref = input.as_ref();
+    f(&mut input_ref)
+  };
+  let errors = core::mem::take(&mut *log.borrow_mut());
+  (out, errors)
 }
 
-/// Drives `next()` to exhaustion, collecting the committed (kind, span) token stream.
+/// One integration schedule, run: [`drive`] with a drain that collects the committed tokens, both
+/// arms returned together.
+fn observe<'inp, L>(
+  src: &'inp L::Source,
+  tally: &Rc<LexTally>,
+  f: impl FnOnce(
+    &mut InputRef<'inp, '_, Bud<'inp, L>, RecordingCtx<'inp, Bud<'inp, L>>, ()>,
+  ) -> Vec<StreamItem<'inp, Bud<'inp, L>>>,
+) -> Observed<'inp, Bud<'inp, L>>
+where
+  L: Lexer<'inp>,
+{
+  let (tokens, errors) = drive::<L, _>(src, tally, f);
+  Observed { tokens, errors }
+}
+
+/// Drives `next()` to exhaustion, collecting the committed token stream — **the tokens
+/// themselves**, never a projection of them.
+///
+/// This collected `(kind, span)` until 0.11.0, on streams whose `L::Token` values `next()` had
+/// just handed over: the kind is a projection, so a payload could move between two schedules of
+/// the same input while the kind, the span and the item count all held still, and the tier that
+/// exists to compare the committed stream reported them equal. That is #269's defect at the one
+/// tier #269 did not reach — see [`StreamItem::compare`] for the argument, which is unchanged.
+/// Retention is free here: `next()` yields the token owned, [`Token`] is bounded `Clone`, and the
+/// pair being replaced was itself built by cloning the span.
 fn drain_all<'inp, L>(
-  input_ref: &mut InputRef<'inp, '_, L, ConfCtx<'inp, L>, ()>,
+  input_ref: &mut InputRef<'inp, '_, L, RecordingCtx<'inp, L>, ()>,
   budget: usize,
-) -> Vec<(<L::Token as Token<'inp>>::Kind, L::Span)>
+) -> Vec<StreamItem<'inp, L>>
 where
   L: Lexer<'inp>,
 {
@@ -2565,13 +2648,10 @@ where
     if out.len() > budget {
       panic!("tokora conformance integration: next() exceeded the budget of {budget} tokens");
     }
-    match input_ref
-      .next()
-      .expect("the conformance kit's Silent emitter never returns Err")
-    {
+    match input_ref.next().expect(NEVER_ERRS) {
       Some(spanned) => {
         let (span, tok) = spanned.into_components();
-        out.push((tok.kind(), span));
+        out.push(StreamItem::Token(tok, span));
       }
       None => break,
     }
@@ -2579,8 +2659,30 @@ where
   out
 }
 
+/// The `expect` every integration drain carries. [`ItemRecorder`] answers `Ok` on every door, and
+/// its [`PartialProbe`] error has no constructor a [`Complete`](crate::input::Complete) input can
+/// reach — see [`RecordingCtx`].
+const NEVER_ERRS: &str = "the conformance kit's recording emitter never returns Err";
+
 /// Integration tier: the committed stream from each named schedule must equal the
-/// straight-lex stream, and the straight stream must equal the raw-lex tokens.
+/// straight-lex stream, and the straight stream must equal the raw-lex items.
+///
+/// **Both arms, both compared by value.** A committed token contributes the token itself and a
+/// raised refusal contributes its payload, which is the module header's rule for every tier —
+/// and until 0.11.0 this tier kept neither. It reduced each token to `(kind, span)` and ran under
+/// [`Silent`], so the token arm was compared through a projection and the error arm was not
+/// compared at all. See [`drain_all`] for the first half and [`ItemRecorder`] for the second.
+///
+/// The two arms are compared as two sequences rather than as one interleaved stream. That is
+/// [`Observed`]'s statement and it is a property of the input layer: a `peek` reports the
+/// refusals it finds while filling the cache immediately, so where an error sits *between* two
+/// tokens is schedule-dependent on a conforming lexer, while each sequence on its own is not.
+///
+/// The arms also differ in **what they can be compared against**. The token stream is checked
+/// both against the raw lexer and across the schedules; the error stream is checked across the
+/// schedules only, because the layer deduplicates a refusal per region and the raw lexer does
+/// not, so the two sequences are legitimately different lengths. The cross-check that would have
+/// asserted otherwise was written, run, and removed by a positive cell.
 fn check_integration<'inp, L>(
   idx: usize,
   src: &'inp L::Source,
@@ -2588,6 +2690,11 @@ fn check_integration<'inp, L>(
   budget: usize,
 ) where
   L: Lexer<'inp>,
+  // The same two `run` already asks for, reached through `StreamItem::compare` — this tier adds
+  // no obligation of its own. Retaining the values costs no bound at all: [`Token`] is bounded
+  // `Clone` and [`Token::Error`] is bounded `Clone`, both by the trait.
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
 {
   use generic_arraydeque::typenum::U3;
 
@@ -2601,8 +2708,8 @@ fn check_integration<'inp, L>(
   // Sized for five schedules; the per-drain multiple carries the re-lexing their restores and peek
   // refills cost.
   //
-  // Wrapping is invisible to the comparison: `Bud<'inp, L>` carries L's `Token` and `Span`, so the
-  // streams collected here are the same type as `raw_tokens` below.
+  // Wrapping is invisible to the comparison: `Bud<'inp, L>` carries L's `Token`, `Span` and error
+  // type, so the streams collected here are the same type as `raw` below.
   let units = src.slice(..).map(|s| s.len()).unwrap_or(0);
   let tally = LexTally::new(
     idx,
@@ -2613,81 +2720,85 @@ fn check_integration<'inp, L>(
   );
 
   // The straight-lex reference: `next()` to exhaustion, no backtracking.
-  let straight = drive::<L, _>(src, &tally, |ir| drain_all::<Bud<'inp, L>>(ir, budget));
+  let straight = observe::<L>(src, &tally, |ir| drain_all::<Bud<'inp, L>>(ir, budget));
 
-  // Cross-check: the input layer's `next()` stream must equal the raw-lex tokens
-  // (errors are skipped by `next()`, so filter the reference to its Ok items).
-  let raw_tokens: Vec<(<L::Token as Token<'inp>>::Kind, L::Span)> = reference
+  // Cross-check: the input layer's committed TOKEN stream must equal the raw-lex tokens.
+  //
+  // The token arm only, and the error arm is left out on purpose rather than forgotten. Raw
+  // `lex()` errors and the refusals the layer raises are not the same sequence and are not
+  // supposed to be: the layer reports each refused *region* exactly once, keyed on the error
+  // span's end against a high-water mark (`emit_lexer_error_deduped`), so a lexer that errors
+  // eighty times over one span is conforming and the layer raises one. Asking for equality here
+  // would red it — the in-tree `RepeatErrLexer` is exactly that lexer, and it is a positive cell.
+  // What the dedup does NOT vary with is the schedule, which is where the error arm is compared
+  // below.
+  let raw_tokens: Vec<StreamItem<'inp, Bud<'inp, L>>> = reference
     .iter()
-    .filter_map(|it| it.kind().map(|k| (k, it.span.clone())))
+    .filter_map(|it| {
+      it.item
+        .as_ref()
+        .ok()
+        .map(|tok| StreamItem::Token(tok.clone(), it.span.clone()))
+    })
     .collect();
-  assert_stream_eq::<L>(idx, "raw-lex-vs-next", &raw_tokens, &straight);
+  assert_stream_eq::<Bud<'inp, L>>(
+    idx,
+    "raw-lex-vs-next",
+    COMMITTED,
+    &raw_tokens,
+    &straight.tokens,
+  );
 
   // peek-heavy: fill the cache before every consume; the drain path re-serves cached
   // tokens and re-lexes past the window.
-  let peek_heavy = drive::<L, _>(src, &tally, |ir| {
+  let peek_heavy = observe::<L>(src, &tally, |ir| {
     let mut out = Vec::new();
     loop {
       if out.len() > budget {
         panic!("tokora conformance [input #{idx} integration/peek-heavy] exceeded budget");
       }
-      let _ = ir
-        .peek::<U3>()
-        .expect("the conformance kit's Silent emitter never returns Err");
-      match ir
-        .next()
-        .expect("the conformance kit's Silent emitter never returns Err")
-      {
+      let _ = ir.peek::<U3>().expect(NEVER_ERRS);
+      match ir.next().expect(NEVER_ERRS) {
         Some(spanned) => {
           let (span, tok) = spanned.into_components();
-          out.push((tok.kind(), span));
+          out.push(StreamItem::Token(tok, span));
         }
         None => break,
       }
     }
     out
   });
-  assert_stream_eq::<L>(idx, "peek-heavy", &straight, &peek_heavy);
+  assert_observed_eq::<Bud<'inp, L>>(idx, "peek-heavy", &straight, &peek_heavy);
 
   // save-early-restore-late: save at 0, consume a prefix, abandon it, then drain the
   // whole stream — which must re-lex the rewound prefix identically.
-  let save_early = drive::<L, _>(src, &tally, |ir| {
+  let save_early = observe::<L>(src, &tally, |ir| {
     let ckp = ir.save();
     for _ in 0..3 {
-      if ir
-        .next()
-        .expect("the conformance kit's Silent emitter never returns Err")
-        .is_none()
-      {
+      if ir.next().expect(NEVER_ERRS).is_none() {
         break;
       }
     }
     ir.restore(ckp);
     drain_all::<Bud<'inp, L>>(ir, budget)
   });
-  assert_stream_eq::<L>(idx, "save-early-restore-late", &straight, &save_early);
+  assert_observed_eq::<Bud<'inp, L>>(idx, "save-early-restore-late", &straight, &save_early);
 
   // drain-then-restore-across-cache: fill the cache, drain it and lex past it, then
   // restore to a save that predates the cache — the post-save cache is dropped and the
   // region re-lexes on demand.
-  let across_cache = drive::<L, _>(src, &tally, |ir| {
+  let across_cache = observe::<L>(src, &tally, |ir| {
     let ckp = ir.save();
-    let _ = ir
-      .peek::<U3>()
-      .expect("the conformance kit's Silent emitter never returns Err");
+    let _ = ir.peek::<U3>().expect(NEVER_ERRS);
     for _ in 0..4 {
-      if ir
-        .next()
-        .expect("the conformance kit's Silent emitter never returns Err")
-        .is_none()
-      {
+      if ir.next().expect(NEVER_ERRS).is_none() {
         break;
       }
     }
     ir.restore(ckp);
     drain_all::<Bud<'inp, L>>(ir, budget)
   });
-  assert_stream_eq::<L>(
+  assert_observed_eq::<Bud<'inp, L>>(
     idx,
     "drain-then-restore-across-cache",
     &straight,
@@ -2696,88 +2807,112 @@ fn check_integration<'inp, L>(
 
   // nested-savepoints: outer save, consume, inner save, consume, restore inner (LIFO),
   // consume, restore outer, drain. Exercises nested last-in-first-out restores.
-  let nested = drive::<L, _>(src, &tally, |ir| {
+  let nested = observe::<L>(src, &tally, |ir| {
     let outer = ir.save();
-    let _ = ir
-      .next()
-      .expect("the conformance kit's Silent emitter never returns Err");
+    let _ = ir.next().expect(NEVER_ERRS);
     let inner = ir.save();
-    let _ = ir
-      .next()
-      .expect("the conformance kit's Silent emitter never returns Err");
+    let _ = ir.next().expect(NEVER_ERRS);
     ir.restore(inner);
-    let _ = ir
-      .next()
-      .expect("the conformance kit's Silent emitter never returns Err");
+    let _ = ir.next().expect(NEVER_ERRS);
     ir.restore(outer);
     drain_all::<Bud<'inp, L>>(ir, budget)
   });
-  assert_stream_eq::<L>(idx, "nested-savepoints", &straight, &nested);
+  assert_observed_eq::<Bud<'inp, L>>(idx, "nested-savepoints", &straight, &nested);
 }
 
-/// Which component of a committed `(kind, span)` pair decided a comparison of two of them, in
-/// [`Item::compare`]'s order and answering in its terms.
+/// Which arm of a committed stream a divergence was found on, in the two places the report names
+/// it: the noun the verdict uses, and the position label the refusal is asked at.
 ///
-/// Both components are bounded stronger than [`PartialEq`] — [`Token::Kind`] is `Eq` and
-/// [`Lexer::Span`] is `Ord` — so a refusal drawn from either means an implementation claiming a
-/// total equality it does not have. That is a *worse* caller defect than the partial one a token
-/// or error payload carries, and reporting it as a divergence of the committed stream is exactly
-/// as wrong. See [`refuse_non_reflexive`].
-///
-/// The pair has no discriminant, so [`Decided::Discriminant`] cannot arise here: the two
-/// components are the whole observable, and one of them decides every failure.
-fn stream_pair_compare<'inp, L>(
-  expected: &(<L::Token as Token<'inp>>::Kind, L::Span),
-  got: &(<L::Token as Token<'inp>>::Kind, L::Span),
-) -> Comparison
-where
+/// The arm is carried rather than inferred because both arms hold the same [`StreamItem`] type —
+/// each sequence is homogeneous, so the value cannot say which sequence it came from, and a
+/// verdict that called a raised refusal a "committed token" would be describing the wrong half of
+/// the layer's behavior.
+#[derive(Clone, Copy)]
+struct Arm {
+  /// The stream's noun, as in "committed token stream diverges".
+  noun: &'static str,
+  /// What a position on this arm is called, so a `non-reflexive-payload` refusal names the arm
+  /// the failed comparison was drawn from.
+  at: &'static str,
+}
+
+/// The tokens `next()` handed back.
+const COMMITTED: Arm = Arm {
+  noun: "committed token",
+  at: "position",
+};
+
+/// The lexer errors the input layer raised underneath the drain.
+const RAISED: Arm = Arm {
+  noun: "raised lexer-error",
+  at: "error position",
+};
+
+/// Asserts two schedules observed the input layer identically — the same committed tokens and the
+/// same raised lexer errors, both by value.
+fn assert_observed_eq<'inp, L>(
+  idx: usize,
+  sched: &str,
+  expected: &Observed<'inp, L>,
+  got: &Observed<'inp, L>,
+) where
   L: Lexer<'inp>,
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
 {
-  if expected.0 != got.0 {
-    return Comparison::Differs(decided_by(Decided::KIND, &expected.0, &got.0));
-  }
-  if expected.1 != got.1 {
-    return Comparison::Differs(decided_by(Decided::SPAN, &expected.1, &got.1));
-  }
-  Comparison::Equal
+  assert_stream_eq::<L>(idx, sched, COMMITTED, &expected.tokens, &got.tokens);
+  assert_stream_eq::<L>(idx, sched, RAISED, &expected.errors, &got.errors);
 }
 
-/// Asserts two committed (kind, span) token streams are identical, with position context.
+/// Asserts two item streams are identical, with position context.
+///
+/// The comparison is [`StreamItem::compare`] — the same component-aware, reflexivity-aware path
+/// the partial tier draws its verdicts from, and the reason this tier has no comparison of its
+/// own. It replaced a local `(kind, span)` one, which was both a projection of the item (#269 at
+/// this tier) and a second implementation of a rule that already existed: the two could drift,
+/// and the older one already had, since it could not see the arm at all.
 fn assert_stream_eq<'inp, L>(
   idx: usize,
   sched: &str,
-  expected: &[(<L::Token as Token<'inp>>::Kind, L::Span)],
-  got: &[(<L::Token as Token<'inp>>::Kind, L::Span)],
+  arm: Arm,
+  expected: &[StreamItem<'inp, L>],
+  got: &[StreamItem<'inp, L>],
 ) where
   L: Lexer<'inp>,
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
 {
   let n = expected.len().min(got.len());
   for i in 0..n {
-    if let Comparison::Differs(decided) = stream_pair_compare::<L>(&expected[i], &got[i]) {
-      // The third member of the same population. `Token::Kind` is bounded `Eq` and `Lexer::Span`
-      // is bounded `Ord`, so non-reflexivity here is a broken TOTAL-equality promise rather than
-      // the partial one the token and error payloads carry — a stronger caller defect, and the
-      // same wrong verdict to report as a stream divergence. Guarding four comparisons and not
-      // the fifth is the defect relocated, and this one costs a call on a path already panicking.
+    if let Comparison::Differs(decided) = expected[i].compare(&got[i]) {
+      // The third member of the same population. `Token::Kind` is bounded `Eq`, `Lexer::Span` is
+      // bounded `Ord` and the two payloads are bounded only `PartialEq`, so a refusal here is
+      // drawn from whichever of those decided it — exactly as it is on the other four
+      // comparisons. Guarding four and not the fifth is the defect relocated, and this one costs
+      // a call on a path already panicking.
       let op = format!("integration/{sched}");
-      let at = format!("position {i}");
+      let at = format!("{} {i}", arm.at);
       refuse_decided(
         idx,
         &op,
         &at,
         &decided,
-        &format!("{:?}", expected[i]),
-        &format!("{:?}", got[i]),
+        &expected[i].describe(),
+        &got[i].describe(),
       );
       panic!(
-        "tokora conformance [input #{idx} integration/{sched}] position {i}: committed token stream diverges: expected {:?}, got {:?}",
-        expected[i], got[i]
+        "tokora conformance [input #{idx} integration/{sched}] {} {i}: {} stream diverges: expected {}, got {}",
+        arm.at,
+        arm.noun,
+        expected[i].describe(),
+        got[i].describe()
       );
     }
   }
   if expected.len() != got.len() {
     panic!(
-      "tokora conformance [input #{idx} integration/{sched}] committed token stream length differs: straight-lex has {}, schedule has {}",
+      "tokora conformance [input #{idx} integration/{sched}] {} stream length differs: straight-lex has {}, schedule has {}",
+      arm.noun,
       expected.len(),
       got.len()
     );

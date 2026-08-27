@@ -1803,6 +1803,44 @@ and will red until they do.
   control is `TickingErrLexer` — conforming, unstable `Debug` — now driven through `run` as well
   as `run_partial`.
 
+- **The integration tier compares the committed item, and it compares both of its arms** (#269).
+  The last tier still holding the key #269 removed. Its five schedules reduced every committed
+  token to `(kind, span)` and threw the `L::Token` the drain loop had just been handed away, and
+  they ran under `Silent`, which discards a lexer error outright. So a token payload that moved
+  between two schedules of the same input — same kind, same span, same item count — was certified,
+  and the whole error arm of the committed stream sat outside all five comparisons: a refusal
+  leaves no token behind, so a lexer whose refusal payload moved between schedules produced five
+  identical (empty) token streams.
+
+  Both halves are the same defect the trait tier had, at the one tier neither #269 nor #295
+  reached, and the fix is to stop projecting rather than to compare harder: the streams now hold
+  `StreamItem` — the partial tier's own item type, renamed because it now serves both tiers that
+  drive an `Input` — and every verdict is drawn from `StreamItem::compare`, the component-aware,
+  reflexivity-aware path that already existed. The tier's local `(kind, span)` comparison is gone;
+  a second implementation of one rule is what let the two drift in the first place. **This costs
+  no new bound.** `run` already asks for the two `PartialEq`s, and retention is free: `Token` is
+  bounded `Clone` and `Token::Error` is bounded `Clone`, both by the `Token` trait, so the tier
+  excludes nobody it did not already exclude.
+
+  **The two arms are compared as two sequences, not as one interleaved stream, and the error arm
+  is not cross-checked against the raw lexer.** Both are facts about the input layer that a
+  stronger-looking check would have gotten wrong, and both were written, run, and rejected by an
+  existing positive cell rather than reasoned about. A `peek` reports a refusal the moment it
+  lexes the region, so on `"a?b"` the straight drain observes `token, error, token` and
+  `peek-heavy` observes `error, token, token` — both conforming, and an interleaved comparison
+  reds `error_yielding_lexer_passes_every_check`. The layer also reports each refused region
+  exactly once, keyed on a high-water mark, while the raw lexer may error over one span
+  repeatedly: `RepeatErrLexer<80>` raises eighty and the layer raises one, and requiring equality
+  there reds three positive cells. What survives both is what the tier now asserts — each arm's
+  own sequence, per schedule, against the straight drain's.
+
+  The emitter is now the partial tier's `ItemRecorder` rather than `Silent`, which is what puts a
+  refusal in front of a comparison at all; its `checkpoint`/`rewind` was written for "a later
+  schedule that does backtrack" and three of these five are it, so a restore rewinds the recorded
+  errors in the same operation that rewinds the layer's dedup watermark. Two plants, one per arm:
+  a token payload and an error payload, each keyed to the `Lexer::new` instance the drive was
+  seeded from, so every trait-tier check passes and the straight drain and `peek-heavy` disagree.
+
 - **The conformance kits diagnose a payload that is not equal to itself instead of convicting the
   lexer or the cache** (#295). `PartialEq` promises symmetry and transitivity and **not**
   reflexivity, so a token payload holding an `f64` that can be `NaN` is not equal to itself. The
