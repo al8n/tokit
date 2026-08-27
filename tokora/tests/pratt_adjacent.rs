@@ -38,7 +38,7 @@
 
 mod common;
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use tokora::{
@@ -447,24 +447,78 @@ where
   )
 }
 
-/// What one run of the grammar above did: its outcome, how many times the LHS channel was
-/// entered, and how many folds ran.
+/// What one run of a counted grammar did: how many times the LHS channel was entered, how many
+/// folds ran, and — **unsettled** — what came back.
+///
+/// The counters are plain fields and the outcome is behind [`Run::settle`], deliberately: the
+/// counts are what these cells are for, so they must be assertable *before* anything decides
+/// whether the profile split was honoured. A runner that settled first would red on the profile
+/// table where a plant should red on the number.
 struct Run {
-  /// `None` when the driver's own assertion unwound the run — the debug profile's half of the
-  /// contract. `Some` is the value the release profile returns.
-  outcome: Option<Result<String, AdjError>>,
+  caught: std::thread::Result<Result<String, AdjError>>,
   lhs_entries: usize,
   folds: usize,
 }
 
+/// What a settled [`Run`] produced.
+struct Settled {
+  /// `None` when the driver's own assertion unwound the run — the debug profile's half of the
+  /// contract. `Some` is the value the release profile returns.
+  outcome: Option<Result<String, AdjError>>,
+  /// The refusal's own wording, in a debug build. **Both** adjacency refusals arrive as the same
+  /// terminal `UnexpectedEoRhs` and at the same counts, so the error value alone cannot say which
+  /// law stopped the parse; the assertion text can, and a cell that means one of them says so.
+  refusal: Option<String>,
+}
+
+impl Run {
+  /// The four-arm profile table, shared by the two counted fixtures below.
+  ///
+  /// The house idiom (`pratt_txn_retention.rs`'s `stall_outcome`), matched rather than asserted:
+  /// `cfg!` is a constant, and an `assert!` over one is a lint. Only two of the arms are the
+  /// contract, and the other two are named so a cell cannot pass by measuring the wrong profile
+  /// twice.
+  fn settle(self, expect_refusal: bool) -> Settled {
+    let (outcome, refusal) = match (self.caught, expect_refusal, cfg!(debug_assertions)) {
+      // Debug, refused: one of the driver's own adjacency assertions, raised in the wrapper once
+      // the expression guard has settled. The payload is the wording, which names which one.
+      (Err(payload), true, true) => (None, Some(panic_text(&*payload))),
+      // Release, refused: no assertion exists, so the violation must arrive as the terminal error.
+      (Ok(out), true, false) => (Some(out), None),
+      (Ok(out), true, true) => panic!(
+        "a debug build must reach the driver's own assertion — got {out:?}. Without it this cell \
+         measures the release path twice and pins nothing about where that assertion fires"
+      ),
+      (Err(_), true, false) => panic!(
+        "a release build has no assertion to raise on this exit, so an unwind out of it means a \
+         settle refused rather than restored"
+      ),
+      // A served continuation must not panic in either profile.
+      (Ok(out), false, _) => (Some(out), None),
+      (Err(_), false, _) => panic!("a served continuation raised no assertion in either profile"),
+    };
+    Settled { outcome, refusal }
+  }
+}
+
+/// A panic payload as text. `debug_assert!` with a bare literal message panics with a
+/// `&'static str`; one whose message is formatted panics with a `String`. Both are read, so the
+/// cells do not depend on which the compiler chose.
+fn panic_text(payload: &(dyn core::any::Any + Send)) -> String {
+  payload
+    .downcast_ref::<String>()
+    .cloned()
+    .or_else(|| {
+      payload
+        .downcast_ref::<&'static str>()
+        .map(|s| (*s).to_owned())
+    })
+    .unwrap_or_else(|| "<a panic payload that is neither String nor &str>".to_owned())
+}
+
 /// Runs the grammar under `catch_unwind`, so the counters can be read on **both** sides of the
 /// profile split rather than only on the side that does not panic.
-///
-/// The four-arm table is the house idiom (`pratt_txn_retention.rs`'s `stall_outcome`) and it is
-/// matched rather than asserted: `cfg!` is a constant, and an `assert!` over one is a lint. Only
-/// two of the arms are the contract, and the other two are named so a cell cannot pass by
-/// measuring the wrong profile twice.
-fn paid(src: &str, expect_refusal: bool) -> Run {
+fn paid(src: &str) -> Run {
   let _guard = PAID_LOCK.lock().unwrap_or_else(|e| e.into_inner());
   PAID_LHS_CALLS.store(0, Ordering::Relaxed);
   PAID_FOLDS.store(0, Ordering::Relaxed);
@@ -474,43 +528,33 @@ fn paid(src: &str, expect_refusal: bool) -> Run {
       .parse_str(src)
       .expect("the outer parser never fails")
   });
-  let outcome = match (caught, expect_refusal, cfg!(debug_assertions)) {
-    // Debug, refused: the driver's own charge assertion, raised in the wrapper once the
-    // expression guard has settled.
-    (Err(_), true, true) => None,
-    // Release, refused: no assertion exists, so the violation must arrive as the terminal error.
-    (Ok(out), true, false) => Some(out),
-    (Ok(out), true, true) => panic!(
-      "a debug build must reach the driver's own charge assertion — got {out:?}. Without it \
-       this cell measures the release path twice and pins nothing about where that assertion \
-       fires"
-    ),
-    (Err(_), true, false) => panic!(
-      "a release build has no assertion to raise on this exit, so an unwind out of it means a \
-       settle refused rather than restored"
-    ),
-    // A served continuation must not panic in either profile.
-    (Ok(out), false, _) => Some(out),
-    (Err(_), false, _) => panic!("a served continuation raised no assertion in either profile"),
-  };
   Run {
-    outcome,
+    caught,
     lhs_entries: PAID_LHS_CALLS.load(Ordering::Relaxed),
     folds: PAID_FOLDS.load(Ordering::Relaxed),
   }
 }
 
+/// The wording of the charge below — the refusal that prices *this cycle's operand*, as against
+/// the debt refusal that prices the frames a descent would build. Matched as a fragment of the
+/// driver's own assertion, which is what keeps a cell from passing on the other law's exit.
+const CHARGE_WORDING: &str = "right operand consumed nothing";
+
+/// The debt refusal's wording, the same way.
+const DEBT_WORDING: &str = "no input committed since the enclosing one";
+
 /// The operand paid, so the continuation is served.
 #[test]
 fn a_continuation_whose_operand_consumed_is_served() {
-  let run = paid("1 2", false);
-  assert_eq!(run.outcome, Some(Ok("(1 · 2)".to_owned())));
+  let run = paid("1 2");
   assert_eq!(
     run.lhs_entries, 2,
     "one entry for `1` and one for the operand the continuation descended onto — the ending is \
      the RHS channel's answer and costs no third entry"
   );
   assert_eq!(run.folds, 1);
+  let served = run.settle(false);
+  assert_eq!(served.outcome, Some(Ok("(1 · 2)".to_owned())));
 }
 
 /// **The charge, and the fact that it sits in front of the work.**
@@ -527,7 +571,7 @@ fn a_continuation_whose_operand_consumed_is_served() {
 /// the recursion budget and the error would be `RecursionLimitReached`.
 #[test]
 fn a_continuation_nothing_paid_for_is_refused_before_it_folds() {
-  let run = paid("1 ;", true);
+  let run = paid("1 ;");
   assert_eq!(
     run.folds, 0,
     "the charge is read when the operand parse returns, before the fold and before the wrap"
@@ -536,7 +580,16 @@ fn a_continuation_nothing_paid_for_is_refused_before_it_folds() {
     run.lhs_entries, 2,
     "`1`, then the hole the unpaid continuation descended onto — and nothing after it"
   );
-  if let Some(out) = run.outcome {
+  let refused = run.settle(true);
+  if let Some(msg) = refused.refusal.as_deref() {
+    assert!(
+      msg.contains(CHARGE_WORDING),
+      "debug: the law that stopped this is the CHARGE — the operand of a continuation the debt \
+       test admitted. The debt refusal reaches the same counts and the same error, so a cell \
+       that does not read the wording cannot tell the two apart: {msg}"
+    );
+  }
+  if let Some(out) = refused.outcome {
     assert_eq!(
       out,
       Err(AdjError::EoRhs),
@@ -550,13 +603,20 @@ fn a_continuation_nothing_paid_for_is_refused_before_it_folds() {
 /// property of the first one, and the paid fold ahead of it still happened.
 #[test]
 fn the_charge_is_paid_once_per_continuation() {
-  let run = paid("1 2 ;", true);
+  let run = paid("1 2 ;");
   assert_eq!(
     run.folds, 1,
     "the paid continuation folded and the unpaid one did not"
   );
   assert_eq!(run.lhs_entries, 3, "`1`, `2`, then the hole");
-  if let Some(out) = run.outcome {
+  let refused = run.settle(true);
+  if let Some(msg) = refused.refusal.as_deref() {
+    assert!(
+      msg.contains(CHARGE_WORDING),
+      "the charge, not the debt: {msg}"
+    );
+  }
+  if let Some(out) = refused.outcome {
     assert_eq!(out, Err(AdjError::EoRhs));
   }
 }
@@ -615,6 +675,220 @@ fn a_long_adjacency_chain_iterates_in_one_frame() {
   );
 }
 
+// ── The escalation a frame-local charge cannot price ──────────────────────────
+//
+// The charge above is frame-local and RETROSPECTIVE: it runs when the recursive operand parse
+// returns, so it prices this frame's own cycles and nothing the descent already built. The
+// argument that used to close the gap was that what can still nest is a strictly increasing power
+// chain, "the grammar's ladder, which the input does not choose" — and that is true only while the
+// powers come from the grammar. A classifier is contract-valid with state in it, and this one puts
+// the ladder under the input's control: a strictly increasing power at every level, zero-width
+// operands all the way down, and the document's single byte arriving in the DEEPEST frame, where
+// it is past the committed position every ancestor descended from and so passes every charge at
+// once.
+//
+// What that buys, on a driver with the charge alone: `LADDER_RUNGS` native frames,
+// `LADDER_RUNGS` folds and as many CST wraps, for one byte — and an `Ok` at the end of it. The
+// counts are the differential; a terminal error is not, because the recursion limiter reaches one
+// too, several hundred frames later and saying something else.
+
+/// How far the classifier escalates. Derived from the recursion budget and **under** it, so this
+/// input is one the escalation completes: what the cells below measure is the charge failing to
+/// bound the descent, not the limiter absorbing it.
+const LADDER_RUNGS: i64 = (RecursionLimiter::PARSE_DEFAULT_DEPTH * 3 / 4) as i64;
+
+/// The rung the classifier has escalated to — the whole of its state, and the thing that makes
+/// these powers a function of the parse rather than of the grammar.
+static LADDER_RUNG: AtomicI64 = AtomicI64::new(0);
+
+/// Whether the LHS channel pays for every rung or only for the deepest one. The single difference
+/// between the escalation and its control.
+static LADDER_PAYS_EVERY_RUNG: AtomicBool = AtomicBool::new(false);
+
+static LADDER_LHS_CALLS: AtomicUsize = AtomicUsize::new(0);
+static LADDER_FOLDS: AtomicUsize = AtomicUsize::new(0);
+static LADDER_LOCK: Mutex<()> = Mutex::new(());
+
+fn ladder_lhs<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<PrattLHS<String, &'static str, i64>, AdjError>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = AdjError>,
+{
+  LADDER_LHS_CALLS.fetch_add(1, Ordering::Relaxed);
+  let deepest = LADDER_RUNG.load(Ordering::Relaxed) >= LADDER_RUNGS;
+  if !(deepest || LADDER_PAYS_EVERY_RUNG.load(Ordering::Relaxed))
+    || !operand_can_begin(inp.peek_kind()?)
+  {
+    // A zero-width operand. Legal — `PrattLHS::Operand` is not held to "consume what you report"
+    // — and the shape a recovery hole already uses.
+    return Ok(PrattLHS::Operand("<hole>".to_owned()));
+  }
+  match inp.next()? {
+    Some(tok) => match tok.into_data() {
+      Token::Num(n) => Ok(PrattLHS::Operand(n.to_string())),
+      _ => Err(AdjError::Other),
+    },
+    None => Err(AdjError::Other),
+  }
+}
+
+fn ladder_rhs<'inp, Ctx>(
+  _inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<PrattRHS<&'static str, &'static str, &'static str, (), i64>, AdjError>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = AdjError>,
+{
+  let rung = LADDER_RUNG.load(Ordering::Relaxed);
+  if rung >= LADDER_RUNGS {
+    return Ok(PrattRHS::End);
+  }
+  LADDER_RUNG.store(rung + 1, Ordering::Relaxed);
+  // STRICTLY INCREASING, which is exactly what each inner frame's `Exclusive(p)` floor admits.
+  // Nothing in the input chose this ladder and no line of the grammar wrote it down: the
+  // classifier reads its own state, which is a thing `ParsePrattRHS` permits and this driver
+  // cannot see.
+  Ok(PrattRHS::Adjacent(Precedenced::new("·", rung + 1)))
+}
+
+fn ladder_fold_infix<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+  left: String,
+  right: String,
+  op: Precedenced<PrattInfix<&'static str, &'static str, &'static str>, i64>,
+) -> Result<String, AdjError>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = AdjError>,
+{
+  LADDER_FOLDS.fetch_add(1, Ordering::Relaxed);
+  juxt_fold_infix(inp, left, right, op)
+}
+
+fn ladder_expr<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx>,
+) -> Result<Result<String, AdjError>, AdjError>
+where
+  Ctx: ParseContext<'inp, TestLexer<'inp>>,
+  Ctx::Emitter: Emitter<'inp, TestLexer<'inp>, Error = AdjError>,
+{
+  Ok(
+    pratt(
+      ladder_lhs,
+      ladder_rhs,
+      juxt_fold_prefix,
+      ladder_fold_infix,
+      juxt_fold_postfix,
+    )
+    .parse_input(inp),
+  )
+}
+
+fn ladder(src: &str, pays_every_rung: bool) -> Run {
+  let _guard = LADDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+  LADDER_RUNG.store(0, Ordering::Relaxed);
+  LADDER_PAYS_EVERY_RUNG.store(pays_every_rung, Ordering::Relaxed);
+  LADDER_LHS_CALLS.store(0, Ordering::Relaxed);
+  LADDER_FOLDS.store(0, Ordering::Relaxed);
+  let caught = std::panic::catch_unwind(|| {
+    Parser::new()
+      .apply(ladder_expr)
+      .parse_str(src)
+      .expect("the outer parser never fails")
+  });
+  Run {
+    caught,
+    lhs_entries: LADDER_LHS_CALLS.load(Ordering::Relaxed),
+    folds: LADDER_FOLDS.load(Ordering::Relaxed),
+  }
+}
+
+/// **One byte may not buy a second zero-token frame, however the powers are spelled.**
+///
+/// `lhs_entries` is the frame count — the LHS channel is entered exactly once per frame — and
+/// `folds` is the work. Two entries: the frame that took the outermost continuation, and the one
+/// that reported the second and was refused before descending. Zero folds: the refusal is in
+/// front of the work, as the charge is.
+///
+/// **The falsifier, and it is a count and not an error.** Delete the debt test in the `Adjacent`
+/// arm, or pass `None` instead of `Some(&committed)` at its descent, and this cell reads
+/// `LADDER_RUNGS + 1` entries and `LADDER_RUNGS` folds — with `Ok`, not an error, because the
+/// document's one byte reaches the deepest frame and satisfies every ancestor's charge on the way
+/// back up. That is the whole finding: a charge read on the way up cannot price what the way down
+/// built. The rung count is under the recursion budget precisely so the cell reds on those
+/// numbers rather than on `RecursionLimitReached`, which a driver with no bound at all would also
+/// eventually reach.
+#[test]
+fn an_escalating_classifier_cannot_buy_frames_the_input_did_not() {
+  let run = ladder("1", false);
+  assert_eq!(
+    run.lhs_entries, 2,
+    "one frame took the outermost continuation and the next was refused before it descended — \
+     an escalating classifier buys no frame the input has not paid for"
+  );
+  assert_eq!(
+    run.folds, 0,
+    "and the refusal is in front of the fold, the wrap and the next turn, exactly as the charge is"
+  );
+  let refused = run.settle(true);
+  if let Some(msg) = refused.refusal.as_deref() {
+    assert!(
+      msg.contains(DEBT_WORDING),
+      "debug: the law that stopped this is the DEBT — a continuation descending on input the \
+       enclosing one was already paid with. The charge would name the operand instead: {msg}"
+    );
+  }
+  if let Some(out) = refused.outcome {
+    assert_eq!(
+      out,
+      Err(AdjError::EoRhs),
+      "release: the terminal end-of-RHS report, the same posture every other unpaid continuation \
+       takes"
+    );
+  }
+}
+
+/// **The control, and it is the half that says the bound is a price and not a prohibition.**
+///
+/// The same escalating classifier, over a document that pays a whole operand per rung. Every
+/// level advances committed consumption past the position its parent descended from, so every
+/// level is admitted: `LADDER_RUNGS + 1` frames and `LADDER_RUNGS` folds, right-deep because a
+/// strictly increasing ladder is what makes the inner frame take the next continuation.
+///
+/// Without this cell the one above passes on a driver that refuses every nested adjacency
+/// outright — which is a bound, and the wrong one.
+#[test]
+fn a_ladder_the_document_pays_for_rung_by_rung_still_nests() {
+  let rungs = usize::try_from(LADDER_RUNGS).expect("the rung count is a small positive number");
+  let src = (0..=rungs).map(|_| "1").collect::<Vec<_>>().join(" ");
+  let run = ladder(&src, true);
+  assert_eq!(
+    run.lhs_entries,
+    rungs + 1,
+    "one frame per rung, plus the innermost operand's — every one of them paid for by an operand \
+     of its own"
+  );
+  assert_eq!(run.folds, rungs, "and every rung folded");
+  let out = run
+    .settle(false)
+    .outcome
+    .expect("a paid ladder is served in both profiles")
+    .expect("and it parses");
+  assert_eq!(
+    out.matches('·').count(),
+    rungs,
+    "every rung folded into the tree"
+  );
+  assert!(
+    out.starts_with("(1 · (1 · "),
+    "and the tree is right-deep, because a strictly increasing ladder is what puts the next \
+     continuation inside the previous one's right operand: {}",
+    &out[..out.len().min(96)]
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Section three — the token-level engine refuses the shape
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -635,7 +909,14 @@ impl PrattToken<'_, i64, i64> for Token {
         PrattInfix::Left(()),
         P_LOOSE,
       ))),
-      // The report this engine cannot serve.
+      // `Neither` at the adjacency's own power, so a frame can be latched before the adjacency
+      // arrives — the chain constraint is a property of the chain and not of the newcomer.
+      Token::Eq => Some(PrattRHS::Infix(Precedenced::new(
+        PrattInfix::Neither(()),
+        P_LOOSE,
+      ))),
+      // The report this engine cannot serve — but only once the floor has admitted it and the
+      // chain constraint has let it through.
       Token::Comma => Some(PrattRHS::Adjacent(Precedenced::new((), P_LOOSE))),
       _ => None,
     }
@@ -663,30 +944,61 @@ fn tok_fold_unary<'inp, E>(
   Ok(a)
 }
 
-/// Runs the token engine over `src` under a **recording** emitter, returning the token it ended
-/// with and how many diagnostics it recorded.
-fn token_engine(src: &str) -> (Option<Token>, usize) {
-  fn probe<'inp>(
+/// What one token-engine run did: the parser's own outcome, how many diagnostics it recorded,
+/// and how many tokens it left on the input for the surrounding grammar.
+struct TokRun {
+  outcome: Result<Option<Token>, AdjError>,
+  recorded: usize,
+  left_on_input: usize,
+}
+
+/// Runs the token engine over `src` at a given floor, under a **recording** emitter.
+///
+/// The engine's own `Err` is captured rather than propagated, so a `NonAssociativeChain` is a
+/// value this fixture asserts on instead of a failure of the surrounding parse — and the
+/// diagnostic count and the handback are still read on that path.
+fn token_engine_at<const FLOOR: i64>(src: &str) -> TokRun {
+  fn probe<'inp, const FLOOR: i64>(
     inp: &mut InputRef<
       'inp,
       '_,
       TestLexer<'inp>,
       ParserContext<'inp, TestLexer<'inp>, Verbose<AdjError>>,
     >,
-  ) -> Result<(Option<Token>, usize), AdjError> {
-    let out = inp.pratt::<_, _, _, i64, i64>(
+  ) -> Result<TokRun, AdjError> {
+    let out = inp.pratt_with_min_precedence::<_, _, _, i64, i64>(
       tok_fold_unary::<Verbose<AdjError>>,
       tok_fold_infix::<Verbose<AdjError>>,
       tok_fold_unary::<Verbose<AdjError>>,
-    )?;
+      FLOOR,
+    );
     let recorded = inp.emitter_ref().errors().values().flatten().count();
-    Ok((out.map(|t| t.into_data()), recorded))
+    let mut left_on_input = 0usize;
+    while inp.next()?.is_some() {
+      left_on_input += 1;
+    }
+    Ok(TokRun {
+      outcome: out.map(|o| o.map(|t| t.into_data())),
+      recorded,
+      left_on_input,
+    })
   }
 
   Parser::with_context(ParserContext::new(Verbose::<AdjError>::new()))
-    .apply(probe)
+    .apply(probe::<FLOOR>)
     .parse_str(src)
     .expect("a recording emitter carries the diagnostic instead of failing the parse")
+}
+
+/// The same, entered at the default floor.
+fn token_engine(src: &str) -> (Option<Token>, usize) {
+  let run = token_engine_at::<0>(src);
+  (
+    run
+      .outcome
+      .expect("the default-floor cells do not trip the chain constraint"),
+    run.recorded,
+  )
 }
 
 /// The token engine **diagnoses** the report instead of parking it and ending the expression.
@@ -720,6 +1032,75 @@ fn the_token_engine_still_serves_a_spelled_operator() {
   let (returned, recorded) = token_engine("1 + 2");
   assert_eq!(returned, Some(Token::Num(2)), "folded to the right operand");
   assert_eq!(recorded, 0);
+}
+
+/// **An adjacency BELOW the floor is the surrounding grammar's, and is declined rather than
+/// diagnosed.**
+///
+/// Parking the report the moment it is seen reads the payload as "adjacency" and never as
+/// "adjacency *at a power*", so an embedded parse entered above the adjacency's power — the
+/// ordinary way a Pratt expression is nested inside a larger grammar — is handed a diagnostic for
+/// an operator that was never its own. The token stays on the input either way, which is what
+/// makes the diagnostic count the whole differential: the engine's *value* is `1` on both sides.
+///
+/// Falsifier: drop the floor test from the `Adjacent` arm of `input_ref/pratt.rs` and `recorded`
+/// goes to 1 while everything else in this cell is unchanged.
+#[test]
+fn an_adjacency_below_the_floor_is_declined_and_not_diagnosed() {
+  let run = token_engine_at::<P_TIGHT>("1 , 2");
+  assert_eq!(
+    run.outcome,
+    Ok(Some(Token::Num(1))),
+    "at a floor above the adjacency's power the expression is the bare operand"
+  );
+  assert_eq!(
+    run.recorded, 0,
+    "and `,` belongs to whatever grammar wrapped this call, so this engine says nothing about it"
+  );
+  assert_eq!(
+    run.left_on_input, 2,
+    "`,` and `2` are handed back untouched"
+  );
+}
+
+/// **A same-power adjacency after a `Neither` fold is a chain violation, and says so.**
+///
+/// `1 = 2 , 3`: the frame folds a non-associative `=` at the adjacency's power, and the `,` is the
+/// second link. That is `NonAssociativeChain` — non-terminal, the token left on the input, a
+/// recoverer's to spend — for exactly the reason it is one when the second link is spelled. Parked
+/// unconditionally it became the unsupported-adjacency diagnostic instead: terminal in meaning,
+/// wrong in kind, and returned as an `Ok` that a recoverer cannot act on.
+///
+/// The inner frame's decline is in this input too, and it is why `recorded` is 0 rather than 1:
+/// `,` at power 1 is below `=`'s `Exclusive(1)` right-operand floor, so the inner frame hands it
+/// back rather than diagnosing it.
+#[test]
+fn a_same_power_adjacency_after_a_neither_fold_is_a_chain_violation() {
+  let run = token_engine_at::<0>("1 = 2 , 3");
+  assert_eq!(
+    run.outcome,
+    Err(AdjError::NonAssoc),
+    "the chain constraint outranks the engine's inability to serve the report — the second link \
+     is malformed input, not an unsupported shape"
+  );
+  assert_eq!(
+    run.recorded, 0,
+    "the trip is returned, never emitted, and the inner frame's below-floor decline emits nothing \
+     either"
+  );
+}
+
+/// The control for both: an admitted, non-repeating adjacency still reaches the engine's
+/// unsupported path. The two cells above narrow that path; they do not remove it.
+#[test]
+fn an_admitted_non_repeating_adjacency_still_reaches_the_refusal() {
+  let run = token_engine_at::<P_LOOSE>("1 , 2");
+  assert_eq!(run.outcome, Ok(Some(Token::Num(1))));
+  assert_eq!(
+    run.recorded, 1,
+    "at the adjacency's own power, with no `Neither` latched, the report is this engine's and it \
+     has no way to serve it"
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

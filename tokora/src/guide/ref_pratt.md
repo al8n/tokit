@@ -355,9 +355,13 @@ Three properties are worth knowing before you reach for it:
   operand on input nothing consumed;
 * **the report is exempt from "consume what you report".** Consuming nothing is the point.
   Consuming trivia before deciding is fine too;
-* **the right operand carries the obligation instead.** A continuation whose whole cycle advanced
-  no input is refused with a terminal `UnexpectedEoRhs`, before the fold runs. If your grammar can
-  answer a zero-width operand — a recovery hole, typically — that is the shape that reaches it.
+* **the right operand carries the obligation instead, and pays twice.** A continuation whose whole
+  cycle advanced no input is refused with a terminal `UnexpectedEoRhs`, before the fold runs — and
+  so is one reported in a frame that has committed nothing since the enclosing continuation
+  descended, before the recursion runs. The second is what stops a classifier from escalating its
+  powers over zero-width operands and buying a frame per rung with one byte; together they mean an
+  adjacency chain is never deeper than the bytes under it. If your grammar can answer a zero-width
+  operand — a recovery hole, typically — that is the shape that reaches either.
 
 The token-level engine (`InputRef::pratt`) does not serve this report: it has no token to commit
 for it and none to hand `fold_infix`. It raises the end-of-RHS diagnostic instead of ending the

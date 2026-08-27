@@ -186,14 +186,20 @@ pub enum PrattRHS<L, R, N, Post, Power = i64> {
   ///
   /// The payload is the [`Infix`](Self::Infix) arm's **left**-associative operator type, and the
   /// driver descends the right operand on `> power` — the left-associative bound — with no
-  /// alternative offered. That is not a default; it is the depth bound. A right-associative bound
-  /// admits the operator's *own* power into the right operand, so an inner frame handed a
-  /// zero-token continuation at that power reports the same continuation again and descends
-  /// **having consumed nothing**: one native frame per level, none of them paid for by the
-  /// document. On the left-associative bound the inner frame declines it, the chain iterates in
-  /// one frame, and that frame's progress guard bounds it. Zero-token continuations can therefore
-  /// nest only by *strictly increasing* power, which is a property of the grammar's ladder rather
-  /// than of the input.
+  /// alternative offered. That is not a default; it is half of the depth bound. A
+  /// right-associative bound admits the operator's *own* power into the right operand, so an
+  /// inner frame handed a zero-token continuation at that power reports the same continuation
+  /// again and descends **having consumed nothing**: one native frame per level, none of them
+  /// paid for by the document. On the left-associative bound the inner frame declines it, the
+  /// chain iterates in one frame, and that frame's progress guard bounds it.
+  ///
+  /// What that leaves open is a chain of *strictly increasing* powers — and it is worth being
+  /// exact about whose chain it is, because the obvious answer is wrong. It is the grammar's
+  /// ladder **only while the powers come from the grammar**. [`ParsePrattRHS`] is an ordinary
+  /// parser you construct, so a classifier may hold state and report a power that is a function
+  /// of the parse; nothing in this driver can see the difference. Such a classifier escalates the
+  /// ladder at will, and the escalation is then the input's choice after all. The bound that
+  /// closes it is the debt below, not this line.
   ///
   /// Every other driver posture that reads an infix report reads this one identically: the floor
   /// decides whether the continuation is this expression's, and a second same-power operator
@@ -210,13 +216,41 @@ pub enum PrattRHS<L, R, N, Post, Power = i64> {
   /// that skips trivia before deciding two operands are adjacent has consumed that trivia. Neither
   /// is a violation, and no report boundary is applied.
   ///
-  /// **The right operand carries the obligation instead.** The driver reads committed consumption
-  /// when the operand parse returns — before the fold and before the CST wrap, since both are the
-  /// work this charge exists to price — and refuses a continuation whose cycle advanced nothing:
-  /// [`UnexpectedEoRhs`](crate::error::UnexpectedEoRhs), terminal, with a debug build additionally
-  /// tripping an assertion naming this rule. Without that charge a document buys a fold, a wrap
-  /// and another cycle for no input at all, and the next cycle reports the same continuation over
-  /// the same bytes.
+  /// **The right operand carries the obligation instead, and it is charged twice over.** Both
+  /// refusals are the same law — a zero-token continuation is paid for with committed input, once
+  /// each — and both surface as a terminal
+  /// [`UnexpectedEoRhs`](crate::error::UnexpectedEoRhs) with a debug build additionally tripping
+  /// an assertion naming which one fired:
+  ///
+  /// * **the charge**, read when the operand parse returns and before the fold and the CST wrap,
+  ///   since both are the work it exists to price. It refuses a continuation whose cycle advanced
+  ///   nothing. Without it a document buys a fold, a wrap and another cycle for no input at all,
+  ///   and the next cycle reports the same continuation over the same bytes.
+  /// * **the debt**, read before the descent. The charge is frame-local and retrospective, so on
+  ///   its own it prices this frame's cycles and nothing the descent has already built: a
+  ///   classifier escalating its powers over zero-width operands, with one byte consumed in the
+  ///   deepest frame, satisfies every ancestor's charge with that one byte on the way back up —
+  ///   after k frames, k folds and k wraps have happened. So the driver also carries the position
+  ///   the nearest outstanding continuation descended at, and refuses another one until committed
+  ///   consumption has passed it, **strictly**. The position it then carries down is its own, so
+  ///   it increases at every zero-token descent and one advancement discharges exactly one
+  ///   adjacency.
+  ///
+  /// Together they are a **structural** bound rather than a measured one: along any path from the
+  /// outermost continuation inward, the descents sit at strictly increasing committed offsets, so
+  /// there are never more `Adjacent` frames than there are bytes between the first and the last.
+  /// A grammar that reaches either refusal has asked for an expression no document can pay for;
+  /// the honest one this variant exists for — `labelFilter labelFilter` — advances by a whole
+  /// operand per turn and meets neither.
+  ///
+  /// **The population that bound covers is one [`Pratt`] invocation's own recursion**, which is
+  /// the population its reports can escalate. A *nested* expression parser — one a channel
+  /// constructs and runs for itself — is a new outermost continuation and starts with no debt, so
+  /// a grammar that recurses into a fresh `Pratt` at a position nothing has consumed buys one more
+  /// zero-token frame per nesting. That is grammar-level recursion over zero-width input, which no
+  /// report of this enum can drive and which
+  /// [`InputRef::descend`](crate::InputRef::descend)'s shared budget bounds the same way it bounds
+  /// a channel that simply calls itself.
   Adjacent(Precedenced<L, Power>),
   /// Postfix operator with its precedence level and operator type.
   Postfix(Precedenced<Post, Power>),
@@ -328,8 +362,16 @@ where
 ///
 /// **[`Adjacent`](PrattRHS::Adjacent) is exempt, and its obligation is discharged elsewhere.** A
 /// zero-token continuation has no operator to have consumed, so there is nothing for the report
-/// boundary to measure; the driver charges its **right operand** instead, refusing a continuation
-/// whose cycle advanced nothing. That variant states the rule in full.
+/// boundary to measure; the driver charges its **right operand** instead — once for this cycle,
+/// once for the frames a descent would build — and refuses either way. That variant states the
+/// rule in full, including the part a stateful classifier reaches.
+///
+/// **A classifier may hold state, and this trait's contract does not forbid it.** `parse_pratt_rhs`
+/// is a parser you construct, so the power it reports may depend on what it has already seen; that
+/// is how a mode flag is carried (see
+/// [`Pratt::min_precedence`](crate::parser::Pratt::min_precedence)), and it is legal. What follows
+/// is that no property of the driver may rest on the powers being a fixed ladder written into the
+/// grammar — the escalating classifier is a contract-valid one.
 ///
 /// **A terminal stop is an `Err`, never an `End`.** A tripped scanner limit is not the end of
 /// an expression; surfacing it as one lets a truncated view masquerade as a complete parse.

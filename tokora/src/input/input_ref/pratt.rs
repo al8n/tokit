@@ -39,8 +39,14 @@ enum Parked {
   Decline,
   /// The same power as the [`Neither`](PrattInfix::Neither) operator this frame just folded.
   NonAssoc,
-  /// A [`PrattRHS::Adjacent`] report — a zero-token infix continuation, which this engine cannot
-  /// express.
+  /// A [`PrattRHS::Adjacent`] report the floor admitted and the chain constraint allowed — a
+  /// zero-token infix continuation, which this engine cannot express.
+  ///
+  /// **Admitted and non-repeating, checked in that order before this variant is reached.** An
+  /// adjacency below the floor is the surrounding grammar's and gets [`Decline`](Self::Decline);
+  /// one repeating a [`Neither`](PrattInfix::Neither) fold at the same power gets
+  /// [`NonAssoc`](Self::NonAssoc). Only what is left over is the report this engine has no answer
+  /// for, and only that is worth a diagnostic of its own.
   ///
   /// **Diagnosed rather than declined, and that is the whole of the reason it needs a variant.**
   /// This driver's termination argument is that acceptance *is* the commit of exactly one token of
@@ -324,9 +330,30 @@ where
               }
               Some(TokRhs::Infix(infix, lpower))
             }
-            // Not an ending and not a decline: this engine cannot express the report at all. Park
-            // the token and refuse on the far side — see `Parked::Adjacent`.
-            PrattRHS::Adjacent(_) => {
+            // THE SAME TWO TESTS THE `Infix` ARM RUNS, AND IN THE SAME ORDER — this engine has
+            // no third, because it has no report boundary to rank: acceptance here IS the commit
+            // of a token. Both run before the report reaches the unsupported path at all.
+            //
+            // Parking unconditionally
+            // reads the payload as "adjacency" and never as "adjacency *at a power*", which
+            // makes two answers wrong: an adjacency BELOW the floor is the surrounding grammar's
+            // operator and is owed the ordinary handback, not a refusal that ends this
+            // expression with a diagnostic it did not earn; and an adjacency at the power of the
+            // `Neither` operator this frame just folded is a declared-non-associative chain,
+            // which is `NonAssociativeChain` here exactly as it is for a spelled operator. Both
+            // rejected an otherwise valid embedded parse while leaving the token unconsumed.
+            //
+            // Only an ADMITTED, NON-REPEATING adjacency is the shape this engine cannot serve,
+            // and only that one is refused — see `Parked::Adjacent`.
+            PrattRHS::Adjacent(precedenced) => {
+              let power = precedenced.into_precedence();
+              if !min_precedence.admits(&power) {
+                return None;
+              }
+              if prev_op_is_neither.as_ref() == Some(&power) {
+                parked = Parked::NonAssoc;
+                return None;
+              }
               parked = Parked::Adjacent;
               None
             }
