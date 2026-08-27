@@ -756,9 +756,9 @@ where
   /// you would be certifying less than this paragraph claims.
   ///
   /// The return value is the [`RefillCoverage`] the run actually reached: how many cut positions it
-  /// drove schedules from, how many the source offered, and how many legs really did change
-  /// allocation. A driver that admits **no** cut below the source length certifies nothing about
-  /// any change of buffer, and is refused rather than passed.
+  /// drove schedules from, how many the sources offered, and how many of those cuts got a buffer at
+  /// an address the source does not share. A driver that admits **no** cut below the source length
+  /// certifies nothing about any change of buffer, and is refused rather than passed.
   ///
   /// # The oracle, and the comparison it is drawn with
   ///
