@@ -2445,6 +2445,14 @@ mod logos_adapter {
       .lossless()
       .run();
   }
+
+  #[test]
+  fn the_logos_adapter_passes_the_refill_tier() {
+    // The adapter's `State` is the vocabulary's logos `Extras` plus the probe channel, so a
+    // carried state is a real value here rather than a `()`.
+    Harness::<SynLexer<'_>>::over(["ab 12 cd", "one two three", "42", "  x  ", ""]).run_refill();
+    Harness::<TileLogosLexer<'_>>::over(["ab 12 cd", "one two", "42"]).run_refill();
+  }
 }
 
 // ── The falsifier that predates the feature ───────────────────────────────────────────
@@ -2585,6 +2593,18 @@ mod prefix_backtracking {
   fn the_same_lie_passes_over_a_corpus_that_omits_the_longer_source() {
     Harness::<LyingLexer<'_>>::over(["1."]).run_partial();
   }
+
+  #[test]
+  fn the_backtracking_vocabulary_passes_the_refill_tier() {
+    // The conservative default withholds every item while the buffer is open, so every leg of a
+    // schedule re-enters at the pair it left and the tier's verdict rests entirely on the final,
+    // sealed buffer. That is sound and vacuous in equal measure, and worth having as a cell: an
+    // `Unbounded` claim must not be able to red.
+    Harness::<DefaultLexer<'_>>::over(["1.5", "5e-3", "1.", "5e", "5ex"]).run_refill();
+    // And the corpus-shaped limitation is the same here as it is for `run_partial`: the same lie,
+    // on the corpus that omits the source it diverges on, is not falsified by this tier either.
+    Harness::<LyingLexer<'_>>::over(["1."]).run_refill();
+  }
 }
 
 // ── The other half of the value channel: a recorded value that is too low ──────────────
@@ -2717,6 +2737,11 @@ mod recorded_value {
     // only because the value was ACCEPTED — which makes it a check on the accept path as much
     // as on the recorder.
     Harness::<UnderReportingLexer<'_>>::over(["1.5"]).run_partial();
+  }
+
+  #[test]
+  fn an_honest_recorded_value_passes_the_refill_tier() {
+    Harness::<HonestLexer<'_>>::over(["1.5", "1.", "12 34", "1.5 2.5"]).run_refill();
   }
 
   #[test]
@@ -5107,4 +5132,298 @@ fn a_later_component_of_the_same_item_outranks_an_earlier_one_the_kit_cannot_use
     !msg.contains("non-reflexive-payload"),
     "a sound span outranks a `Kind` the kit cannot use, got: {msg}"
   );
+}
+
+// ── The refill tier: state across a change of buffer ────────────────────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum RKind {
+  Ident,
+  Number,
+}
+
+impl core::fmt::Display for RKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    match self {
+      Self::Ident => f.write_str("ident"),
+      Self::Number => f.write_str("number"),
+    }
+  }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum RTok {
+  Ident,
+  Number,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum RErr {
+  MalformedNumber,
+  Unexpected,
+}
+
+impl Token<'_> for RTok {
+  type Kind = RKind;
+  type Error = RErr;
+
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::WithinSpan;
+
+  fn kind(&self) -> RKind {
+    match self {
+      Self::Ident => RKind::Ident,
+      Self::Number => RKind::Number,
+    }
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// The scanner state of [`CommentLexer`]: the two things a `#` comment can leave behind at end of
+/// input, one of which is the fact that matters.
+#[derive(Clone, Debug, Default)]
+struct RefillScan {
+  /// **The fact.** The scanner is inside a `#` comment, so the bytes that arrive next are comment
+  /// text until a newline — not code.
+  in_comment: bool,
+  /// **The offset.** Where the reader was left. A scan that starts with one carries it instead of
+  /// re-syncing to the token start, which is what a lexer with a separate read cursor does.
+  reader: Option<usize>,
+}
+
+impl crate::state::State for RefillScan {
+  type Error = Infallible;
+
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+}
+
+/// The pql shape, as a minimal pair. Identifiers, `0b…` numbers whose two-byte prefix is read
+/// **through the reader**, and `#` comments that run to a newline or to end of input.
+///
+/// `DEFECT` picks what the comment leaves in the state when it reaches end of input:
+///
+/// - `false` — the fact: `in_comment`, so the next buffer continues the comment.
+/// - `true` — the pql defect: advance to `bytes.len()` and retain **only the lookahead offset**,
+///   losing that the scanner was still inside the comment.
+///
+/// Both modes are byte-for-byte identical on a complete source and on every fresh prefix, which
+/// is why `run` and `run_partial` are green over the defective one: neither ever puts a state
+/// across a change of buffer.
+struct CommentLexer<'a, const DEFECT: bool> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: RefillScan,
+}
+
+impl<'a, const DEFECT: bool> Lexer<'a> for CommentLexer<'a, DEFECT> {
+  type State = RefillScan;
+  type Source = str;
+  type Token = RTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: RefillScan::default(),
+    }
+  }
+  fn with_state(src: &'a str, state: RefillScan) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), RErr> {
+    Ok(())
+  }
+  fn state(&self) -> &RefillScan {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut RefillScan {
+    &mut self.state
+  }
+  fn into_state(self) -> RefillScan {
+    self.state
+  }
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<RTok, RErr>> {
+    let b = self.src.as_bytes();
+    let len = b.len();
+    self.start = self.end;
+
+    // Comment text carried in from an earlier buffer: consume it to the newline that ends it.
+    if self.state.in_comment {
+      while self.start < len && b[self.start] != b'\n' {
+        self.start += 1;
+      }
+      if self.start >= len {
+        // Still inside it at end of input, so the fact stays where it was found.
+        self.end = self.start;
+        return None;
+      }
+      self.state.in_comment = false;
+    }
+
+    loop {
+      while self.start < len && (b[self.start] == b' ' || b[self.start] == b'\n') {
+        self.start += 1;
+      }
+      if self.start < len && b[self.start] == b'#' {
+        let mut i = self.start + 1;
+        while i < len && b[i] != b'\n' {
+          i += 1;
+        }
+        if i >= len {
+          // End of input inside a comment: the fork the whole fixture exists for.
+          self.start = i;
+          self.end = i;
+          if DEFECT {
+            self.state.reader = Some(i);
+          } else {
+            self.state.in_comment = true;
+          }
+          return None;
+        }
+        self.start = i;
+        continue;
+      }
+      break;
+    }
+    if self.start >= len {
+      self.end = self.start;
+      return None;
+    }
+
+    // The reader: the token start, unless the state carries one — which the scanner trusts as
+    // "where my reader already is".
+    let reader = self.state.reader.take().unwrap_or(self.start);
+
+    if b[self.start] == b'0' {
+      // The `0b` prefix is read AT THE READER, so a stale one reads the wrong two bytes.
+      if self.src.get(reader..(reader + 2).min(len)) != Some("0b") {
+        self.end = self.start + 1;
+        return Some(Err(RErr::MalformedNumber));
+      }
+      let mut e = self.start + 2;
+      while e < len && (b[e] == b'0' || b[e] == b'1') {
+        e += 1;
+      }
+      self.end = e;
+      return Some(Ok(RTok::Number));
+    }
+    if b[self.start].is_ascii_lowercase() {
+      let mut e = self.start;
+      while e < len && b[e].is_ascii_lowercase() {
+        e += 1;
+      }
+      self.end = e;
+      return Some(Ok(RTok::Ident));
+    }
+    self.end = self.start + 1;
+    Some(Err(RErr::Unexpected))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    // Honest: the ident arm stops at its terminator, the number arm's probe is answered at or
+    // before its own span end, and the comment scan decides no item at all.
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+type KeepsTheFact<'a> = CommentLexer<'a, false>;
+type LosesTheFact<'a> = CommentLexer<'a, true>;
+
+/// The two pql witnesses, and every source around them.
+const REFILL_CORPUS: [&str; 7] = ["x #c\n0b1", "x #cd", "x #c", "#", "a 0b10 b", "", "0b"];
+
+#[test]
+fn the_comment_lexer_that_keeps_the_fact_passes_every_tier() {
+  Harness::<KeepsTheFact<'_>>::over(REFILL_CORPUS).run();
+  Harness::<KeepsTheFact<'_>>::over(REFILL_CORPUS).run_partial();
+  Harness::<KeepsTheFact<'_>>::over(REFILL_CORPUS).run_refill();
+}
+
+#[test]
+fn the_two_existing_tiers_are_green_over_the_defect() {
+  // THE GAP, executable. This lexer loses the in-comment fact at end of input, and both tiers
+  // that exist certify it: `run` resumes over the same source, and `run_partial` builds a FRESH
+  // lexer for every prefix, so no `L::State` ever crosses a cut in either one.
+  Harness::<LosesTheFact<'_>>::over(REFILL_CORPUS).run();
+  Harness::<LosesTheFact<'_>>::over(REFILL_CORPUS).run_partial();
+}
+
+#[test]
+#[should_panic(expected = "[input #0 refill-equivalence] refills [4, 8], position 1")]
+fn witness_one_a_guarded_arm_that_fails_on_a_stale_reader() {
+  // pql witness 1: lex `x #c`, carry its state into `x #c\n0b1`, resume. The newline is skipped
+  // with the reader still on it, the guarded `0b` arm reads `"\n0"`, and the result is
+  // `Err(MalformedNumber)` where lexing the whole source yields `Number`.
+  let src = "x #c\n0b1";
+  let budget = 8 * src.len() + 64;
+  let reference = super::lex_run::<LosesTheFact<'_>>(0, src, budget);
+  super::refill_schedule::<LosesTheFact<'_>>(0, src, &reference, &[4, src.len()], budget);
+}
+
+#[test]
+#[should_panic(expected = "[input #0 refill-equivalence] refills [4, 5]: refilling committed 2")]
+fn witness_two_an_ident_lexed_out_of_comment_text() {
+  // pql witness 2: lex `x #c`, carry into `x #cd`, resume. The resume emits `Ident` from bytes
+  // the complete-input parse reads as comment text, so the concatenation has an item the oracle
+  // does not.
+  let src = "x #cd";
+  let budget = 8 * src.len() + 64;
+  let reference = super::lex_run::<LosesTheFact<'_>>(0, src, budget);
+  super::refill_schedule::<LosesTheFact<'_>>(0, src, &reference, &[4, src.len()], budget);
+}
+
+#[test]
+#[should_panic(expected = "refill-equivalence")]
+fn the_refill_tier_reds_the_defect_from_its_own_entry_point() {
+  // The cells above drive one schedule each so the witness is exactly the pql probe. The entry
+  // point derives its cuts, so it reaches the same defect without being told where it is.
+  Harness::<LosesTheFact<'_>>::over(REFILL_CORPUS).run_refill();
+}
+
+#[test]
+fn a_refill_that_adds_nothing_is_not_a_verdict() {
+  // The zero-growth cell on its own: a driver handed an empty chunk re-drives a buffer that grew
+  // by nothing, and the pair it carried has to survive being spent on it.
+  let src = "x #c\n0b1";
+  let budget = 8 * src.len() + 64;
+  let reference = super::lex_run::<KeepsTheFact<'_>>(0, src, budget);
+  super::refill_schedule::<KeepsTheFact<'_>>(0, src, &reference, &[4, 4, 4, src.len()], budget);
+}
+
+#[test]
+fn every_conforming_hand_rolled_fixture_passes_the_refill_tier() {
+  // The other half of the acceptance: the tier must not be stricter than the contract. Every
+  // hand-rolled fixture this file certifies elsewhere is driven through it over the same corpus.
+  Harness::<TileLexer<'_>>::over(["hello world", "a", "", "x y  z", "café"]).run_refill();
+  Harness::<SyntacticLexer<'_>>::over(["ab cd ef", "one  two", "solo", ""]).run_refill();
+  Harness::<FaithfulErrLexer<'_>>::over(["a?b", "??", "?", "", "ab?cd"]).run_refill();
+  Harness::<OwnBytePayloadLexer<'_>>::over(["abz", "a", "", "café"]).run_refill();
+  Harness::<TickingErrLexer<'_>>::over(["a?b", "??", "?", ""]).run_refill();
+  Harness::<RepeatErrLexer<'_, 72>>::new("a").run_refill();
+  Harness::<RepeatErrLexer<'_, 100>>::new("abcdefgh").run_refill();
+  Harness::<NanPayloadLexer<'_>>::over(["ab", "a", ""]).run_refill();
 }

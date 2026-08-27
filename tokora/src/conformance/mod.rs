@@ -70,6 +70,21 @@
 //! [`SCAN_LOOKAHEAD`](crate::Token::SCAN_LOOKAHEAD) claim behind the logos
 //! adapter.
 //!
+//! **Refill tier** (`run_refill`, the same `usize`-offset, prefix-sliceable sources) — carrying
+//! `(`[`State`](crate::state::State)`, offset)` from the end of one buffer into a **grown** buffer
+//! and lexing on there, which is what a refilling driver does and what neither tier above covers.
+//! `run_partial` drives every prefix with a **fresh** lexer, so no `L::State` ever crosses a cut;
+//! check 2 above carries state but resumes over the **same** source. The distinction is not *does
+//! state survive* but ***does state survive a change of buffer***, and that is the mode
+//! [`Incomplete`](crate::error::Incomplete) exists for. It drives the [`Lexer`] surface directly —
+//! [`with_state`](crate::Lexer::with_state) + [`bump`](crate::Lexer::bump) over a longer source —
+//! because the input layer has no offset-resuming constructor to hand a carried state to, and each
+//! leg is bounded by the same per-loop item budget the trait-tier checks carry, for the same
+//! reason: the counter and the [`lex`](crate::Lexer::lex) call are in one loop body. What lives in
+//! that gap is a lexer that forgets, at end of input, what it was in the middle of — a comment, a
+//! string, a multi-byte prefix — and whose next buffer therefore starts in the wrong mode. See
+//! [`run_refill`](crate::conformance::Harness::run_refill).
+//!
 //! Both tiers that drive an `Input` are bounded by a single non-rewindable counter per input,
 //! `LexTally`, and not by the item budgets their drain loops also carry. The rule is that **a
 //! budget bounds only the loops that increment it**: between a drain loop and the `Lexer::lex` call
@@ -629,6 +644,131 @@ where
     for (idx, &src) in self.inputs.iter().enumerate() {
       let budget = self.budget(src);
       check_partial::<L>(idx, src, budget);
+    }
+  }
+}
+
+impl<'inp, L> Harness<'inp, L>
+where
+  L: Lexer<'inp, Offset = usize>,
+  // A prefix of the source is itself a `&L::Source` — the same bound
+  // [`run_partial`](Self::run_partial) carries, and for the same reason: it is what lets a leg lex
+  // an honest truncation without a growable source. tokora has none, deliberately; the caller owns
+  // the buffer and grows it (see the [`input`](crate::input) module docs), which is why this tier
+  // models the driver rather than asking the input layer to hold one.
+  L::Source: core::ops::Index<core::ops::RangeTo<usize>, Output = L::Source>,
+  // The two equalities every verdict in this kit is drawn from. See `run`'s docs for who pays and
+  // `Item::compare` for why a `Debug` rendering and a `kind` projection are each the wrong key.
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
+{
+  /// Runs the **refill** check against every input: `L::State` carried from the end of one buffer
+  /// into a **grown** buffer, and lexing continued there.
+  ///
+  /// This is the contract's own streaming mode. A driver that reaches
+  /// [`Incomplete`](crate::error::Incomplete) appends the next chunk to its buffer and continues
+  /// from the offset that error reported; a resuming one carries the lexer
+  /// [`State`](crate::state::State) with it. Everything that can go wrong there goes wrong at the
+  /// **change of buffer**, and no other entry point puts a state across one:
+  /// [`run_partial`](Self::run_partial) builds a fresh lexer for every prefix, and check 2 of
+  /// [`run`](Self::run) carries a state but resumes it over the *same* source. So the property
+  /// here is not *does state survive* — that is check 2 — but ***does state survive a change of
+  /// buffer***.
+  ///
+  /// For every cut of every input it drives a **refill schedule**: a strictly growing series of
+  /// buffers ending at the whole source, each resumed with
+  /// [`with_state`](crate::Lexer::with_state) + [`bump`](crate::Lexer::bump) from the pair the
+  /// previous buffer left, committing only what a partial driver may commit. The items committed
+  /// across the whole schedule must equal the **complete-input** lex of the source, exactly.
+  ///
+  /// # Why a third entry point, and not a mode on something that exists
+  ///
+  /// Three walls, and each one is somebody's cost:
+  ///
+  /// - **The input layer cannot be handed a state to resume *at a position*.** An `Input` is
+  ///   constructed at offset `0`; the resume pair it threads is one it derives from its own
+  ///   committed frontier. So there is no way to express this cut through
+  ///   [`run_partial`](Self::run_partial) — which is exactly what the consumer that found the gap
+  ///   reported: the harness owns lexer construction. Resuming is a [`Lexer`]-surface operation,
+  ///   so this tier drives that surface, as check 2 does.
+  /// - **Check 2's signature is one source.** It takes a single `src` and its loop runs over the
+  ///   reference items *on that source*; a growing-source mode needs a second buffer, a second
+  ///   commit rule, and a reference the second buffer did not produce. That is a different check
+  ///   wearing the same name.
+  /// - **[`run`](Self::run)'s bounds are deliberately weaker.** It asks nothing of the offset type
+  ///   and nothing of the source beyond [`Lexer`]. This tier needs
+  ///   [`Offset = usize`](crate::Lexer::Offset) and a prefix-sliceable source, so folding it into
+  ///   `run` would narrow `run` for every lexer that cannot even reach this defect. The narrowing
+  ///   is where the cost would land, so the tier goes where the bounds already are — beside
+  ///   [`run_partial`](Self::run_partial).
+  ///
+  /// It takes no arguments, and the cuts are **derived** rather than supplied. A caller-chosen cut
+  /// is a caller-chosen exemplar, and a checker that passes its own exemplar is the failure this
+  /// tier exists to end.
+  ///
+  /// # The oracle, and the comparison it is drawn with
+  ///
+  /// The oracle is the **complete-input lex of the whole source** — the same reference
+  /// [`run`](Self::run) captures, so the always-on trait-tier invariants are enforced here too and
+  /// this entry point stands alone.
+  ///
+  /// Nothing about *what counts as equal* is decided here. The items are compared by
+  /// `Item::compare` through `diverge`, which is the ranked search every other stream comparison
+  /// in this module reads its answer from: a conclusive difference outranks an inconclusive one,
+  /// a comparison a non-reflexive value decided is refused as `non-reflexive-payload` rather than
+  /// reported as the lexer's fault, and a difference at the discriminant or in item count is
+  /// conclusive by construction. A second implementation of that rule would be a second place for
+  /// it to be wrong.
+  ///
+  /// # The driver this models, and where its rules come from
+  ///
+  /// A leg commits an item only when a partial [`Input`] would: an item whose **effective read
+  /// frontier** (`max(span.end, `[`read_frontier`](crate::Lexer::read_frontier)`)`) reaches the
+  /// non-final buffer end is withheld, because the decision consulted the end and later bytes
+  /// could change it. Withholding is what keeps this from being stricter than the contract:
+  /// without it, `"ab"` cut out of `"abc"` would commit a truncated token and resume behind the
+  /// `c`, and **every** conforming lexer would red.
+  ///
+  /// When nothing is withheld and the lexer simply runs out of bytes, the leg carries the pair
+  /// the layer reports at that point: the lexer's **post-exhaustion position** — clamped exactly
+  /// as `InputRef::scan_with` clamps it, into `[last committed end, buffer len]` — and the state
+  /// there. That is the case the whole tier is about. Bytes the lexer *skipped* before running
+  /// out (trailing whitespace, a comment tail) are past the last item's end, so a driver that
+  /// resumes at the reported offset resumes **inside** whatever the lexer was skipping — and a
+  /// lexer that did not keep that fact in its state resumes in the wrong mode.
+  ///
+  /// The last buffer of a schedule is **final**, so the holdback is inert there and everything
+  /// the lexer produces is committed — the same relaxation a sealed [`Partial`] input gets.
+  ///
+  /// # What it covers, and what it does not
+  ///
+  /// Covered, by derivation rather than by example: every cut position the source admits (which
+  /// necessarily includes a cut inside a token, at a token boundary, inside trivia, at end of
+  /// input and at offset zero), a tail delivered in one refill, a tail delivered one unit at a
+  /// time, a two-refill schedule from every cut, and a refill that **adds nothing**.
+  ///
+  /// Not covered, deliberately: a cut that is not a source-unit boundary (no such buffer exists —
+  /// `str[..k]` is not a `str` mid-code-point); a buffer that *shrinks* or whose delivered bytes
+  /// change (that is not a refill; a refill appends); a driver that commits an item the frontier
+  /// withheld (not a driver the contract admits); and the diagnostic channel, which no tier here
+  /// compares.
+  ///
+  /// # Panics
+  ///
+  /// Panics — tagged `refill-equivalence`, with the input index, the schedule, the position and
+  /// expected-vs-got — on the first divergence. Returns normally on full conformance.
+  pub fn run_refill(&self) {
+    assert!(
+      !self.inputs.is_empty(),
+      "tokora conformance: Harness has no inputs; construct it with `new`/`over` over at least one source"
+    );
+    for (idx, &src) in self.inputs.iter().enumerate() {
+      let budget = self.budget(src);
+      // The oracle, and the same reference `run` captures — so a lexer that reaches this entry
+      // point without having passed `run` still meets the always-on trait-tier invariants
+      // `lex_run` enforces inline, instead of having its refill verdict decided by a broken span.
+      let reference = lex_run::<L>(idx, src, budget);
+      check_refill::<L>(idx, src, &reference, budget);
     }
   }
 }
@@ -2825,6 +2965,277 @@ fn check_resume<'inp, L>(
         suffix.len()
       ),
     }
+  }
+}
+
+/// The refill tier for one source: derive the cut schedules and drive every one of them.
+///
+/// # The shapes are derived, and this is the list
+///
+/// A cut is any position a buffer can honestly end at, which is every source-unit boundary — so
+/// the named shapes (inside a token, at a token boundary, inside trivia, at end of input, at
+/// offset zero) are covered by construction rather than by being listed. What is enumerated here
+/// is the *schedule* around a cut, because a schedule is not derivable from a position:
+///
+/// | schedule | what only it reaches |
+/// |---|---|
+/// | `[k, len]` | one refill delivering the whole tail — the shape a driver takes on the last chunk |
+/// | `[k, k, len]` | a refill that **adds nothing**: a driver handed a zero-byte chunk re-drives a buffer that grew by nothing, so the carried pair has to survive being spent on it |
+/// | `[k, k', len]` | a minimal refill of one source unit and then the rest: two carries from one cut, the first landing a single unit further on |
+/// | every boundary | the tail one unit at a time, from the empty buffer to the whole source — the state crossing as many buffers as the source has boundaries |
+///
+/// Every schedule ends at the source length and that leg is **final**, so each one reaches the
+/// same equality against the complete-input parse.
+///
+/// The cost is one leg per cut per schedule shape, and a leg lexes at most the source: Θ(n²) raw
+/// lexing per input, the order [`check_partial`] and [`check_resume`] already cost.
+fn check_refill<'inp, L>(
+  idx: usize,
+  src: &'inp L::Source,
+  reference: &[Item<'inp, L>],
+  budget: usize,
+) where
+  L: Lexer<'inp, Offset = usize>,
+  L::Source: core::ops::Index<core::ops::RangeTo<usize>, Output = L::Source>,
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
+{
+  let len = src.len();
+  // A cut that is not a source-unit boundary is not a buffer anybody can hold — `str[..k]` does
+  // not exist mid-code-point — so it is not a cut. [`check_partial`] skips the same positions.
+  let cuts: Vec<usize> = (0..=len).filter(|k| src.is_boundary(*k)).collect();
+
+  for (i, &k) in cuts.iter().enumerate() {
+    if k < len {
+      refill_schedule::<L>(idx, src, reference, &[k, len], budget);
+    }
+    refill_schedule::<L>(idx, src, reference, &[k, k, len], budget);
+    if let Some(&next) = cuts.get(i + 1)
+      && next < len
+    {
+      refill_schedule::<L>(idx, src, reference, &[k, next, len], budget);
+    }
+  }
+
+  refill_schedule::<L>(idx, src, reference, &cuts, budget);
+}
+
+/// Drives one refill schedule end to end and asserts the committed items against the oracle.
+///
+/// The pair starts where a driver's does — the initial state of a lexer over the **first** buffer,
+/// at offset zero — and is threaded through the legs by value. That the initial pair is spelled
+/// `with_state` + `bump(0)` rather than [`Lexer::new`] is check 2's convention, and the contract
+/// already requires the two to agree.
+fn refill_schedule<'inp, L>(
+  idx: usize,
+  src: &'inp L::Source,
+  reference: &[Item<'inp, L>],
+  schedule: &[usize],
+  budget: usize,
+) where
+  L: Lexer<'inp, Offset = usize>,
+  L::Source: core::ops::Index<core::ops::RangeTo<usize>, Output = L::Source>,
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
+{
+  let len = src.len();
+  let last = schedule.len() - 1;
+  let mut carried = (
+    L::new(refill_buffer::<L>(src, len, schedule[0])).into_state(),
+    0usize,
+  );
+  let mut committed: Vec<Item<'inp, L>> = Vec::new();
+
+  for (leg, &k) in schedule.iter().enumerate() {
+    let (items, next) = refill_leg::<L>(
+      idx,
+      schedule,
+      leg,
+      refill_buffer::<L>(src, len, k),
+      // The driver states the end of the stream on the last chunk, and it is the last chunk that
+      // makes the holdback inert — the same seal a `Partial` input gets from `Input::seal`.
+      leg == last,
+      carried,
+      budget,
+    );
+    committed.extend(items);
+    carried = next;
+  }
+
+  assert_refill_eq::<L>(idx, schedule, reference, &committed);
+}
+
+/// The driver's buffer at `k`: the first `k` units of `src`, and `src` **itself** once `k` reaches
+/// its length.
+///
+/// The identity matters at the last leg only, and there it is [`check_partial`]'s: the final leg
+/// lexes the value the oracle lexed rather than a slice that merely equals it, so an exotic
+/// [`Source`] whose `[..len]` is not itself cannot make the last comparison mean something else.
+fn refill_buffer<'inp, L>(src: &'inp L::Source, len: usize, k: usize) -> &'inp L::Source
+where
+  L: Lexer<'inp, Offset = usize>,
+  L::Source: core::ops::Index<core::ops::RangeTo<usize>, Output = L::Source>,
+{
+  if k == len { src } else { &src[..k] }
+}
+
+/// One buffer of a refill schedule: resume from the carried pair, commit what a partial driver
+/// may commit, and hand back the pair the next buffer resumes from.
+///
+/// # The two pairs a leg can end on
+///
+/// - **A withheld item.** The lexer produced something whose effective read frontier reaches the
+///   non-final buffer end, so the layer would surface [`Incomplete`](crate::error::Incomplete)
+///   and commit nothing more. The leg stops there and hands back the pair after its **last
+///   committed** item — the incoming pair, when it committed none. Rolling back to it is what
+///   makes the tier sound rather than strict: the withheld item's bytes are re-lexed on the
+///   grown buffer, which is what the driver would do.
+/// - **Exhaustion.** Nothing was withheld and the lexer ran out of bytes, so the pair is the
+///   lexer's own post-exhaustion position and the state there. **This is the case the tier
+///   exists for**: the position covers bytes the lexer *skipped* without emitting an item, so a
+///   driver resuming there resumes inside whatever the lexer was in the middle of.
+///
+/// The position is clamped into `[last committed end, buffer len]`, which is the identical
+/// defence in depth `InputRef::scan_with` applies to the offset it reports — a floor against a
+/// retracting span and a ceiling against one that over-reports. It is not the specification: the
+/// post-exhaustion span is specified by the trait and checked by `check_span_after_exhaustion`,
+/// which reports a violation of it precisely. The clamp only keeps *that* defect from arriving
+/// here dressed as a refill divergence.
+fn refill_leg<'inp, L>(
+  idx: usize,
+  schedule: &[usize],
+  leg: usize,
+  buf: &'inp L::Source,
+  is_final: bool,
+  entry: (L::State, usize),
+  budget: usize,
+) -> (Vec<Item<'inp, L>>, (L::State, usize))
+where
+  L: Lexer<'inp, Offset = usize>,
+{
+  let len = buf.len();
+  let (entry_state, entry_at) = entry;
+  // The resume the contract specifies, and the one `InputRef::resume_from` performs: a lexer
+  // built from the carried state and bumped to the carried offset. The only thing this tier
+  // varies is the source it is built over.
+  let mut lexer = L::with_state(buf, entry_state.clone());
+  lexer.bump(&entry_at);
+
+  let mut committed: Vec<Item<'inp, L>> = Vec::new();
+  let mut carry = (entry_state, entry_at);
+
+  loop {
+    if committed.len() > budget {
+      panic!(
+        "tokora conformance [input #{idx} refill-equivalence] refills {schedule:?}, leg {leg} over a buffer of {len} units: produced more than the budget of {budget} items without exhausting; the lexer may not terminate or re-lexes without progress"
+      );
+    }
+    let Some(item) = lexer.lex() else { break };
+    let span = lexer.span();
+    let end = *span.end_ref();
+    if !is_final && withheld_at_frontier::<L>(&lexer, &span, len) {
+      // The driver never sees this item, so neither does the oracle comparison.
+      return (committed, carry);
+    }
+    let slice = lexer.slice();
+    let state = lexer.state().clone();
+    carry = (state.clone(), end);
+    committed.push(Item {
+      item,
+      span,
+      slice,
+      end,
+      state,
+    });
+  }
+
+  // Both reads happen before the lexer is consumed. `SyncTo::on_eof` is the site that proves why
+  // that ordering is not a style: reading the span after moving the state out paired a position
+  // with the wrong state.
+  let stop = (*lexer.span().end_ref()).max(carry.1).min(len);
+  let state = lexer.into_state();
+  (committed, (state, stop))
+}
+
+/// Whether a partial driver would **withhold** this item: its effective read frontier
+/// (`max(span.end, `[`read_frontier`](Lexer::read_frontier)`)`) reaches the non-final buffer end,
+/// so the decision consulted the end and later bytes could still change it.
+///
+/// # Why the kit models this instead of asking the layer
+///
+/// `InputRef::withhold_at_frontier` is the authority and this is its statement, applied to a
+/// lexer the kit drives itself. It has to be: an `Input` is built at offset `0` and derives its
+/// own resume pair, so there is no way to put a carried `(state, offset)` through the layer — the
+/// wall this whole tier exists because of. The consequence of the two drifting apart is bounded
+/// in one direction: this predicate deciding to withhold *less* than the layer does would make
+/// the tier stricter than the driver, which is what the corpus of conforming in-tree fixtures is
+/// there to falsify.
+///
+/// A **terminal** condition outranks the holdback in the layer (a limit trip fires even at the
+/// frontier). It does not have to be re-ranked here: this tier draws no verdict from
+/// [`Lexer::check`], and a trip is reported by the lexer as an error item on the tripping token,
+/// which this treats as the item it is. Ranking it differently would change which items the
+/// driver commits, not whether the state that crossed the buffer was right.
+fn withheld_at_frontier<'inp, L>(lexer: &L, span: &L::Span, len: usize) -> bool
+where
+  L: Lexer<'inp, Offset = usize>,
+{
+  let end = *span.end_ref();
+  let reported = match lexer.read_frontier() {
+    // No probe beyond the item's own span end — the terminator probe AT `span.end` included.
+    ReadFrontier::SpanEnd => end,
+    ReadFrontier::ReadTo(at) => at,
+    // "I cannot bound what I probed", read as "end of input was observable", so every item is
+    // withheld while the buffer is open — and every leg then resumes from where it entered.
+    ReadFrontier::Unbounded => len,
+    // Deliberately NO wildcard, exactly as the layer's own match has none: `ReadFrontier` is
+    // `#[non_exhaustive]` for downstream wrappers, but this crate defines it, so a future variant
+    // must break the build here and be given an answer rather than inherit one silently.
+  };
+  reported.max(end) >= len
+}
+
+/// Asserts the items a refill schedule committed equal the complete-input parse, tagged
+/// `refill-equivalence`.
+///
+/// The comparison is `diverge` over `Item::compare` — the same ranked search `assert_run_eq`,
+/// `check_resume` and both partial-tier asserts read their answer from, and the same
+/// `refuse_decided` guard in front of the verdict. Nothing about equality is decided here.
+fn assert_refill_eq<'inp, L>(
+  idx: usize,
+  schedule: &[usize],
+  expected: &[Item<'inp, L>],
+  got: &[Item<'inp, L>],
+) where
+  L: Lexer<'inp>,
+  L::Token: PartialEq,
+  <L::Token as Token<'inp>>::Error: PartialEq,
+{
+  match diverge(expected, got, expected.len() != got.len(), |a, b| {
+    a.compare(b)
+  }) {
+    None => {}
+    Some(Divergence::At(i, decided)) => {
+      let at = format!("refills {schedule:?}, position {i}");
+      refuse_decided(
+        idx,
+        "refill-equivalence",
+        &at,
+        &decided,
+        &expected[i].describe(),
+        &got[i].describe(),
+      );
+      panic!(
+        "tokora conformance [input #{idx} refill-equivalence] {at}: the item a refilling driver committed diverges from the complete-input parse of the same bytes: expected {}, got {}. The state that produced it was captured at the end of a SHORTER buffer, so this is what the lexer forgot at end of input — that it was inside a comment, a string, or a multi-byte prefix — surfacing on the buffer that grew.",
+        expected[i].describe(),
+        got[i].describe()
+      );
+    }
+    Some(Divergence::Count) => panic!(
+      "tokora conformance [input #{idx} refill-equivalence] refills {schedule:?}: refilling committed {} items, the complete-input parse of the same bytes has {}. A resume that lands in the wrong mode either invents items out of bytes the lexer was still skipping, or swallows the ones it should have produced.",
+      got.len(),
+      expected.len()
+    ),
   }
 }
 
