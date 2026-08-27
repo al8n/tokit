@@ -3427,7 +3427,8 @@ where
      whole source and no lexer state ever crosses a change of buffer. This input certified \
      nothing, and the kit refuses rather than report a pass it did not earn — it is not a verdict \
      on the lexer, which has not been convicted of anything. Widen the cut rule, or take this \
-     input out of the refill corpus."
+     input out of the refill corpus — and if the driver keys its storage by corpus position, check \
+     it was built from this Harness's inputs, in this Harness's order."
   );
 
   let relocated = <L::Source as Source<usize>>::REFERENT_IS_BYTES.then_some(relocated);
