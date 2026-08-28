@@ -1,4 +1,5 @@
-//! The nine repetition axes, one driver and one deterministic source each, plus one control.
+//! The nine repetition axes, one driver and one deterministic source each, three of them read a
+//! second time over short collections, plus one control.
 //!
 //! ## Why the axes are these nine
 //!
@@ -28,6 +29,17 @@
 //! here: a delta that moves all nine together is a substrate change, and a delta that moves
 //! only `sep_while` is that family's own.
 //!
+//! Those same three are also read a SECOND time, over collections of `SHALLOW` elements instead
+//! of the deep sources' 8 or 512. Same engine and the same combinator expression, character for
+//! character; `separated_while` is the one whose driver has to add a drain, and that driver says
+//! why. See "Deep and shallow" below for the failure the second reading is there for:
+//!
+//! | workload                  | reads the engine of | collections an iteration |
+//! |---------------------------|---------------------|--------------------------|
+//! | `sep_while_shallow`       | `sep_while`         | 256 (deep: 63)           |
+//! | `at_most_shallow`         | `at_most`           | 256 (deep: 63)           |
+//! | `separated_while_shallow` | `separated_while`   | 256 (deep: 1)            |
+//!
 //! There is no `exactly` combinator in the crate. "Exactly n" is `Bounded` with equal bounds —
 //! `.at_least(n).at_most(n)` — which is its own engine file (`many/repeated/bounded.rs`),
 //! distinct from both `at_least.rs` and `at_most.rs`. The workload keeps the name the shape is
@@ -43,6 +55,103 @@
 //! slowdown, so the sources are sized at `ELEMENTS` = 512 elements — a few kilobytes, tens of
 //! thousands of instructions an iteration, and a whole job that finishes in minutes.
 //!
+//! ## Deep and shallow: one engine, two ways to get more expensive
+//!
+//! A repetition engine can cost more per ELEMENT or more per COLLECTION, and one source cannot
+//! read both. A workload that parses `n` elements in one collection divides a per-collection
+//! cost by `n` before any threshold sees it — so the deeper the source, the more completely a
+//! per-collection regression is amortised away.
+//!
+//! Both failures are real and they are not the same failure:
+//!
+//! * **Per element** is a handler inside the loop losing its inline. `#[inline(never)]` on
+//!   `SeparatedWhile::handle_continue` — the per-element handler every `sep_while/parse/*`
+//!   specialisation inlines today — reads +10.235% on `sep_while` and +10.332% on
+//!   `separated_while`. Every workload above reads it loudly, because it is paid once per element
+//!   and every source is 512 elements long.
+//!
+//! * **Per collection** is the engine AROUND the loop losing its inline. `#[inline(never)]` one
+//!   level out, on `SeparatedWhile::parse`, is worth 44 instructions per collection — and 44
+//!   instructions spread over an 8-element collection is +0.80%, which a +1% threshold reports
+//!   as `ok`. Spread over a 512-element collection it is +0.02%, which is nothing at all.
+//!
+//! The second is the shape #259 is most likely to produce. It consolidates 259 files and 338
+//! `impl` blocks into shared engines, and a shared engine is one a caller stops inlining once
+//! per CALL, not once per element. A suite that only reads deep sources is close to blind to the
+//! change it was built for.
+//!
+//! So the three axes with no other witness anywhere are read a second time over `SHALLOW`-element
+//! collections: same driver, same combinator expression, same bound, same total element count,
+//! spread over many short collections instead of few long ones. `separated_while` is the one
+//! exception and its driver says why — unbounded over a run is ONE collection, so its shallow
+//! twin needs the drain the bounded axes already have.
+//!
+//! ### What each row can see, exactly
+//!
+//! A cost of `k` instructions per collection moves a row by `C * k / D`, where `C` is the
+//! collections one iteration parses and `D` is the row's Ir per iteration. That is measured, not
+//! fitted: the `SeparatedWhile::parse` plant reads back as 44.0 instructions per collection on
+//! all three of the sources that hold 4, 2 and 1 elements — 128, 256 and 512 collections an
+//! iteration — 43.0 on the one that holds none, and 42.9 on the deep row, whose groups vary in
+//! length. One constant across a fourfold range of `C` is what makes `0.01 * D / C` an exact
+//! claim per row rather than an estimate: it is the smallest per-collection regression that
+//! reaches a +1% ceiling.
+//!
+//! | workload                  | collections | Ir/iteration | +1% is a per-collection cost of |
+//! |---------------------------|------------:|-------------:|--------------------------------:|
+//! | `sep_while`               |          63 |      343,765 |                       55 instr. |
+//! | `sep_while_shallow`       |         256 |      453,427 |                       18 instr. |
+//! | `at_most`                 |          63 |      212,910 |                       34 instr. |
+//! | `at_most_shallow`         |         256 |      316,211 |                       12 instr. |
+//! | `separated_while`         |           1 |      277,520 |                    2,775 instr. |
+//! | `separated_while_shallow` |         256 |      424,468 |                       17 instr. |
+//!
+//! The `separated_while` pair is the reason this is worth doing at all. Unbounded over a run is
+//! one collection an iteration, so its deep row cannot see a per-collection regression smaller
+//! than 2,775 instructions — a whole engine's worth. Its shallow twin sees 17.
+//!
+//! The deep rows STAY, and not out of caution: a per-element cost is amortised the OTHER way.
+//! Both halves of a pair walk the same 512 elements, so the same cost per element is the same
+//! number of instructions on each — divided, on the shallow row, by the larger per-iteration
+//! total. Measured rather than argued: the per-element plant reads +10.235% on `sep_while` and
+//! +8.187% on `sep_while_shallow`, +10.332% on `separated_while` and +6.695% on its twin. Each
+//! granularity keeps the row that reads it best, and neither row reads both best.
+//!
+//! ### Why `SHALLOW` is 2
+//!
+//! Four candidate sources were measured against the `SeparatedWhile::parse` plant in one
+//! comparison, at 4, 2, 1 and 0 elements per collection, holding the total at `ELEMENTS`:
+//!
+//! | elements/collection  | collections | the plant reads | implied cost per collection |
+//! |---------------------:|------------:|----------------:|----------------------------:|
+//! | 8 (the deep row)     |          63 |         +0.798% |                        42.9 |
+//! | 4                    |         128 |         +1.541% |                        44.0 |
+//! | 2                    |         256 |         +2.481% |                        44.0 |
+//! | 1                    |         512 |         +3.568% |                        44.0 |
+//! | 0                    |         512 |         +9.523% |                        43.0 |
+//!
+//! Those five are one sweep over candidate sources, so they are read against each other rather
+//! than against the shipped rows; as shipped, the 2-element source reads the same plant at
+//! +2.484% and the deep row at +0.798%.
+//!
+//! Sharper all the way down, so "most sensitive" does not decide it — the smallest collection
+//! that is still a collection does:
+//!
+//! * **0** parses no element and crosses no separator. It measures the engine's entry and its
+//!   exit and nothing in between, so a cost in the loop's prologue is invisible to it. Its
+//!   checksum is also zero: `drain_groups!` folds element counts, a source of empty groups folds
+//!   to nothing, and a zero checksum is exactly the reading `measure.py` refuses — it is what a
+//!   workload that parsed nothing reports.
+//! * **1** parses an element but crosses no separator, because a one-element list has no
+//!   separator in it. Two of these three rows are the separator's own engines; buying five more
+//!   instructions of resolution by never exercising the separator is the wrong trade.
+//! * **2** is the smallest source that runs one whole cycle — element, separator, element,
+//!   decision, exit — and it reads at +2.484% the plant that the deep row reports as `ok`.
+//!
+//! One thing a shallow row deliberately gives up: with `SHALLOW` under `BOUND`, no group reaches
+//! its limit, so the `TooMany` short-circuit does not appear in a shallow row. It has not gone
+//! anywhere — it is in the deep twin, which is the other reason both rows exist.
+//!
 //! ## Why `scan_drain` is here
 //!
 //! Lexing, spanning and the peek cache are inside every driver below, and they are work the
@@ -51,7 +160,7 @@
 //! is what makes it the first thing to read when all nine axes move at once, and the thing that
 //! says a shared move is NOT the repetition families' doing.
 //!
-//! It is a CONTROL and not a tenth axis, and specifically it is **not a per-axis dilution
+//! It is a CONTROL and not another axis, and specifically it is **not a per-axis dilution
 //! denominator**: it reads `int_run`, and the other sources carry different numbers of tokens
 //! per element (a comma source has nearly two, the grouped sources add a terminator, the paren
 //! source adds two). `scan_drain / axis` is therefore an order-of-magnitude reading of how much
@@ -90,6 +199,12 @@ const MINIMUM: usize = 4;
 /// the accepting path and the `TooMany` short-circuit of the bounded axes.
 const OVERFLOW_EVERY: usize = 8;
 
+/// Elements per collection in the SHALLOW sources — see the module header's second table for
+/// why it is 2 and not 4, 1 or 0. Every other constant a shallow row meets is its deep twin's,
+/// so the only thing that differs between a pair of rows is how many elements one collection
+/// holds.
+const SHALLOW: usize = 2;
+
 // ── Deterministic sources ───────────────────────────────────────────────────────────────────
 //
 // Every source is generated from a counter — no randomness, no clock, no environment — so a
@@ -122,7 +237,12 @@ fn comma_run() -> String {
   s
 }
 
-/// The group length for group `g`: `BOUND`, or one over it every `OVERFLOW_EVERY`th group.
+/// A group-length policy: how many elements group `g` holds. The two below are the ONLY
+/// difference between a deep source and its shallow twin — same alphabet, same separator, same
+/// terminator, same total element count, different number of collections to spread it over.
+type GroupLen = fn(usize) -> usize;
+
+/// The deep policy: `BOUND`, or one over it every `OVERFLOW_EVERY`th group.
 fn group_len(g: usize) -> usize {
   if g.is_multiple_of(OVERFLOW_EVERY) {
     BOUND + 1
@@ -131,13 +251,20 @@ fn group_len(g: usize) -> usize {
   }
 }
 
+/// The shallow policy: `SHALLOW` elements, every group. Nothing reaches `BOUND`, so the bounded
+/// axes' `TooMany` short-circuit does not appear in a shallow row — it stays where it already
+/// was, in the deep twin, and the shallow row is the accepting path alone.
+fn shallow_len(_g: usize) -> usize {
+  SHALLOW
+}
+
 /// `1 2 ... 8 ; 9 10 ... ;` — whitespace-separated groups terminated by `;`.
-fn space_groups() -> String {
+fn space_groups(len: GroupLen) -> String {
   let mut s = String::with_capacity(ELEMENTS * 8);
   let mut i = 0usize;
   let mut g = 0usize;
   while i < ELEMENTS {
-    for _ in 0..group_len(g) {
+    for _ in 0..len(g) {
       let _ = write!(s, "{} ", nth(i));
       i += 1;
     }
@@ -148,12 +275,12 @@ fn space_groups() -> String {
 }
 
 /// `1,2,...,8;9,10,...;` — comma-separated groups terminated by `;`.
-fn comma_groups(trailing: bool) -> String {
+fn comma_groups(trailing: bool, len: GroupLen) -> String {
   let mut s = String::with_capacity(ELEMENTS * 8);
   let mut i = 0usize;
   let mut g = 0usize;
   while i < ELEMENTS {
-    for k in 0..group_len(g) {
+    for k in 0..len(g) {
       if k > 0 {
         s.push(',');
       }
@@ -315,6 +442,33 @@ where
     .collect()
     .parse_input(inp)?;
   Ok(black_box(items).len())
+}
+
+/// The same engine as `separated_while` above, read one short collection at a time.
+///
+/// `separated_while` is unbounded, so over a run it is ONE collection and there is no second
+/// call to amortise a per-collection cost against. Its shallow twin therefore needs the drain
+/// the bounded axes already have: `decide` stops the collection at the group's `;`, the drain
+/// steps over it, and the next `parse` starts. The combinator expression is the one above,
+/// character for character.
+fn separated_while_grouped<'inp, Ctx>(
+  inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx>,
+) -> Result<usize, Err0>
+where
+  Ctx: ParseContext<'inp, Lex<'inp>>,
+  Ctx::Emitter: Emitter<'inp, Lex<'inp>, Error = Err0>
+    + SeparatedEmitter<'inp, Lex<'inp>>
+    + FullContainerEmitter<'inp, Lex<'inp>>
+    + UnexpectedLeadingSeparatorEmitter<'inp, Lex<'inp>>
+    + UnexpectedTrailingSeparatorEmitter<'inp, Lex<'inp>>,
+{
+  drain_groups!(inp, |inp: &mut InputRef<'inp, '_, Lex<'inp>, Ctx>| {
+    let items: Result<Vec<i64>, Err0> = int_elem
+      .separated_by_comma_while::<_, U1>(decide::<Ctx>)
+      .collect()
+      .parse_input(inp);
+    items
+  })
 }
 
 // ── 5. at_most — `many/repeated/at_most.rs` ──────────────────────────────────────────────────
@@ -493,14 +647,17 @@ macro_rules! workloads {
 }
 
 workloads! {
-  "sep_while" => sep_while(comma_groups(true)),
-  "at_most" => at_most(space_groups()),
+  "sep_while" => sep_while(comma_groups(true, group_len)),
+  "sep_while_shallow" => sep_while(comma_groups(true, shallow_len)),
+  "at_most" => at_most(space_groups(group_len)),
+  "at_most_shallow" => at_most(space_groups(shallow_len)),
   "separated_while" => separated_while(comma_run()),
-  "exactly" => exactly(space_groups()),
+  "separated_while_shallow" => separated_while_grouped(comma_groups(false, shallow_len)),
+  "exactly" => exactly(space_groups(group_len)),
   "repeated" => repeated(int_run()),
   "separated" => separated(comma_run()),
   "delimited" => delimited(paren_groups()),
   "repeated_while" => repeated_while(int_run()),
-  "at_least" => at_least(space_groups()),
+  "at_least" => at_least(space_groups(group_len)),
   "scan_drain" => scan_drain(int_run()),
 }
