@@ -143,6 +143,116 @@
 //! cannot drift silently in either direction — narrower, if `Accept` starts being gated; or wider,
 //! if the decline/stall/closer exits above stop being gated and the section's non-vacuity controls
 //! stop noticing.
+//!
+//! # The eight element loops, and which of their differences are essential
+//!
+//! [#259](https://github.com/al8n/tokora/issues/259)'s progress-and-terminal-stop criterion
+//! admits two answers — a **clearly identified shared engine** *or* **deliberately documented
+//! exceptions**. This section is the per-loop verdict on which of the two each difference is. It
+//! was decided against `tokora/tests/repetition_behavioural_matrix.rs` rather than by reading,
+//! and the rule it was decided by is: a difference is **incidental** when a property can be
+//! stated that all eight loops satisfy, and **essential** when stating it requires naming a
+//! loop — the naming is then the documented exception, and the matrix carries it as an
+//! assertion rather than as a skipped case.
+//!
+//! The eight are `repeated`, `repeated_while`, `sep/parse`, `sep/delim`, `sep_while/parse`,
+//! `sep_while/delim`, `delim/repeated` and `delim/repeated_while`.
+//!
+//! ## What all eight already share
+//!
+//! Counted comment-blind, the way `END_STATE_CENSUS` counts, so a prose mention is not a site.
+//!
+//! | law | one mechanism, in every loop | sites per loop |
+//! |---|---|---|
+//! | progress | one stall test, `new_committed <= committed` over `span().end()` — never the cache-front cursor | 1, in all eight |
+//! | terminal scanner stop | `latch_snapshot()` beside `scanner_trip_snapshot()`, taken once per collection | 1 + 1, in all eight |
+//! | descent budget trip | `inp.trip_snapshot()`, inside the element loop, so once per element | 1, in all eight |
+//! | an element's `Err` | [`file_element_failure`] | 1 in each try-driven loop, 0 in each `*_while` one — the resilience axis, and nothing else, decides who files one |
+//! | an element's absence | [`absence_after_element`], on every decline and every stall exit | 1 to 6, one per absence exit; the delimited loops have more exits because a close probe follows each |
+//! | a real closer | [`close_after_element`] | 1 to 3 in each delimited loop, 0 in each undelimited one |
+//! | one admitted element | [`admit_element`] | 1 or 4, except `sep/delim` and `sep_while/delim`, which reach it through `sep{,_while}/parse`'s own `handle_continue` and carry no admission at all |
+//! | what is collected | layer A7: one abstract fixture reaches one collection whichever of the four structural shapes runs it | — |
+//! | where the input rests | layer B9: all eight come to rest at the lookahead front | — |
+//!
+//! ## The verdicts
+//!
+//! | loop | what it does that the others do not | verdict |
+//! |---|---|---|
+//! | `repeated` | files an element's `Err` as a diagnostic and goes on; stops on the element's own decline. Returns the span its [`RepeatedHandler::on_stop`] built | **essential** on resilience — layer A6 asserts it against the `*_while` twin. **Incidental** on the stop-hook return: `repeated_while` computes the same span itself and throws the handler's away |
+//! | `repeated_while` | asks a caller condition over a `W`-wide decision window; never files an element failure; binds `span_since` before the stop hook. Like all four `*_while` loops it is written for `Complete` alone, where the try-driven four are generic over `Cmpl` | **essential** on resilience and on the window — that pair *is* what `while` means. The `Complete` restriction is essential by mechanism and **unmeasured**: a fixed-width decision window cannot tell a short read from a truncated one, and the matrix runs `Complete` only. **Incidental** on the stop-hook shape |
+//! | `sep/parse` | peeks a separator slot before every element through `try_expect_or_stop`, and runs a four-arm `State` machine over it | **essential** — the slot is what `Separated` means. It contributes its own tokens and its own diagnostics and nothing else: over `junk_middle` it records one diagnostic where `repeated` records none, and A7 shows the collection is unchanged |
+//! | `sep/delim` | the same state machine under an opener and a closer, with the slot probed by `try_expect_map` because the same position may hold the closer | **essential** on both counts. The three-way probe exists because a delimited list's separator slot is also a close position; the undelimited form has no closer there and needs the terminal re-raise instead |
+//! | `sep_while/parse` | `sep/parse`'s slot with `repeated_while`'s condition | **essential**, as the union of the two axes above |
+//! | `sep_while/delim` | `sep/delim`'s slot and closer with `repeated_while`'s condition | **essential**, as the union of the three axes above |
+//! | `delim/repeated` | a delimited *plain* loop that re-states `repeated`'s element loop instead of wrapping it; takes its count hook and its stop hook as two separate arguments, a third stop-hook shape; implements **one** destination contract | **essential** on the delimiter alone. **Incidental** on the other three — `sep/delim` is delimited too and reuses its undelimited sibling's handlers, carries one hook, and implements four contracts |
+//! | `delim/repeated_while` | the same three, with `repeated_while`'s condition | same verdict, same evidence |
+//!
+//! ## Where the input rests, and why it is not a family difference
+//!
+//! Every driver builds its reported span with [`InputRef::span_since`](crate::InputRef::span_since),
+//! which reads [`InputRef::cursor`](crate::InputRef::cursor) — the lookahead front, documented on
+//! that method as *the start of the first cached token, otherwise the current position*. So a
+//! repetition construct's reported end runs to the start of the next token, **trailing trivia
+//! included**, whenever it stopped by looking at a token it did not consume, and to the end of the
+//! last token it consumed when it looked no further.
+//!
+//! That is uniform, and stage 2 had to measure it because this crate's own prose said otherwise —
+//! that `repeated` rests at the end of its last token while `separated` rests at the start of the
+//! next one, so a caller's span would differ by which combinator it picked. It does not: both
+//! reach the stop through a peek that declined, and a declined peek leaves the token cached
+//! whether the peek came from the separator slot or from the element parser's own lookahead. On
+//! `1 2 3    +` under `repeated` and on `1 , 2 , 3    +` under `separated`, both report an end
+//! four bytes past the last element, at the `+`; both commit only as far as the `3`. Layer B9
+//! states it over all forty-eight rows, and the difference is in the **arm** —
+//! peeked-and-declined against consumed-to-the-end — not in the family.
+//!
+//! ## Two API-surface asymmetries, both incidental
+//!
+//! * **`delim/repeated` and `delim/repeated_while` implement only the owning
+//!   `Collect<_, Container>`.** Their undelimited siblings implement three destination contracts
+//!   (owning to `Container`, owning to `Spanned<Container>`, borrowed to `L::Span`) and the four
+//!   separated loops implement four. Being delimited is not what stops them: `sep/delim` and
+//!   `sep_while/delim` are delimited and implement all four. The borrowed contract is the only one
+//!   that lets a caller see the container on the **failure** arm, which is layer B8's whole
+//!   subject, so the two loops missing it are the two the matrix cannot ask that question of.
+//! * **`Separated` and `SeparatedWhile` expose no `at_least(n).at_most(m)` chaining.** Ten
+//!   [`Apply`](crate::parser::Apply) impls exist and all ten are `Repeated`'s or `RepeatedWhile`'s;
+//!   the two cardinality builders reach `Bounded` through direct constructors instead. The missing
+//!   pair is `Apply<Bounded<P>> for AtLeast<P>` and its `AtMost` mirror — three lines each,
+//!   mentioning no separator, forwarding to a `Bounded<Separated<..>>` that already drives. It
+//!   costs the matrix's A2 relation half its subject: `bounded(n, n)`, `at_least(n).at_most(n)`
+//!   and `at_most(n).at_least(n)` can only be related where three paths exist.
+//!
+//! ## What a consolidation pass could take, in order of what each one buys
+//!
+//! Only the incidental findings are here; the essential ones above are the exceptions the
+//! criterion asks to be documented rather than removed.
+//!
+//! 1. **`delim/repeated` and `delim/repeated_while` re-state the plain element loop instead of
+//!    wrapping it.** Two files, 593 lines, each carrying its own stall test, its own
+//!    [`admit_element`] call and its own absence exits, and `delim/repeated` its own
+//!    [`file_element_failure`] gate besides — where `sep/delim` and `sep_while/delim` drive the
+//!    *same* state handlers their undelimited siblings do and carry no admission at all. It is the
+//!    largest incidental difference and the one that pays twice: the two missing destination
+//!    contracts are missing *because* the loop is spelled
+//!    `parse_repeated(inp, container, counts, on_stop)` rather than as `Repeated::parse` under a
+//!    delimiter, so a driver that wrapped would inherit both, and the matrix's borrowed half would
+//!    cover eight drivers instead of six. The instruction-count gate is what bounds the cost.
+//! 2. **Three stop-hook shapes for one end-of-construct pass.** [`RepeatedHandler::on_stop`]
+//!    returning the span (`repeated` uses it, `repeated_while` discards it and rebuilds the same
+//!    span itself), `EndStateHandler`'s four state-dispatched methods, and a bare
+//!    `FnOnce(usize, &mut InputRef, &L::Span) -> Result<(), _>` closure in the two delimited plain
+//!    loops. `END_STATE_CENSUS` exists partly to pin which of two success-exit spellings each
+//!    driver uses; one shape retires that half of it.
+//! 3. **`Apply<Bounded<P>> for AtLeast<P>` and its `AtMost` mirror, for `Separated` and
+//!    `SeparatedWhile`.** Four small impls. They buy the builder parity above and let layer A2 —
+//!    the relation over three construction paths to one cardinality — cover eight drivers instead
+//!    of four.
+//! 4. **The descent baseline's placement**, beside the element attempt in `repeated` and
+//!    `delim/repeated` and at the top of the cycle in the other six. Lowest: the widened window is
+//!    already argued at each site (nothing between the two points can descend, so the reading is
+//!    the one the element attempt would have given), so unifying it buys uniformity and no
+//!    behaviour, and costs re-making that argument once per driver.
 
 // `UnexpectedEot` reaches this family's descendants through their `use super::*`; the drivers
 // under `repeated*/`, `sep*/` and `delim/` all name it in a `From` bound and none of them import

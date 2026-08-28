@@ -416,8 +416,9 @@ const TAIL: Fixture = Fixture {
   cells: &[Cell::Ok(7), Cell::Ok(8)],
 };
 
-/// The source's tokens, lexed **without** tokora: the independent side of the position property.
-fn lexed(src: &str) -> Vec<(TokenKind, usize)> {
+/// The source's tokens, lexed **without** tokora: the independent side of the position
+/// properties. Each entry is `(kind, start, end)`; B9 needs the end, B3 and B4 only the start.
+fn lexed(src: &str) -> Vec<(TokenKind, usize, usize)> {
   let mut out = Vec::new();
   let mut lex = Token::lexer(src);
   while let Some(tok) = lex.next() {
@@ -425,6 +426,7 @@ fn lexed(src: &str) -> Vec<(TokenKind, usize)> {
     out.push((
       TokenKind::from(&tok.expect("the fixture renderings lex cleanly")),
       span.start,
+      span.end,
     ));
   }
   out
@@ -595,7 +597,7 @@ macro_rules! variants {
             Ok((second.ok(), accepts))
           }
           let joined = format!("{src} {tail}");
-          let starts: Vec<usize> = lexed(&joined).into_iter().map(|(_, s)| s).collect();
+          let starts: Vec<usize> = lexed(&joined).into_iter().map(|(_, s, _)| s).collect();
           PLAN.with(|p| *p.borrow_mut() = (starts, lexed(src).len()));
           Parser::with_context(ParserContext::new(Fatal::new()))
             .apply(go)
@@ -750,7 +752,15 @@ variants! {
 // storage and can read it on the **failure** arm, which the owning form cannot expose. Six of the
 // eight drivers implement it; `delim/repeated` and `delim/repeated_while` implement only the
 // owning form, so they have no row here. That asymmetry is a fact about the crate rather than a
-// gap in this file, and it is the reason the main table above is the owning one.
+// gap in this file, and it is the reason the main table above is the owning one. #259 stage 2
+// found it **incidental** rather than forced — `sep/delim` and `sep_while/delim` are delimited
+// too and implement the borrowed contract — so these rows return when those two drivers do.
+//
+// The count is twenty-four against the main table's forty-eight, and the two subtractions are
+// different in kind. Fourteen rows are the two drivers above, which have no borrowed impl to
+// drive. The other ten are the `exact2*` spellings: three construction paths to one cardinality
+// is A2's subject, and relating them through a second ownership contract asks nothing A2 and A5
+// do not already ask separately.
 
 /// One row of the borrowed-destination table.
 struct Borrowed {
@@ -851,6 +861,8 @@ borrowed_variants! { te, pe => {
     (&mut te).separated_by_comma().at_least(2).delimited::<Bracket<(), (), ()>>();
   b_dsep_max2: Comma true ~ dsep_max2 =
     (&mut te).separated_by_comma().at_most(2).delimited::<Bracket<(), (), ()>>();
+  b_dsep_bnd13: Comma true ~ dsep_bnd13 =
+    (&mut te).separated_by_comma().bounded(1, 3).delimited::<Bracket<(), (), ()>>();
 
   b_dsepw_unb: Comma true ~ dsepw_unb =
     (&mut pe).separated_by_comma_while::<_, U1>(decide_num::<Ctx<'_>>)
@@ -860,6 +872,9 @@ borrowed_variants! { te, pe => {
       .delimited::<Bracket<(), (), ()>>();
   b_dsepw_max2: Comma true ~ dsepw_max2 =
     (&mut pe).separated_by_comma_while::<_, U1>(decide_num::<Ctx<'_>>).at_most(2)
+      .delimited::<Bracket<(), (), ()>>();
+  b_dsepw_bnd13: Comma true ~ dsepw_bnd13 =
+    (&mut pe).separated_by_comma_while::<_, U1>(decide_num::<Ctx<'_>>).bounded(1, 3)
       .delimited::<Bracket<(), (), ()>>();
 }}
 
@@ -1047,8 +1062,8 @@ fn the_input_rests_at_the_end_of_what_was_consumed() {
       let (_, end) = obs.consumed;
       let want: Vec<TokenKind> = lexed(&src)
         .into_iter()
-        .filter(|(_, start)| *start >= end)
-        .map(|(k, _)| k)
+        .filter(|(_, start, _)| *start >= end)
+        .map(|(k, _, _)| k)
         .collect();
       r.check(want == obs.rest, || {
         format!(
@@ -1073,14 +1088,13 @@ fn the_input_rests_at_the_end_of_what_was_consumed() {
 ///
 /// # Why the statement is about tokens rather than about an offset
 ///
-/// The two families do not stop at the same *byte*. After `repeated` returns, the input's
-/// lookahead cursor sits at the end of the last token it consumed; after `separated` returns, it
-/// sits at the start of the next token, past the whitespace between them, because the separator
-/// slot was peeked. `InputRef::span_since` — which is what the drivers themselves build every
-/// reported span from — reads that cursor, so the difference reaches the spans a caller sees.
-/// It is a real cross-family difference and it belongs to #259's stage 2 verdict on which driver
-/// differences are essential; it is **not** a difference about which tokens the construct took,
-/// and that is the question this property asks.
+/// Which tokens a construct took and which *byte* it came to rest on are two questions, and this
+/// property asks the first. The second is `a_construct_rests_at_the_lookahead_front`, and it
+/// exists because this file once carried the wrong answer to it here: that `repeated` rests at
+/// the end of the last token it consumed while `separated` rests at the start of the next one,
+/// so a caller's span differed by family. Measured, it does not — both rest at the lookahead
+/// front, because both reach it through a peek that declined, and B9 states that as a law over
+/// all eight drivers rather than as an aside.
 ///
 /// Stated over clean fixtures only. On a fixture containing an element the parser refuses, where
 /// a construct rests is a **policy** difference between the resilient and non-resilient families,
@@ -1111,10 +1125,10 @@ fn a_successful_construct_rests_just_past_the_last_element_it_kept() {
         // leaves nothing.
         Vec::new()
       } else if elements.is_empty() {
-        toks.iter().map(|(k, _)| *k).collect()
+        toks.iter().map(|(k, _, _)| *k).collect()
       } else {
         let after = base + stride * (elements.len() - 1) + 1;
-        toks[after..].iter().map(|(k, _)| *k).collect()
+        toks[after..].iter().map(|(k, _, _)| *k).collect()
       };
       r.check(want == obs.rest, || {
         format!(
@@ -1247,6 +1261,63 @@ fn a_failed_borrowed_attempt_holds_only_what_it_parsed() {
         format!(
           "{}/{} on {src:?}: the container held {container:?} against an accept log of {accepts:?}",
           b.name, fx.name
+        )
+      });
+    }
+  }
+  r.finish();
+}
+
+/// **B9 — a construct comes to rest at the lookahead front, and every one of the eight does.**
+///
+/// B3 says the resting position is *consistent* with what was left behind and B4 says which
+/// tokens those are. Neither pins the **byte**, and the byte is what a caller gets: every driver
+/// builds its reported span with `InputRef::span_since`, which reads `InputRef::cursor` — the
+/// lookahead (cache-front) position, documented on that method as "the start of the first cached
+/// token; otherwise the current position". So the reported end runs to the start of the next
+/// token, **trailing trivia included**, whenever the construct stopped by looking at a token it
+/// did not consume, and to the end of the last token it consumed when it looked at nothing more.
+///
+/// A construct that succeeded over a clean fixture always stopped by looking — it cannot know the
+/// elements ran out without asking — so on that arm the two cases collapse into one statement
+/// with an oracle outside the driver: **the end of the consumed region is the start of the first
+/// token still in the input, or the end of the source's last token when none is.** Both sides
+/// come from re-lexing with `logos` directly and from the tokens drained afterwards.
+///
+/// This is #259 stage 2's answer to whether the resting byte is a per-driver difference. It is
+/// not: all forty-eight rows satisfy one statement that names no driver, so the difference is in
+/// the *arm* — peeked-and-declined against consumed-to-the-end — and not in the family. What a
+/// caller may not assume is that the span stops at the last element: `1 2 3    +` and
+/// `1 , 2 , 3    +` both report an end four bytes past the last element, under `repeated` and
+/// under `separated` alike.
+#[test]
+fn a_construct_rests_at_the_lookahead_front() {
+  let mut r = Report::new(
+    "LAYER B9 — the reported end is the lookahead front: the start of the first token left \
+     behind, or the end of the last token consumed when nothing is",
+  );
+  for v in VARIANTS {
+    for fx in FIXTURES.iter().filter(|f| f.is_clean()) {
+      let src = v.render(fx);
+      let obs = (v.run)(&src);
+      if obs.elements.is_none() {
+        continue;
+      }
+      let toks = lexed(&src);
+      let (_, end) = obs.consumed;
+      // `rest` was drained from the same input, so its length names which of this source's
+      // tokens is the first one left.
+      let want = match toks.len().checked_sub(obs.rest.len()) {
+        Some(i) if i < toks.len() => toks[i].1,
+        _ => toks.last().map_or(0, |(_, _, e)| *e),
+      };
+      r.check(end == want, || {
+        format!(
+          "{}/{} on {src:?}: rested at {end}, and the lookahead front is {want} ({} token(s) \
+           left behind)",
+          v.name,
+          fx.name,
+          obs.rest.len()
         )
       });
     }
@@ -1546,6 +1617,70 @@ fn the_while_and_try_families_diverge_on_an_element_failure() {
   r.finish();
 }
 
+/// **A7 — the separator and the delimiter are wrappers, not element loops.**
+///
+/// The axis nothing else in this file compares. A1 pairs a driver with its `*_while` twin, A4
+/// pairs a driver with its delimited form, and both pairs render one fixture identically — so
+/// neither can look across the *separator*, whose renderings differ (`1 2 3` against `1,2,3`) and
+/// which therefore never appears on either side of `relate`. Four of the eight drivers were
+/// consequently never compared with the other four on anything.
+///
+/// The statement that closes it is about the abstract fixture rather than the source: **a
+/// driver's collection is decided by the fixture and by the resilience axis alone.** Which of the
+/// four structural shapes — plain, separated, delimited, delimited-and-separated — is doing the
+/// collecting must not change *what* is collected; a shape contributes its own tokens and its own
+/// diagnostics and nothing else. That is #259's "clearly identified shared engine", stated as
+/// behaviour: eight drivers, one element loop, and the separator and the delimiter riding on top
+/// of it.
+///
+/// Two things are deliberately outside the comparison, because a shape is entitled to them:
+///
+/// * **the consumed region and the tokens left behind** — a separated rendering has separators in
+///   it and a delimited one has brackets, so the same collection sits over a different token
+///   count. A4 and B4 hold those.
+/// * **the diagnostic vector** — a separator slot and a closer are each something to complain
+///   about that a plain repetition does not have. Over `junk_middle` the four shapes record none,
+///   one, one and two diagnostics: the count is the plain shape's plus one per wrapper, and every
+///   extra one is the wrapper's own.
+///
+/// The resilience axis stays *inside* it, one family at a time, because A6 already declares that
+/// difference: over `bad_first` the four try-driven shapes all keep `[2, 3]` and the four
+/// `*_while` shapes all refuse. Both halves are asserted here — the property is that the split is
+/// along resilience and along nothing else.
+#[test]
+fn the_four_structural_shapes_collect_the_same_elements() {
+  let mut r = Report::new(
+    "LAYER A7 — plain, separated, delimited and delimited-separated are one element loop under \
+     three wrappers: within a resilience family they must return the same collection",
+  );
+  for family in [
+    ["rep", "sep", "drep", "dsep"],
+    ["repw", "sepw", "drepw", "dsepw"],
+  ] {
+    // Every cardinality all eight drivers accept. The `exact2lm` / `exact2ml` rows are the
+    // `repeated` family's alone and are A2's subject, not this one.
+    for card in ["unb", "min2", "max2", "bnd13", "exact2b"] {
+      let base = variant(&format!("{}_{card}", family[0]));
+      for fx in FIXTURES {
+        let want = (base.run)(&base.render(fx)).elements;
+        for shape in &family[1..] {
+          let v = variant(&format!("{shape}_{card}"));
+          let src = v.render(fx);
+          let got = (v.run)(&src).elements;
+          r.check(got == want, || {
+            format!(
+              "{}/{} on {src:?}: this shape returned {got:?} where {} returned {want:?} over the \
+               same fixture",
+              v.name, fx.name, base.name
+            )
+          });
+        }
+      }
+    }
+  }
+  r.finish();
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // The table itself
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1567,7 +1702,7 @@ fn every_declared_driver_has_a_row() {
   );
   assert_eq!(
     BORROWED.len(),
-    22,
+    24,
     "the borrowed-destination table changed size; every row here must name a main-table twin"
   );
   assert_eq!(FIXTURES.len(), 10, "the fixture set changed size");
