@@ -1049,12 +1049,27 @@ and will red until they do.
   over a source whose `Source::REFERENT_IS_BYTES` is `false`, where no address comparison proves
   anything.
 
-  **Every supplied buffer is validated twice**, once as it arrives and once after the driver has
-  answered every cut of that input. Being asked once stops a driver giving a second *answer* and
-  does not stop it writing through the reference it already gave — a `Cell`, a `RefCell`, an arena
-  it reuses — while the schedules are built out of the whole table at once. A buffer that passed at
-  cut 3 and was rewritten while cut 4 was being answered was lexed in its rewritten form, and the
-  divergence that followed was reported against the lexer.
+  **Every supplied buffer is validated four times, and the count is not the point — the moments
+  are.** Once as it arrives and once after the driver has answered every cut of that input: being
+  asked once stops a driver giving a second *answer* and does not stop it writing through the
+  reference it already gave — a `Cell`, a `RefCell`, an arena it reuses — while the schedules are
+  built out of the whole table at once. A buffer that passed at cut 3 and was rewritten while cut 4
+  was being answered was lexed in its rewritten form, and the divergence that followed was reported
+  against the lexer.
+
+  The settled pass closes the window the driver's own **callbacks** open, and nothing else — which
+  is the correction to what that paragraph used to claim, that the pass established every prefix at
+  the same time. It does not: the pass itself runs caller code at every step (`Source::as_slice`,
+  the slice type's `PartialEq`, and the destructor of the value it drops *after* a successful
+  comparison), and the schedules then lex those same references through more of it. So the table is
+  asked again at the two moments where a stale buffer costs something: **before any divergence is
+  blamed on the lexer**, so a buffer that changed wins the diagnosis and the refusal is the
+  driver's; and **after the last schedule has run**, because a rewrite that produced no divergence
+  would otherwise leave a green earned over bytes the oracle never lexed, and that is the one
+  outcome no later comparison can take back. Both are the same one comparison with a different
+  sentence, and the first runs only on a path that is about to panic. The residue — a buffer
+  rewritten and put back between two checks — is stated as a requirement on the driver instead:
+  the bytes behind a buffer you hand back do not change for the duration of the run.
 
   **What the kit cannot check is stated as an obligation rather than hooked.** That validation
   compares `Source::Slice` values while the lexer receives the whole `L::Source`, and slice
@@ -1067,8 +1082,46 @@ and will red until they do.
   driver to certify the driver. Not a bound either: the equality that would settle it needs
   `Index<RangeTo<usize>, Output = Self>`, the bound this tier dropped in order to reach a source
   that cannot slice itself, and a marker trait is this obligation with a compile step in front of
-  it. Both shipped drivers derive their buffers from the source through the source's own indexing,
-  so the obligation binds a hand-written driver over such a source.
+  it.
+
+  **The obligation binds a hand-written driver, and the shipped ones are held to something the kit
+  can keep.** A `RefillDriver` somebody writes has an author for the obligation to bind. A driver
+  the kit ships does not: the caller of `run_refill(SameAllocation)` never wrote the code that
+  derives the buffer, and `Index<RangeTo<usize>, Output = S>` — everything that driver used to ask
+  for — proves nothing about meaning. A source of `{ text, keywords }` may legally index to stored
+  prefixes under the other flag, every buffer validates as an equal slice, and the leg then commits
+  an `Ident` where the oracle has a `Keyword`: a lexer-blaming `refill-equivalence` red out of a
+  driver the kit hands out. So `SameAllocation` and `OwnedChunks` now require
+  `conformance::SemanticPrefix` — *this source's prefix by indexing is the prefix, and its round
+  trip through `ToOwned` and back preserves that too* — which is **sealed**, implemented for `str`,
+  `[u8]` and `bstr::BStr`. Sealed because an impl of it is a promise nobody can check, and an
+  unsealed marker is the caller-supplied exemption this design already refused; sealed, it says the
+  one thing the kit is in a position to say. A slice-invisible source keeps the tier and loses the
+  shortcut: it writes the handful of lines of `RefillDriver`, which is where the obligation already
+  said the answer lived. Two doctests over the same `Index`-able mode source pin both directions,
+  differing in their last statement and in nothing else: `SameAllocation` does not compile, a
+  hand-written driver does.
+
+  **A terminal stop is not a refill, so the tier refuses to drive one.** `InputRef::classify` ranks
+  the crate's terminal predicate — a failing `Lexer::check` — *ahead* of the partial-input frontier
+  holdback: the layer emits the item, latches its poison boundary and never refills, and the
+  document ends there. Applying the holdback to every error withheld a terminal one, restored the
+  pre-trip pair and re-lexed the tripping bytes on the grown buffer, so a conforming lexer that
+  trips over `"ab"` at cut 1 — production terminates at `Err@0..1` — was re-driven to `Err@0..2`,
+  matched the complete-input oracle, and **passed a transition production never makes**. A leg now
+  asks `check` where the layer asks it and on the arm the layer asks it on (a token is never
+  terminal, so the token path calls no `check`), and a schedule reaching one **stops**.
+
+  The promise for such a schedule is **non-certifying**, not *compared differently*, and the two are
+  different promises to the caller. Comparing differently needs a second oracle — the complete input
+  under the same ranking — and the two runs stop at legitimately different items, because the tally
+  a limit trips on is per lexer and a refilling driver builds a fresh lexer per leg, which is the
+  very reason the layer latches at the *input* level. That comparison would charge a count
+  divergence to the lexer for something that is not a refill defect, and truncating both sides to
+  the shorter leaves a comparison whose length the lexer chooses — vacuous exactly where the trip is
+  early. So the schedule certifies nothing and the run says so: `RefillCoverage::schedules` and
+  `RefillCoverage::non_certifying` carry the ratio, and an input **all** of whose schedules ended
+  that way is refused as `refill-terminal`, in `refill-coverage`'s posture and for its reason.
 
   **The withholding is what keeps it from being stricter than the contract**, and the plant says so
   rather than the sentence: with the holdback removed, every conforming fixture in the tree reds —

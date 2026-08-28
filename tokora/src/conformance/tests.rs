@@ -5503,6 +5503,210 @@ fn every_conforming_hand_rolled_fixture_passes_the_refill_tier() {
     .require_every_cut_relocated();
 }
 
+// ── A terminal trip ends the document, and production never refills past one ─────────
+
+/// The state of [`TerminalWordLexer`]: whether the limit has been tripped.
+///
+/// It is carried in the `State` rather than kept as a lexer field for the reason a real limiter's
+/// is: the input layer builds a fresh lexer per operation, so a latch that lives only in the
+/// instance is lost on the next one. What survives is what the state carries.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct TripLatch {
+  tripped: bool,
+}
+
+impl crate::state::State for TripLatch {
+  type Error = Infallible;
+
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+}
+
+/// A whitespace-separated word lexer with a resource limit that **a truncated buffer trips**: a
+/// word running to the end of the buffer costs more than the limit allows, so it latches and
+/// returns an error rather than a token.
+///
+/// `TERMINAL` picks whether that latch is reported the way the crate specifies a limit trip —
+/// through a failing [`Lexer::check`](crate::Lexer::check), which is the crate's terminal
+/// predicate — or as an ordinary lexer error. It is the only difference between the two
+/// instantiations, and it is the whole differential: the input layer ranks a failing `check`
+/// **ahead** of the partial-input frontier holdback, emits the item, latches its poison boundary
+/// and never refills, while a plain error at the frontier is withheld and re-driven on the buffer
+/// that grew.
+struct TerminalWordLexer<'a, const TERMINAL: bool> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: TripLatch,
+}
+
+impl<'a, const TERMINAL: bool> Lexer<'a> for TerminalWordLexer<'a, TERMINAL> {
+  type State = TripLatch;
+  type Source = str;
+  type Token = RTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: TripLatch::default(),
+    }
+  }
+  fn with_state(src: &'a str, state: TripLatch) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), RErr> {
+    if TERMINAL && self.state.tripped {
+      return Err(RErr::Unexpected);
+    }
+    Ok(())
+  }
+  fn state(&self) -> &TripLatch {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut TripLatch {
+    &mut self.state
+  }
+  fn into_state(self) -> TripLatch {
+    self.state
+  }
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<RTok, RErr>> {
+    let b = self.src.as_bytes();
+    let len = b.len();
+    self.start = self.end;
+    while self.start < len && b[self.start] == b' ' {
+      self.start += 1;
+    }
+    if self.start >= len {
+      self.end = self.start;
+      return None;
+    }
+    let mut e = self.start;
+    while e < len && b[e] != b' ' {
+      e += 1;
+    }
+    self.end = e;
+    if e == len {
+      // The trip. A word that runs to the end of the buffer is over the limit, and the latch is
+      // sticky: the backend reports a trip as an error on the tripping token, which is the arm
+      // `InputRef::classify` asks `Lexer::check` on.
+      self.state.tripped = true;
+      return Some(Err(RErr::Unexpected));
+    }
+    Some(Ok(RTok::Ident))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+/// The trip reported the way the crate specifies one: a failing `check`, which is terminal.
+type TerminalTrip<'a> = TerminalWordLexer<'a, true>;
+/// The identical lexer, the identical error, and a `check` that stays `Ok` — so the item is an
+/// ordinary frontier error and the holdback applies to it.
+type RecoverableTrip<'a> = TerminalWordLexer<'a, false>;
+
+#[test]
+fn a_terminal_error_ends_the_schedule_where_a_plain_one_is_withheld_and_re_driven() {
+  // The [high] of round 4, as the minimal pair it is. Over `"ab"` at cut 1 the leg lexes `"a"`,
+  // the word reaches the buffer end, and the lexer latches and errors at `0..1`.
+  //
+  // With the latch reported through `check`, production terminates there: `classify` ranks the
+  // terminal probe ahead of the frontier holdback, the layer emits `Err@0..1`, latches its poison
+  // boundary, and no refill follows. The schedule is over, and there is nothing for this tier to
+  // compare — the complete-input oracle ran past a stop the driver never gets past.
+  //
+  // With the identical error and an `Ok` check, the item is a frontier item: it is withheld, the
+  // leg hands back the pair it entered with, and the tail is re-lexed on the grown buffer. That is
+  // the transition the tier exists to certify, and it still runs — `refill_schedule` returns
+  // without panicking, which is it matching `[Err@0..2]`.
+  let src = "ab";
+  let budget = 8 * src.len() + 64;
+  let chunks = OwnedChunks::over([src]);
+
+  let reference = super::lex_run::<TerminalTrip<'_>>(0, src, budget);
+  let buffers = refill_table::<TerminalTrip<'_>>(src, &chunks);
+  assert_eq!(
+    super::refill_schedule::<TerminalTrip<'_>>(0, src, &reference, &buffers, &[1, 2], budget),
+    super::LegEnd::Terminal,
+    "a leg whose error fails `check` ends the document, so the schedule certifies nothing"
+  );
+
+  let reference = super::lex_run::<RecoverableTrip<'_>>(0, src, budget);
+  let buffers = refill_table::<RecoverableTrip<'_>>(src, &chunks);
+  assert_eq!(
+    super::refill_schedule::<RecoverableTrip<'_>>(0, src, &reference, &buffers, &[1, 2], budget),
+    super::LegEnd::Refillable,
+    "the same error with an Ok check is withheld and re-driven, exactly as before"
+  );
+}
+
+#[test]
+fn the_control_passes_every_tier_it_is_read_against() {
+  // Neither instantiation may be convicted of anything by the tiers that do not model a refill:
+  // both lex identically, and `run` never asks `check` at all. This is what makes the cell above a
+  // statement about the ranking rather than about a broken fixture.
+  Harness::<TerminalTrip<'_>>::over(["ab", "ab cd "]).run();
+  Harness::<RecoverableTrip<'_>>::over(["ab", "ab cd "]).run();
+  Harness::<RecoverableTrip<'_>>::over(["ab", "ab cd "])
+    .run_refill(&OwnedChunks::over(["ab", "ab cd "]))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
+}
+
+#[test]
+#[should_panic(expected = "[input #0 refill-terminal] every one of the 7 refill schedules")]
+fn an_input_whose_every_schedule_ends_terminally_is_refused_not_passed() {
+  // `"ab"` is a source whose every buffer trips: the sealed one included, so every schedule ends
+  // on a terminal item and not one of them drives a refill. Round 3 passed this input by
+  // withholding the trip and re-driving it — a green earned from a transition production does not
+  // have. The kit refuses it instead, in `refill-coverage`'s posture and for its reason: this
+  // input certified nothing.
+  let _ = Harness::<TerminalTrip<'_>>::over(["ab"]).run_refill(&OwnedChunks::over(["ab"]));
+}
+
+#[test]
+fn a_terminal_stop_on_some_schedules_is_a_number_and_not_a_refusal() {
+  // The other side of the refusal, and the population the certificate's new number is over.
+  // `"ab cd "` ends in a space, so no word reaches the end of the *sealed* buffer and the
+  // complete-input parse never trips. A cut inside or at the end of a word does trip, so those
+  // schedules end terminally and certify nothing, while the ones cutting on the space certify the
+  // refill they drove. Both facts are true of the same run, so the kit reports the ratio rather
+  // than refusing.
+  let corpus = ["ab cd "];
+  let coverage = Harness::<TerminalTrip<'_>>::over(corpus).run_refill(&OwnedChunks::over(corpus));
+  coverage
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
+  assert_eq!(coverage.schedules(), 19);
+  assert_eq!(coverage.non_certifying(), 14);
+  // And the same corpus over the lexer that never trips: every schedule drew its comparison.
+  let all = Harness::<RecoverableTrip<'_>>::over(corpus).run_refill(&OwnedChunks::over(corpus));
+  assert_eq!(all.schedules(), 19);
+  assert_eq!(all.non_certifying(), 0);
+}
+
 // ── A leg has to change buffer, not just length ─────────────────────────────────────
 
 /// The state of [`PointerStateLexer`]: where the buffer it was born over lives.
@@ -6121,7 +6325,7 @@ impl Token<'_> for ModalTok {
   }
 }
 
-/// A `Source` that is **not** its slice, in both of the ways a `RefillDriver` can exploit.
+/// A `Source` that is **not** its slice, in all of the ways a `RefillDriver` can exploit.
 ///
 /// - `text` is behind a [`Cell`](core::cell::Cell), so whoever holds the `ModalSource` can rewrite
 ///   its bytes after handing a reference to it away. `str` cannot do this — a `&str` addresses
@@ -6129,20 +6333,43 @@ impl Token<'_> for ModalTok {
 ///   than one more `&str` driver.
 /// - `keywords` is a fact the slice does not carry: two `ModalSource`s can be equal at
 ///   `Source::as_slice` and lex differently. That is the tier's stated obligation, executable.
+/// - `overwrite` rewrites this source **from inside `as_slice`**, which is the channel the driver's
+///   last callback does not close: the kit reads the buffer to validate it, and reading it is
+///   caller code. See `a_buffer_rewritten_while_the_kit_validated_it_wins_the_diagnosis`.
 ///
 /// It is a sized backing, so `REFERENT_IS_BYTES` keeps its conservative default and
-/// `RefillCoverage::relocated` is `None` over it — which is the third thing these cells use it for.
+/// `RefillCoverage::relocated` is `None` over it — which is the fourth thing these cells use it for.
 #[derive(Debug)]
 struct ModalSource {
   text: core::cell::Cell<&'static str>,
   keywords: bool,
+  /// The bytes the **second** read of this source's slice leaves behind it, if any.
+  overwrite: Option<&'static str>,
+  /// How often the slice has been asked for.
+  reads: core::cell::Cell<usize>,
 }
 
 impl ModalSource {
-  const fn new(text: &'static str, keywords: bool) -> Self {
+  fn new(text: &'static str, keywords: bool) -> Self {
     Self {
       text: core::cell::Cell::new(text),
       keywords,
+      overwrite: None,
+      reads: core::cell::Cell::new(0),
+    }
+  }
+
+  /// The same source, except that the second read of its slice hands back what it was holding and
+  /// then rewrites it.
+  ///
+  /// Two reads is the count that matters, and it is not arbitrary: the kit validates a buffer as
+  /// it arrives and again once the driver has answered every cut, so the second read is the last
+  /// validation before the schedules lex — and this rewrite happens after that comparison has
+  /// already been decided on the value it snapshotted.
+  fn rewriting_itself(text: &'static str, keywords: bool, overwrite: &'static str) -> Self {
+    Self {
+      overwrite: Some(overwrite),
+      ..Self::new(text, keywords)
     }
   }
 
@@ -6166,7 +6393,17 @@ impl crate::Source<usize> for ModalSource {
   }
 
   fn as_slice(&self) -> Self::Slice<'_> {
-    self.text()
+    // The snapshot is taken BEFORE the rewrite, so the caller compares the bytes this source was
+    // holding and the source is not holding them any more. Nothing here is exotic: reading a
+    // source is caller code, and so are the slice type's equality and its destructor.
+    let held = self.text();
+    self.reads.set(self.reads.get() + 1);
+    if self.reads.get() == 2
+      && let Some(next) = self.overwrite
+    {
+      self.text.set(next);
+    }
+    held
   }
 
   fn slice<R>(&self, range: R) -> Option<Self::Slice<'_>>
@@ -6372,6 +6609,112 @@ fn the_rewrite_refusal_says_which_of_the_kits_two_promises_did_not_cover_it() {
     overwrite: "xb ",
   };
   let _ = Harness::<ModalLexer<'_>>::new(&src).run_refill(&driver);
+}
+
+/// A driver whose buffers are correct on arrival, and one of which rewrites **itself** while the
+/// kit is taking its second look at it.
+struct RewritesUnderValidation {
+  bufs: Vec<ModalSource>,
+}
+
+impl<'inp> super::RefillDriver<'inp, ModalSource> for &'inp RewritesUnderValidation {
+  fn buffer(&self, _idx: usize, _src: &'inp ModalSource, k: usize) -> Option<&'inp ModalSource> {
+    let owner: &'inp RewritesUnderValidation = self;
+    owner.bufs.get(k)
+  }
+}
+
+/// The buffers for `text`, with the one at `strike` rewriting itself to `overwrite` on the second
+/// read of its slice.
+fn rewriting_bufs(text: &'static str, strike: usize, overwrite: &'static str) -> Vec<ModalSource> {
+  (0..text.len())
+    .map(|k| {
+      if k == strike {
+        ModalSource::rewriting_itself(&text[..k], false, overwrite)
+      } else {
+        ModalSource::new(&text[..k], false)
+      }
+    })
+    .collect()
+}
+
+#[test]
+#[should_panic(
+  expected = "[input #0 refill-buffer] the RefillDriver returned a buffer for cut \
+                           k=3 whose contents differ from the source: expected \"ab \", got \"xb \""
+)]
+fn a_buffer_rewritten_while_the_kit_validated_it_wins_the_diagnosis() {
+  // Round 4's first [medium], executable. Every callback has been answered and both of the
+  // validations that precede a run have passed — the second one on the value this buffer handed
+  // back **and then stopped holding**. Round 3's claim was that the settled pass establishes every
+  // prefix at the same time; it does not, because the pass runs caller code at every step and the
+  // schedules run more of it afterwards.
+  //
+  // So the leg lexes `"xb "` and commits an `x` the oracle does not have. What the repair changes
+  // is who that is reported against: the buffers this schedule lexed are asked once more on the
+  // way to the verdict, and the one that is no longer a prefix takes it. Before the repair this
+  // was `refill-equivalence` at position 0 — the kit convicting a lexer that did exactly what it
+  // was handed.
+  let src = ModalSource::new("ab cd", false);
+  let driver = RewritesUnderValidation {
+    bufs: rewriting_bufs("ab cd", 3, "xb "),
+  };
+  let _ = Harness::<ModalLexer<'_>>::new(&src).run_refill(&driver);
+}
+
+#[test]
+#[should_panic(expected = "about to report this schedule against the lexer")]
+fn the_late_rewrite_refusal_names_the_verdict_it_replaced() {
+  // The wording is half the repair, as it was for the settled pass: a reader who is not told that
+  // this refusal stands **in place of** a lexer-blaming divergence cannot tell it from the arrival
+  // check, which is a different fact about a different moment.
+  let src = ModalSource::new("ab cd", false);
+  let driver = RewritesUnderValidation {
+    bufs: rewriting_bufs("ab cd", 3, "xb "),
+  };
+  let _ = Harness::<ModalLexer<'_>>::new(&src).run_refill(&driver);
+}
+
+#[test]
+#[should_panic(
+  expected = "[input #0 refill-buffer] the RefillDriver returned a buffer for cut \
+                           k=2 whose contents differ from the source: expected \"ab\", got \"xb\""
+)]
+fn a_rewrite_that_diverges_nowhere_is_still_not_a_pass() {
+  // The other half, and the one no divergence can catch: cut 2's buffer is `"ab"`, whose only item
+  // reaches the buffer end and is therefore **withheld** on every leg that lexes it. Rewriting it
+  // to `"xb"` changes nothing any schedule commits, so every comparison passes and the run is
+  // green — over a buffer that was not the prefix. That green is the one outcome a later
+  // comparison cannot take back, which is why the table is validated once more after the last
+  // schedule has run rather than only on the way to a failure.
+  let src = ModalSource::new("ab cd", false);
+  let driver = RewritesUnderValidation {
+    bufs: rewriting_bufs("ab cd", 2, "xb"),
+  };
+  let _ = Harness::<ModalLexer<'_>>::new(&src).run_refill(&driver);
+}
+
+#[test]
+#[should_panic(expected = "Every schedule of this input has now run")]
+fn the_silent_rewrite_refusal_says_which_moment_it_speaks_from() {
+  let src = ModalSource::new("ab cd", false);
+  let driver = RewritesUnderValidation {
+    bufs: rewriting_bufs("ab cd", 2, "xb"),
+  };
+  let _ = Harness::<ModalLexer<'_>>::new(&src).run_refill(&driver);
+}
+
+#[test]
+fn a_driver_whose_buffers_hold_still_reaches_none_of_those_refusals() {
+  // The control for all four: the identical driver shape over the identical source, with no
+  // rewrite armed. Nothing here reds, so what reds above is the rewrite and not the fixture.
+  let src = ModalSource::new("ab cd", false);
+  let driver = RewritesUnderValidation {
+    bufs: rewriting_bufs("ab cd", usize::MAX, "unused"),
+  };
+  let coverage = Harness::<ModalLexer<'_>>::new(&src).run_refill(&driver);
+  coverage.require_every_admissible_cut();
+  assert_eq!(coverage.non_certifying(), 0);
 }
 
 #[test]

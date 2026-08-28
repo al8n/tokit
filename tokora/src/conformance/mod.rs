@@ -96,7 +96,18 @@
 //! and therefore tests a change of *length*, is a choice somebody wrote rather than a default they
 //! inherited; and the run hands back a
 //! [`RefillCoverage`](crate::conformance::RefillCoverage) so that a narrow chunk rule is a number
-//! rather than a silence. See [`run_refill`](crate::conformance::Harness::run_refill).
+//! rather than a silence. Both shipped drivers derive their buffers by indexing the source, so both
+//! are confined to a [`SemanticPrefix`](crate::conformance::SemanticPrefix) source — a sealed
+//! promise, because a promise the kit cannot check is not one a caller may make on its behalf.
+//! See [`run_refill`](crate::conformance::Harness::run_refill).
+//!
+//! What this tier will **not** drive is a refill past a **terminal** stop. A failing
+//! [`Lexer::check`] is the crate's terminal predicate, and the input layer ranks it ahead of the
+//! partial-input holdback: it emits the item, latches its poison boundary and never
+//! refills, so the document ends there. A schedule reaching one therefore stops and certifies
+//! nothing — the alternative would be to withhold the trip and re-lex it on a buffer production
+//! never reaches, which is a pass for a transition that does not exist. Those schedules are counted
+//! in the certificate, and an input made only of them is refused.
 //!
 //! Both tiers that drive an `Input` are bounded by a single non-rewindable counter per input,
 //! `LexTally`, and not by the item budgets their drain loops also carry. The rule is that **a
@@ -756,20 +767,28 @@ where
   /// you would be certifying less than this paragraph claims.
   ///
   /// The return value is the [`RefillCoverage`] the run actually reached: how many cut positions it
-  /// drove schedules from, how many the sources offered, and how many of those cuts got a buffer at
-  /// an address the source does not share. A driver that admits **no** cut below the source length
-  /// certifies nothing about any change of buffer, and is refused rather than passed.
+  /// drove schedules from, how many the sources offered, how many of those cuts got a buffer at
+  /// an address the source does not share, and how many of the schedules it drove certified
+  /// nothing because the document ended inside them. A driver that admits **no** cut below the
+  /// source length certifies nothing about any change of buffer, and is refused rather than passed.
   ///
-  /// What the kit checks about a supplied buffer is that it is a content-preserving prefix — and it
-  /// checks that twice, because being asked once stops a driver giving a second answer and does not
-  /// stop it writing through a reference it already gave. What the kit cannot check is that the
-  /// buffer *means* what the prefix means: the comparison is over [`Source::Slice`] values while
-  /// the lexer is handed the whole [`L::Source`](Lexer::Source), so **this tier assumes a source
-  /// whose lexical semantics are fully represented by its [`Slice`](Source::Slice)**. Where they
-  /// are not — a source carrying a mode, a keyword table, a dialect the slice does not show —
-  /// handing back a buffer that lexes like the prefix it stands for is the driver's obligation, and
-  /// it is the caller's the way the reflexivity of a payload's `PartialEq` is. [`RefillDriver`]
-  /// carries the argument, including why it is stated rather than hooked or bounded.
+  /// What the kit checks about a supplied buffer is that it is a content-preserving prefix, and it
+  /// checks that more than once — being asked for a buffer once stops a driver giving a second
+  /// answer and does not stop it writing through a reference it already gave. What none of those
+  /// checks establish is the gap *between* two of them, so a driver's buffers holding still for the
+  /// duration of a run is stated as a requirement; [`RefillDriver`] carries it.
+  ///
+  /// What the kit cannot check at all is that a buffer *means* what the prefix means: the
+  /// comparison is over [`Source::Slice`] values while the lexer is handed the whole
+  /// [`L::Source`](Lexer::Source), so **this tier assumes a source whose lexical semantics are
+  /// fully represented by its [`Slice`](Source::Slice)**. Where they are not — a source carrying a
+  /// mode, a keyword table, a dialect the slice does not show — handing back a buffer that lexes
+  /// like the prefix it stands for is the driver's obligation, and it is the caller's the way the
+  /// reflexivity of a payload's `PartialEq` is. [`RefillDriver`] carries the argument, including
+  /// why it is stated rather than hooked or bounded. The two **shipped** drivers do not rest on
+  /// that obligation, because their buffers are derived by the kit rather than supplied by the
+  /// caller: they apply only to a [`SemanticPrefix`] source, which is the same promise sealed
+  /// where it can be kept.
   ///
   /// # The oracle, and the comparison it is drawn with
   ///
@@ -805,6 +824,14 @@ where
   /// The last buffer of a schedule is **final**, so the holdback is inert there and everything
   /// the lexer produces is committed — the same relaxation a sealed [`Partial`] input gets.
   ///
+  /// A **terminal** item outranks all of that, exactly as it does in the layer. `InputRef::classify`
+  /// asks the crate's terminal predicate — a failing [`Lexer::check`] — before
+  /// the holdback is even consulted, and a driver that gets that answer emits, latches and **stops**.
+  /// So a leg reaching one ends its schedule where it stands, and the schedule draws no comparison:
+  /// what it holds is the prefix of a truncated document, and the oracle is the complete input.
+  /// Those schedules are counted in [`RefillCoverage::non_certifying`], and an input all of whose
+  /// schedules end that way is refused (`refill-terminal`) rather than passed.
+  ///
   /// # What it covers, and what it does not
   ///
   /// Covered, by derivation rather than by example: every cut position the source admits **and the
@@ -819,7 +846,8 @@ where
   /// in [`RefillCoverage`] rather than assumed away; a buffer that *shrinks* or whose delivered
   /// bytes change (that is not a refill; a refill appends, and a driver that returns different
   /// bytes is refused); a driver that commits an item the frontier withheld (not a driver the
-  /// contract admits); and the diagnostic channel, which no tier here compares.
+  /// contract admits); anything past a **terminal** stop, which is not a refill at all and is
+  /// counted rather than compared; and the diagnostic channel, which no tier here compares.
   ///
   /// # Panics
   ///
@@ -827,10 +855,11 @@ where
   /// expected-vs-got — on the first divergence. Returns the run's [`RefillCoverage`] on full
   /// conformance.
   ///
-  /// Two further panics are the kit refusing to draw a verdict rather than reporting one, and are
+  /// Three further panics are the kit refusing to draw a verdict rather than reporting one, and are
   /// worded as such: `refill-buffer`, when the driver hands back something that is not a
-  /// content-preserving prefix of the source, and `refill-coverage`, when the driver admits no cut
-  /// below the source length while the source offers one — a run that certified nothing.
+  /// content-preserving prefix of the source; `refill-coverage`, when the driver admits no cut
+  /// below the source length while the source offers one; and `refill-terminal`, when every
+  /// schedule of an input ended on a terminal item. All three are runs that certified nothing.
   ///
   /// # Reading the certificate is not optional
   ///
@@ -979,12 +1008,35 @@ where
 /// with a compile step in front of it: unverifiable in the same way, and additionally denying the
 /// tier to every source that has not written the impl. Neither buys a check; both buy an exclusion.
 ///
-/// What is left is a boundary a reader can see, and the shipped drivers are on the safe side of it
-/// by construction: [`OwnedChunks`] copies `src[..k]` through `ToOwned` and [`SameAllocation`]
-/// borrows it, so both derive every buffer from the source through the source's own indexing and
-/// carry whatever the slice does not. The obligation binds a **hand-written** driver over a source
-/// with slice-invisible state, and it reads: hand back the buffer your own chunking would hold, not
-/// one that merely slices the same.
+/// [`SemanticPrefix`] is neither of those, and the difference is what makes it possible: it bounds
+/// the two **shipped** drivers rather than this trait, so no source loses the tier; and it is
+/// **sealed**, so it is not a promise a caller makes about themselves. It is the crate naming the
+/// sources whose buffers the kit is entitled to derive on its own.
+///
+/// What is left is a boundary a reader can see, and it binds a **hand-written** driver over a
+/// source with slice-invisible state: hand back the buffer your own chunking would hold, not one
+/// that merely slices the same.
+///
+/// The shipped drivers do not stand on that obligation, because it is not theirs to keep. They
+/// derive their buffers by indexing the source, which is caller code, and `Index<RangeTo<usize>,
+/// Output = S>` proves nothing about meaning — a source of `{ text, keywords }` may legally index
+/// to stored prefixes under the wrong flag, and then a driver the kit ships produces a
+/// lexer-blaming red over identical validated slices. So [`SameAllocation`] and [`OwnedChunks`]
+/// require [`SemanticPrefix`], which is where that promise is written down and why it is sealed.
+///
+/// # The buffers do not change while the run does
+///
+/// The kit validates a buffer as it arrives, again once the driver has answered every cut, again
+/// before any divergence is blamed on the lexer, and again once every schedule of that input has
+/// run. What none of that establishes is the *gap between* two of those checks: the schedules lex
+/// through the driver's own `Source` impl, through the slice type's equality and destructor, and
+/// through whatever handle the driver kept, and a buffer that is rewritten and put back between
+/// two checks is a buffer the kit has no way to see.
+///
+/// So it is a requirement rather than a check, in the same posture as the obligation above: **the
+/// bytes behind a buffer you hand back do not change for the duration of the run.** A driver that
+/// owns its buffers outright — [`OwnedChunks`] — keeps it by construction. One that hands out
+/// references into storage it can still write through keeps it by not writing.
 pub trait RefillDriver<'inp, S>
 where
   S: Source<usize> + ?Sized,
@@ -995,6 +1047,91 @@ where
   /// `idx` is the input's position in the [`Harness`]'s corpus, counting from zero, which is what
   /// lets a driver keep per-input storage; `src` is that input.
   fn buffer(&self, idx: usize, src: &'inp S, k: usize) -> Option<&'inp S>;
+}
+
+/// The sources whose **prefix by indexing is the prefix**, and therefore the only sources the two
+/// shipped [`RefillDriver`]s will derive a buffer for.
+///
+/// # What the bound this replaced actually proved
+///
+/// [`SameAllocation`] used to ask a source only for `Index<RangeTo<usize>, Output = Self>`, and
+/// [`OwnedChunks`] for that plus [`ToOwned`]. Neither says anything about *meaning*. `Index` is
+/// caller code handing back a reference to caller storage, so a source of `{ text, keywords }`
+/// may perfectly legally index to stored prefixes carrying `keywords = false`. The kit's
+/// validation — a comparison over [`Slice`](Source::Slice) values — passes, because the text
+/// really is the prefix's text; the leg then lexes in a mode the source does not have, commits an
+/// identifier where the oracle has a keyword, and the divergence is reported as
+/// `refill-equivalence`, **against the lexer**. That is the mis-attribution the whole tier is
+/// built to avoid, reached from a driver the kit ships and over slices that validate as equal.
+///
+/// [`RefillDriver`] states the obligation that covers it, and an obligation is the right shape for
+/// a driver somebody writes. It is the wrong shape for a driver the kit hands out: the caller of
+/// `run_refill(SameAllocation)` never wrote the code that derives the buffer, so there is nobody
+/// for the obligation to bind. What binds instead is this trait, and the two shipped drivers
+/// require it:
+///
+/// - `src[..k]` lexes exactly as the first `k` units of `src` do — every fact the lexer reads off
+///   the *source* rather than off the slice (a mode, a keyword table, a dialect, an interner
+///   handle) is the same in both;
+/// - and where the source is also [`ToOwned`], the round trip through
+///   [`Owned`](ToOwned::Owned) and back through [`Borrow`](core::borrow::Borrow) preserves that
+///   too, which is the buffer [`OwnedChunks`] actually hands over.
+///
+/// # Why it is sealed
+///
+/// Because an `impl` of it is a promise nobody can check, and a caller-supplied promise is a
+/// caller-supplied exemption — the argument [`RefillDriver`] makes about the semantic hook this
+/// kit deliberately does not have. An unsealed marker would be that hook with a compile step in
+/// front of it. Sealed, the trait says something the kit is actually in a position to say: *tokora
+/// knows these sources, and for these it may derive the buffer itself.*
+///
+/// It costs a slice-invisible source nothing but the shortcut. The tier stays open to it —
+/// [`RefillDriver`] is public, and a driver that hands back the buffers your own chunking would
+/// hold is a handful of lines — which is exactly where [`RefillDriver`]'s obligation already said
+/// the answer lives.
+///
+/// # The two cells
+///
+/// A source of `{ text, keywords, prefixes }` whose `Index<RangeTo<usize>>` returns stored prefixes
+/// under the other mode. It is a [`Source`], it indexes to itself, and every buffer it yields
+/// validates as an equal slice — which is everything [`SameAllocation`] used to require. The
+/// shipped driver does not apply to it:
+///
+/// ```compile_fail
+#[doc = include_str!("doctest_mode_source.md")]
+/// takes_a_driver::<ModeSource, _>(SameAllocation);
+/// ```
+///
+/// and a driver of the caller's own does, over the same source, differing in that one statement:
+///
+/// ```
+#[doc = include_str!("doctest_mode_source.md")]
+/// let chunks = OwnChunks((0..4).map(|k| ModeSource::new(&"kw x"[..k], true, true)).collect());
+/// takes_a_driver::<ModeSource, _>(&chunks);
+/// ```
+pub trait SemanticPrefix:
+  Source<usize> + core::ops::Index<core::ops::RangeTo<usize>, Output = Self> + sealed::Sealed
+{
+}
+
+impl SemanticPrefix for str {}
+impl SemanticPrefix for [u8] {}
+
+#[cfg(feature = "bstr_1")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bstr_1")))]
+impl SemanticPrefix for bstr_1::BStr {}
+
+/// The seal on [`SemanticPrefix`], in a private module so that the promise cannot be made from
+/// outside this crate.
+mod sealed {
+  /// Implemented for exactly the sources whose slice carries all of their lexical semantics.
+  pub trait Sealed {}
+
+  impl Sealed for str {}
+  impl Sealed for [u8] {}
+
+  #[cfg(feature = "bstr_1")]
+  impl Sealed for bstr_1::BStr {}
 }
 
 /// The driver that hands back **prefixes of the caller's one buffer**: `&src[..k]`, at every cut
@@ -1012,12 +1149,16 @@ where
 /// Reach for it when [`L::Source`](Lexer::Source) has no owned form to copy into, or when the
 /// deployment genuinely re-uses one buffer and never relocates it. Otherwise reach for
 /// [`OwnedChunks`].
+///
+/// It applies to a [`SemanticPrefix`] source and no other, because `&src[..k]` is a buffer the
+/// *kit* derived rather than one the driver was asked for — see that trait for the red a shipped
+/// driver could otherwise produce against a conforming lexer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SameAllocation;
 
 impl<'inp, S> RefillDriver<'inp, S> for SameAllocation
 where
-  S: Source<usize> + ?Sized + core::ops::Index<core::ops::RangeTo<usize>, Output = S>,
+  S: SemanticPrefix + ?Sized,
 {
   fn buffer(&self, _idx: usize, src: &'inp S, k: usize) -> Option<&'inp S> {
     // This driver's whole claim is that it narrows nothing, so the only `None` is the position no
@@ -1037,6 +1178,10 @@ where
 ///
 /// The buffers are keyed by the input's **position in the corpus**, so build this from the same
 /// inputs, in the same order, as the [`Harness`].
+///
+/// Like [`SameAllocation`] it applies to a [`SemanticPrefix`] source and no other: the copy it
+/// keeps is `src[..k].to_owned()`, which is the kit deriving a buffer through the source's own
+/// indexing and its own `ToOwned` rather than being handed one.
 ///
 /// # Cost
 ///
@@ -1074,7 +1219,7 @@ where
 
 impl<S> OwnedChunks<S>
 where
-  S: Source<usize> + ToOwned + ?Sized + core::ops::Index<core::ops::RangeTo<usize>, Output = S>,
+  S: SemanticPrefix + ToOwned + ?Sized,
 {
   /// Copies every prefix of every input that the source admits a cut at — the widest rule there is,
   /// and the one to use unless the driver being modelled genuinely cannot end a chunk somewhere.
@@ -1130,7 +1275,7 @@ where
 
 impl<'inp, S> RefillDriver<'inp, S> for &'inp OwnedChunks<S>
 where
-  S: Source<usize> + ToOwned + ?Sized,
+  S: SemanticPrefix + ToOwned + ?Sized,
 {
   fn buffer(&self, idx: usize, _src: &'inp S, k: usize) -> Option<&'inp S> {
     // Copied out of `&self` first: `Self` is itself a `&'inp _`, and a field read through the outer
@@ -1179,6 +1324,8 @@ struct InputCoverage {
   exercised: usize,
   admissible: usize,
   relocated: Option<usize>,
+  schedules: usize,
+  terminal: usize,
 }
 
 impl RefillCoverage {
@@ -1218,6 +1365,35 @@ impl RefillCoverage {
       .per_input
       .iter()
       .try_fold(0, |acc, i| Some(acc + i.relocated?))
+  }
+
+  /// Refill schedules the run drove, over the whole corpus.
+  ///
+  /// The count is derived from the cut set — four shapes around each admitted cut, plus the one
+  /// that crosses every cut in turn — so it is a fact about the driver's chunk rule and not
+  /// something a caller chooses. It is here to be read against
+  /// [`non_certifying`](Self::non_certifying).
+  #[must_use]
+  pub fn schedules(&self) -> usize {
+    self.per_input.iter().map(|i| i.schedules).sum()
+  }
+
+  /// Of those schedules, the ones that **certified nothing**: a leg ended on a terminal item — a
+  /// lexer error the lexer's own [`Lexer::check`] rejects — so the document ended there and the
+  /// schedule drew no comparison at all.
+  ///
+  /// The input layer ranks a terminal condition ahead of the partial-input holdback: it emits the
+  /// item, latches its poison boundary, and never refills. A schedule that reaches one is
+  /// therefore not a refill this kit may certify, and the honest report is this number rather
+  /// than a comparison against an oracle that ran past the stop.
+  ///
+  /// Zero on a lexer with no resource limit, which is most of them. A run in which *every*
+  /// schedule of some input ended this way is refused outright, tagged `refill-terminal`; a
+  /// non-zero count below that is the caller's to read, and `assert_eq!(coverage.non_certifying(),
+  /// 0)` is how a caller who expects none says so.
+  #[must_use]
+  pub fn non_certifying(&self) -> usize {
+    self.per_input.iter().map(|i| i.terminal).sum()
   }
 
   /// [`exercised`](Self::exercised) for one input, by corpus position.
@@ -3517,11 +3693,30 @@ fn check_resume<'inp, L>(
 /// | `[k, k', len]` | a minimal refill of one admitted cut and then the rest: two carries from one cut, the first landing at the driver's next legal chunk end |
 /// | every admitted cut | the tail one chunk at a time, from the first admitted buffer to the whole source — the state crossing as many buffers as the driver has legal chunk ends |
 ///
-/// Every schedule ends at the source length and that leg is **final**, so each one reaches the
-/// same equality against the complete-input parse.
+/// Every schedule ends at the source length and that leg is **final**, so each one that runs to
+/// the end reaches the same equality against the complete-input parse. A schedule whose leg goes
+/// [`LegEnd::Terminal`] does not run to the end and draws no comparison — see below.
 ///
 /// The cost is one leg per cut per schedule shape, and a leg lexes at most the source: Θ(n²) raw
 /// lexing per input, the order [`check_partial`] and [`check_resume`] already cost.
+///
+/// # A terminal stop is counted, and an input made only of them is refused
+///
+/// The promise this tier makes about a terminal leg is **non-certifying**, not *compared
+/// differently*, and the two are different promises. Comparing differently would need a second
+/// oracle — the complete input lexed under the same terminal-first ranking — and the two runs stop
+/// at legitimately different items: the tally a limit trips on is per lexer, and a refilling driver
+/// builds a fresh lexer for every leg, which is the very reason the layer latches the boundary at
+/// the *input* level. Comparing two streams that stop in different places would report a count
+/// divergence against the lexer for something that is not a refill defect at all, and truncating
+/// both to the shorter would leave a comparison whose length the lexer chooses — vacuous exactly
+/// where the trip is early. So the schedule certifies nothing, and the run says so out loud.
+///
+/// Saying so is two things. Every schedule is counted, and every terminal one too, so
+/// [`RefillCoverage`] carries the ratio for a caller to read the way it reads a narrowed cut set.
+/// And an input **all** of whose schedules ended terminally certified nothing whatever about a
+/// change of buffer, which is [`resolve_buffers`]'s refusal in a different coat: it is refused
+/// rather than passed, tagged `refill-terminal`, and worded as the kit declining a verdict.
 fn check_refill<'inp, L, D>(
   idx: usize,
   src: &'inp L::Source,
@@ -3536,25 +3731,84 @@ where
   D: RefillDriver<'inp, L::Source>,
 {
   let len = src.len();
-  let (buffers, coverage) = resolve_buffers::<L, D>(idx, src, driver);
+  let (buffers, mut coverage) = resolve_buffers::<L, D>(idx, src, driver);
   // The source length closes every schedule and is not a cut anybody chose, so it is appended here
   // rather than counted in the coverage above.
   let mut cuts: Vec<usize> = (0..len).filter(|k| buffers[*k].is_some()).collect();
   cuts.push(len);
 
+  let mut schedules = 0usize;
+  let mut terminal = 0usize;
+  let mut record = |end: LegEnd| {
+    schedules += 1;
+    if end == LegEnd::Terminal {
+      terminal += 1;
+    }
+  };
+
   for (i, &k) in cuts.iter().enumerate() {
     if k < len {
-      refill_schedule::<L>(idx, src, reference, &buffers, &[k, len], budget);
+      record(refill_schedule::<L>(
+        idx,
+        src,
+        reference,
+        &buffers,
+        &[k, len],
+        budget,
+      ));
     }
-    refill_schedule::<L>(idx, src, reference, &buffers, &[k, k, len], budget);
+    record(refill_schedule::<L>(
+      idx,
+      src,
+      reference,
+      &buffers,
+      &[k, k, len],
+      budget,
+    ));
     if let Some(&next) = cuts.get(i + 1)
       && next < len
     {
-      refill_schedule::<L>(idx, src, reference, &buffers, &[k, next, len], budget);
+      record(refill_schedule::<L>(
+        idx,
+        src,
+        reference,
+        &buffers,
+        &[k, next, len],
+        budget,
+      ));
     }
   }
 
-  refill_schedule::<L>(idx, src, reference, &buffers, &cuts, budget);
+  record(refill_schedule::<L>(
+    idx, src, reference, &buffers, &cuts, budget,
+  ));
+
+  // The last validation of the table, and the one the *lexing* is behind. The settled pass closes
+  // the window the driver's own callbacks open; nothing closes the one its `Source` impl, its
+  // `Slice`'s destructor or a handle it retained keeps open while the schedules run. A buffer that
+  // is no longer the prefix means every leg over it lexed bytes the oracle never saw — and where
+  // that produced no divergence, this is the only thing standing between the run and a green
+  // earned over the wrong bytes.
+  for (k, buf) in buffers.iter().enumerate() {
+    if let Some(buf) = *buf {
+      assert_supplied_prefix::<L>(idx, src, k, buf, BufferCheck::Lexed);
+    }
+  }
+
+  assert!(
+    terminal < schedules,
+    "tokora conformance [input #{idx} refill-terminal] every one of the {schedules} refill \
+     schedules this input offers ended on a TERMINAL item — a lexer error the lexer's own \
+     `Lexer::check` rejects. The input layer ranks that ahead of the partial-input holdback: it \
+     emits the item, latches its poison boundary and never refills, so the document ends there \
+     and no state of this input's ever crosses a change of buffer. This input certified nothing, \
+     and the kit refuses rather than report a pass it did not earn — it is not a verdict on the \
+     lexer, which has not been convicted of anything. Put a source in the corpus whose prefixes \
+     do not trip, or raise the limit they trip against."
+  );
+
+  coverage.schedules = schedules;
+  coverage.terminal = terminal;
   coverage
 }
 
@@ -3574,7 +3828,7 @@ where
 /// no buffer for the kit to compare against, so a driver answering `Some` there could not be
 /// checked — and an unverifiable buffer is exactly what turns every later verdict into noise.
 ///
-/// # Why every buffer is validated twice
+/// # Why a buffer is validated more than once, and what that still does not buy
 ///
 /// **Asking once prevents a second answer; it does not freeze the first one.** A buffer checked the
 /// instant it arrives is checked while the driver still has `k+1..len` callbacks to run, and every
@@ -3584,10 +3838,34 @@ where
 /// rewritten while cut 3 was being answered is lexed in its rewritten form, and the divergence that
 /// follows is reported against the lexer.
 ///
-/// So the table is checked again once the driver will not be called again, which is the first
-/// moment at which "these bytes are a prefix of the source" is a statement about all of them at the
-/// same time. The second pass costs one slice comparison per exercised cut — Θ(n²) bytes over an
-/// input of n units, the order this tier already lexes at.
+/// So the table is checked again once the driver will not be called again. That closes the window
+/// the driver's own **callbacks** open, and it closes nothing else — which is the correction to
+/// what this paragraph used to claim. It said the second pass was the first moment at which "these
+/// bytes are a prefix of the source" was a statement about all of them at the same time, and it is
+/// not: the pass itself runs caller code at every step (`Source::as_slice`, `Source::slice`, the
+/// slice's `PartialEq`, and the destructor of the `got` value it drops *after* a successful
+/// comparison), and the schedules then lex those same references through more of it. A driver that
+/// retained a handle — a `Cell`, a shared or atomic cell, an arena — can still write through it at
+/// any of those points.
+///
+/// What the kit does about the part it cannot close is validate at the two moments where a stale
+/// buffer would otherwise cost something:
+///
+/// - **before anything is blamed on the lexer** — both the divergence [`assert_refill_eq`] reports
+///   and the non-termination refusal [`refill_leg`] raises against its budget — so a buffer that
+///   changed wins the diagnosis and the refusal is the driver's, which is the verdict the fact
+///   supports; and
+/// - **after the last schedule has run** ([`check_refill`]), so a rewrite that produced no
+///   divergence cannot leave a green earned over bytes the oracle never lexed.
+///
+/// Both are the same one comparison, and each pass costs one slice comparison per exercised cut —
+/// Θ(n²) bytes over an input of n units, the order this tier already lexes at, and the first of the
+/// two runs only on a path that is about to panic anyway.
+///
+/// The residue is a buffer that is rewritten and put back before the next check sees it, and no
+/// amount of re-checking closes that one. It is stated as a requirement on the driver instead —
+/// see [`RefillDriver`] — for the reason the semantic-prefix obligation is: the kit says what it
+/// has not established rather than checking something weaker and calling it the same thing.
 fn resolve_buffers<'inp, L, D>(
   idx: usize,
   src: &'inp L::Source,
@@ -3650,21 +3928,27 @@ where
       exercised,
       admissible,
       relocated,
+      // Filled in by `check_refill`: this function resolves the table and drives no schedule.
+      schedules: 0,
+      terminal: 0,
     },
   )
 }
 
-/// Which of a buffer's two validations is speaking, and the sentence that says what its failing
-/// means.
+/// Which of a buffer's validations is speaking, and the sentence that says what its failing means.
 ///
 /// The comparison is one comparison — a second implementation of it would be a second place for it
-/// to be wrong — so what the two passes differ in is the diagnosis, and only that.
+/// to be wrong — so what the passes differ in is the diagnosis, and only that.
 #[derive(Clone, Copy)]
 enum BufferCheck {
   /// The moment the driver handed the reference over.
   Handed,
   /// After the driver has answered every cut of this input and will not be asked again.
   Settled,
+  /// On the way to reporting a divergence against the lexer, before it is reported.
+  Diverged,
+  /// After every schedule of this input has been driven.
+  Lexed,
 }
 
 impl BufferCheck {
@@ -3680,6 +3964,46 @@ impl BufferCheck {
          `Cell`, a `RefCell`, an arena it reuses — rewrote this buffer while a later cut was \
          being answered, and every schedule is built out of all of them at once."
       }
+      Self::Diverged => {
+        " The kit was about to report this schedule against the lexer — its committed items \
+         diverged from the complete-input parse, or a leg over it would not stop. It is not the \
+         lexer's: the buffer it was handed passed both of the validations that precede a run and \
+         is not a prefix of the source any more, so the leg lexed bytes the oracle never saw. \
+         Being asked once stops a driver giving a second answer, and the settled pass freezes \
+         only what the driver's own callbacks can still write — a `Source` impl, a slice's \
+         destructor or equality, and any handle the driver retained are all reached again while \
+         the schedules lex. What went wrong is a fact about these bytes, so it is reported as one."
+      }
+      Self::Lexed => {
+        " Every schedule of this input has now run, and the buffer they lexed is not a prefix of \
+         the source any more. It passed as it arrived and passed again once the driver had \
+         answered every cut, so what rewrote it did so while the schedules were running — \
+         through the driver's own `Source` impl, through a slice's destructor or equality, or \
+         through a handle it retained. Nothing diverged, which is the reason this check exists: \
+         a pass earned over bytes the oracle never lexed is the one outcome no later comparison \
+         can take back. Hand back buffers that do not change for the duration of the run."
+      }
+    }
+  }
+}
+
+/// Re-validates every buffer one schedule lexed, on the way to a verdict that would otherwise be
+/// the lexer's.
+///
+/// The source length is every schedule's last leg and is the source itself, so there is nothing to
+/// ask about it. A repeated cut — the zero-growth schedule's `[k, k, len]` — is asked twice, which
+/// is not a redundancy over a mutable buffer: the second answer is about a later moment.
+fn revalidate_lexed_buffers<'inp, L>(
+  idx: usize,
+  src: &'inp L::Source,
+  buffers: &[Option<&'inp L::Source>],
+  schedule: &[usize],
+) where
+  L: Lexer<'inp, Offset = usize>,
+{
+  for &k in schedule {
+    if let Some(Some(buf)) = buffers.get(k).copied() {
+      assert_supplied_prefix::<L>(idx, src, k, buf, BufferCheck::Diverged);
     }
   }
 }
@@ -3690,8 +4014,8 @@ impl BufferCheck {
 /// same reason: everything downstream would be a comparison against bytes the oracle never lexed,
 /// so reporting the divergence it produces would convict the lexer of the driver's mistake.
 ///
-/// Called twice per exercised cut — see [`resolve_buffers`] for why once is not enough — with
-/// `when` carrying the only thing that differs between the two.
+/// Called at each of [`BufferCheck`]'s moments — see [`resolve_buffers`] for why one is not enough
+/// — with `when` carrying the only thing that differs between them.
 fn assert_supplied_prefix<'inp, L>(
   idx: usize,
   src: &'inp L::Source,
@@ -3723,12 +4047,39 @@ fn assert_supplied_prefix<'inp, L>(
   );
 }
 
-/// Drives one refill schedule end to end and asserts the committed items against the oracle.
+/// How a leg stopped, and therefore what the schedule it belongs to may conclude from it.
+///
+/// A schedule ends where its last leg ended, so [`refill_schedule`] hands back the same two
+/// answers: reaching the sealed final buffer is [`Refillable`](LegEnd::Refillable) — every stop
+/// along the way was one a refill follows — and a leg that goes [`Terminal`](LegEnd::Terminal)
+/// ends the schedule where it stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LegEnd {
+  /// The buffer ran out, or a frontier item was withheld. Both are stops a refill follows, so the
+  /// schedule goes on to its next buffer carrying the pair this leg handed back.
+  Refillable,
+  /// A **terminal** item: a lexer error the lexer's own [`Lexer::check`] rejects. The input layer
+  /// emits it, latches its poison boundary and never refills — the document ends there — so there
+  /// is no next buffer for a state to cross into, and no refill for this tier to certify.
+  Terminal,
+}
+
+/// Drives one refill schedule end to end and asserts the committed items against the oracle,
+/// unless a leg ends the document first.
 ///
 /// The pair starts where a driver's does — the initial state of a lexer over the **first** buffer,
 /// at offset zero — and is threaded through the legs by value. That the initial pair is spelled
 /// `with_state` + `bump(0)` rather than [`Lexer::new`] is check 2's convention, and the contract
 /// already requires the two to agree.
+///
+/// # A terminal leg is not compared, and the return value is what says so
+///
+/// The oracle is the complete-input lex of the whole source, and a terminal stop is exactly the
+/// event that keeps a refilling driver from ever reaching the end of that input: the layer emits,
+/// latches, and does not refill. So the items a schedule holds when a leg goes terminal are the
+/// prefix of a **truncated** document, and the complete-input parse is not what they are supposed
+/// to equal. The schedule stops there and returns [`LegEnd::Terminal`]; [`check_refill`] counts it
+/// as a schedule that certified nothing, and that count is what the caller is told.
 fn refill_schedule<'inp, L>(
   idx: usize,
   src: &'inp L::Source,
@@ -3736,7 +4087,8 @@ fn refill_schedule<'inp, L>(
   buffers: &[Option<&'inp L::Source>],
   schedule: &[usize],
   budget: usize,
-) where
+) -> LegEnd
+where
   L: Lexer<'inp, Offset = usize>,
   L::Token: PartialEq,
   <L::Token as Token<'inp>>::Error: PartialEq,
@@ -3747,7 +4099,6 @@ fn refill_schedule<'inp, L>(
     "tokora conformance: a refill schedule ends at the source length — its last buffer is the \
      whole source, sealed, and that is what the oracle comparison is against"
   );
-  let last = schedule.len() - 1;
   let mut carried = (
     L::new(refill_buffer::<L>(src, buffers, len, schedule[0])).into_state(),
     0usize,
@@ -3755,22 +4106,24 @@ fn refill_schedule<'inp, L>(
   let mut committed: Vec<Item<'inp, L>> = Vec::new();
 
   for (leg, &k) in schedule.iter().enumerate() {
-    let (items, next) = refill_leg::<L>(
+    let (items, next, end) = refill_leg::<L>(
       idx,
+      src,
       schedule,
       leg,
       refill_buffer::<L>(src, buffers, len, k),
-      // The driver states the end of the stream on the last chunk, and it is the last chunk that
-      // makes the holdback inert — the same seal a `Partial` input gets from `Input::seal`.
-      leg == last,
       carried,
       budget,
     );
+    if end == LegEnd::Terminal {
+      return LegEnd::Terminal;
+    }
     committed.extend(items);
     carried = next;
   }
 
-  assert_refill_eq::<L>(idx, schedule, reference, &committed);
+  assert_refill_eq::<L>(idx, src, buffers, schedule, reference, &committed);
+  LegEnd::Refillable
 }
 
 /// The buffer a leg lexes at `k`: what the [`RefillDriver`] handed over for that cut, and `src`
@@ -3800,12 +4153,30 @@ where
 }
 
 /// One buffer of a refill schedule: resume from the carried pair, commit what a partial driver
-/// may commit, and hand back the pair the next buffer resumes from.
+/// may commit, and hand back the pair the next buffer resumes from — or the fact that there is no
+/// next buffer.
+///
+/// # Terminal first, on the arm the layer asks it on
+///
+/// `InputRef::classify` ranks a freshly lexed item, and its first question on the **error** arm is
+/// the crate's terminal predicate: does [`Lexer::check`] still say `Ok`? A failing check is a limit
+/// trip, and a trip is terminal — the layer emits the item, latches its poison boundary, and no
+/// later input clears it. The scan stops and the document ends there.
+///
+/// This leg asks the same question in the same place, and the ordering is the whole of it. Applying
+/// the frontier holdback to *every* error withholds a terminal one, restores the pre-trip pair and
+/// re-lexes the tripping bytes on the grown buffer — a refill that production never performs, over
+/// a state that in production never crossed the buffer. Terminality does not merely change which
+/// items a driver commits: it stops the state from crossing at all.
+///
+/// The question is asked only where the layer asks it. A token is never terminal — the backend
+/// reports a trip as an error item on the tripping token — so the token path calls no `check`, and
+/// a lexer that never trips pays one `check` per lexer error and nothing else.
 ///
 /// # The two pairs a leg can end on
 ///
-/// - **A withheld item.** The lexer produced something whose effective read frontier reaches the
-///   non-final buffer end, so the layer would surface [`Incomplete`]
+/// - **A withheld item.** The lexer produced something *non-terminal* whose effective read frontier
+///   reaches the non-final buffer end, so the layer would surface [`Incomplete`]
 ///   and commit nothing more. The leg stops there and hands back the pair after its **last
 ///   committed** item — the incoming pair, when it committed none. Rolling back to it is what
 ///   makes the tier sound rather than strict: the withheld item's bytes are re-lexed on the
@@ -3821,18 +4192,26 @@ where
 /// post-exhaustion span is specified by the trait and checked by `check_span_after_exhaustion`,
 /// which reports a violation of it precisely. The clamp only keeps *that* defect from arriving
 /// here dressed as a refill divergence.
+///
+/// A third answer, [`LegEnd::Terminal`], is not a pair at all: it is the leg reporting that the
+/// document ended inside it, and the pair it returns beside it is never resumed from.
 fn refill_leg<'inp, L>(
   idx: usize,
+  src: &'inp L::Source,
   schedule: &[usize],
   leg: usize,
   buf: &'inp L::Source,
-  is_final: bool,
   entry: (L::State, usize),
   budget: usize,
-) -> (Vec<Item<'inp, L>>, (L::State, usize))
+) -> (Vec<Item<'inp, L>>, (L::State, usize), LegEnd)
 where
   L: Lexer<'inp, Offset = usize>,
 {
+  let k = schedule[leg];
+  // The driver states the end of the stream on the last chunk, and it is the last chunk that makes
+  // the holdback inert — the same seal a `Partial` input gets from `Input::seal`. Derived here
+  // rather than passed so that the cut and the seal are read off the same schedule.
+  let is_final = leg == schedule.len() - 1;
   let len = buf.len();
   let (entry_state, entry_at) = entry;
   // The resume the contract specifies, and the one `InputRef::resume_from` performs: a lexer
@@ -3846,6 +4225,12 @@ where
 
   loop {
     if committed.len() > budget {
+      // The same question `assert_refill_eq` asks before its verdict, asked before this one: this
+      // refusal names the lexer too, and a buffer that grew under the leg is a reason for it that
+      // is not the lexer's. `k == src.len()` is the source itself and has nothing to answer for.
+      if k < <L::Source as Source<usize>>::len(src) {
+        assert_supplied_prefix::<L>(idx, src, k, buf, BufferCheck::Diverged);
+      }
       panic!(
         "tokora conformance [input #{idx} refill-equivalence] refills {schedule:?}, leg {leg} over a buffer of {len} units: produced more than the budget of {budget} items without exhausting; the lexer may not terminate or re-lexes without progress"
       );
@@ -3853,9 +4238,18 @@ where
     let Some(item) = lexer.lex() else { break };
     let span = lexer.span();
     let end = *span.end_ref();
+    // TERMINAL FIRST — `InputRef::classify`'s ordering, on `classify`'s own arm. A failing
+    // `Lexer::check` is a limit trip, the layer emits it and latches, and no refill follows. See
+    // the header: withholding it instead re-lexes the tripping bytes on a buffer production never
+    // reaches. `is_err` gates the call the way the layer's two arms do — there is no `check` on
+    // the token path — and it is asked before the holdback, whether or not `is_final`, because a
+    // sealed buffer does not make a trip any less terminal.
+    if item.is_err() && lexer.check().is_err() {
+      return (committed, carry, LegEnd::Terminal);
+    }
     if !is_final && withheld_at_frontier::<L>(&lexer, &span, len) {
       // The driver never sees this item, so neither does the oracle comparison.
-      return (committed, carry);
+      return (committed, carry, LegEnd::Refillable);
     }
     let slice = lexer.slice();
     let state = lexer.state().clone();
@@ -3872,9 +4266,9 @@ where
   // Both reads happen before the lexer is consumed. `SyncTo::on_eof` is the site that proves why
   // that ordering is not a style: reading the span after moving the state out paired a position
   // with the wrong state.
-  let stop = (*lexer.span().end_ref()).max(carry.1).min(len);
+  let at = (*lexer.span().end_ref()).max(carry.1).min(len);
   let state = lexer.into_state();
-  (committed, (state, stop))
+  (committed, (state, at), LegEnd::Refillable)
 }
 
 /// Whether a partial driver would **withhold** this item: its effective read frontier
@@ -3891,11 +4285,16 @@ where
 /// the tier stricter than the driver, which is what the corpus of conforming in-tree fixtures is
 /// there to falsify.
 ///
-/// A **terminal** condition outranks the holdback in the layer (a limit trip fires even at the
-/// frontier). It does not have to be re-ranked here: this tier draws no verdict from
-/// [`Lexer::check`], and a trip is reported by the lexer as an error item on the tripping token,
-/// which this treats as the item it is. Ranking it differently would change which items the
-/// driver commits, not whether the state that crossed the buffer was right.
+/// A **terminal** condition outranks this holdback, and it is ranked *before* this predicate is
+/// consulted rather than inside it — in [`refill_leg`], where the layer's own ordering puts it.
+/// This answers one question, the layer's rule 1, and it answers it only for an item that already
+/// survived the terminal probe.
+///
+/// The comment that used to stand here said terminality need not be re-ranked, because ranking it
+/// would change only which items a driver commits and not whether the state that crossed the
+/// buffer was right. That was wrong in its own terms: a terminal stop means **no state crosses the
+/// buffer at all**, because the layer emits, latches and never refills. Withholding a terminal
+/// error and re-driving it on the grown buffer is a transition production does not have.
 fn withheld_at_frontier<'inp, L>(lexer: &L, span: &L::Span, len: usize) -> bool
 where
   L: Lexer<'inp, Offset = usize>,
@@ -3921,13 +4320,24 @@ where
 /// The comparison is `diverge` over `Item::compare` — the same ranked search `assert_run_eq`,
 /// `check_resume` and both partial-tier asserts read their answer from, and the same
 /// `refuse_decided` guard in front of the verdict. Nothing about equality is decided here.
+///
+/// # The buffers are re-validated between the comparison and the verdict
+///
+/// Not before it: `Item::compare` is caller code too, so a check in front of the comparison leaves
+/// the comparison itself inside the window. A divergence in hand, the cuts this schedule lexed are
+/// asked once more whether they are still prefixes of the source, and a buffer that is not takes
+/// the verdict — `refill-buffer` against the driver instead of `refill-equivalence` against the
+/// lexer. [`refill_leg`] does the same in front of its budget refusal, which names the lexer too.
+/// See [`resolve_buffers`] for the window this closes and the one it does not.
 fn assert_refill_eq<'inp, L>(
   idx: usize,
+  src: &'inp L::Source,
+  buffers: &[Option<&'inp L::Source>],
   schedule: &[usize],
   expected: &[Item<'inp, L>],
   got: &[Item<'inp, L>],
 ) where
-  L: Lexer<'inp>,
+  L: Lexer<'inp, Offset = usize>,
   L::Token: PartialEq,
   <L::Token as Token<'inp>>::Error: PartialEq,
 {
@@ -3936,6 +4346,7 @@ fn assert_refill_eq<'inp, L>(
   }) {
     None => {}
     Some(Divergence::At(i, decided)) => {
+      revalidate_lexed_buffers::<L>(idx, src, buffers, schedule);
       let at = format!("refills {schedule:?}, position {i}");
       refuse_decided(
         idx,
