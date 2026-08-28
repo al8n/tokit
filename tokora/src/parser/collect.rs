@@ -3,6 +3,28 @@ use core::marker::PhantomData;
 use crate::input::Complete;
 
 /// A parser that collects results into a container.
+///
+/// # Where the input rests, and what the reported span therefore covers
+///
+/// The span this combinator hands back — directly, as the `L::Span` of a borrowed collection, and
+/// inside the `Spanned<Container, L::Span>` of an owning one — is built with
+/// [`InputRef::span_since`](crate::InputRef::span_since), which reads
+/// [`InputRef::cursor`](crate::InputRef::cursor): the **lookahead front**, not the committed
+/// watermark.
+///
+/// A repetition construct learns that its elements have run out by *looking* at the token that
+/// ends them, and a declined peek leaves that token in the lookahead cache. So the reported end is
+/// the **start of the next token**, trailing trivia included, whenever the construct stopped that
+/// way, and the end of the last token consumed when it looked no further — at end of input, or
+/// after committing a closing delimiter, or on the failure arm. Over `1 2 3    +` the collection
+/// ends at the `3` and the reported span ends at the `+`, four bytes later.
+///
+/// This is uniform across every repetition driver: plain and separated, `while` and not,
+/// delimited and not, all rest in the same place, so a span does not change with the combinator
+/// that produced it. `tokora/tests/repetition_behavioural_matrix.rs`'s
+/// `a_construct_rests_at_the_lookahead_front` holds it over all forty-eight of them. A caller that
+/// needs an end past no trivia wants [`InputRef::span`](crate::InputRef::span)'s end instead — the
+/// committed watermark, which is the end of the last token the parse actually took.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Collect<P, Container, Ctx, Lang: ?Sized = (), Cmpl = Complete> {
   pub(crate) parser: P,
