@@ -4,7 +4,9 @@
 
 use core::convert::Infallible;
 
-use super::Harness;
+use std::{format, vec, vec::Vec};
+
+use super::{Harness, OwnedChunks, SameAllocation};
 use crate::{Lexer, SimpleSpan, Token};
 
 // ── Shared single-kind token for the hand-rolled fixtures ──────────────────────────
@@ -2325,7 +2327,7 @@ fn a_conforming_per_byte_lexer_over_100kb_outruns_a_32_bit_counter() {
 
 #[cfg(feature = "logos_0_16")]
 mod logos_adapter {
-  use super::Harness;
+  use super::{Harness, OwnedChunks};
   use crate::Token;
   use crate::lexer::LogosLexer;
 
@@ -2445,6 +2447,22 @@ mod logos_adapter {
       .lossless()
       .run();
   }
+
+  #[test]
+  fn the_logos_adapter_passes_the_refill_tier() {
+    // The adapter's `State` is the vocabulary's logos `Extras` plus the probe channel, so a
+    // carried state is a real value here rather than a `()`.
+    let syn = ["ab 12 cd", "one two three", "42", "  x  ", ""];
+    Harness::<SynLexer<'_>>::over(syn)
+      .run_refill(&OwnedChunks::over(syn))
+      .require_every_admissible_cut()
+      .require_every_cut_relocated();
+    let tile = ["ab 12 cd", "one two", "42"];
+    Harness::<TileLogosLexer<'_>>::over(tile)
+      .run_refill(&OwnedChunks::over(tile))
+      .require_every_admissible_cut()
+      .require_every_cut_relocated();
+  }
 }
 
 // ── The falsifier that predates the feature ───────────────────────────────────────────
@@ -2462,7 +2480,7 @@ mod logos_adapter {
 // committed it. Append the missing byte and the complete parse says `Float@0..3`.
 #[cfg(feature = "logos_0_16")]
 mod prefix_backtracking {
-  use super::Harness;
+  use super::{Harness, OwnedChunks};
   use crate::Token;
   use crate::lexer::LogosLexer;
 
@@ -2585,6 +2603,25 @@ mod prefix_backtracking {
   fn the_same_lie_passes_over_a_corpus_that_omits_the_longer_source() {
     Harness::<LyingLexer<'_>>::over(["1."]).run_partial();
   }
+
+  #[test]
+  fn the_backtracking_vocabulary_passes_the_refill_tier() {
+    // The conservative default withholds every item while the buffer is open, so every leg of a
+    // schedule re-enters at the pair it left and the tier's verdict rests entirely on the final,
+    // sealed buffer. That is sound and vacuous in equal measure, and worth having as a cell: an
+    // `Unbounded` claim must not be able to red.
+    let corpus = ["1.5", "5e-3", "1.", "5e", "5ex"];
+    Harness::<DefaultLexer<'_>>::over(corpus)
+      .run_refill(&OwnedChunks::over(corpus))
+      .require_every_admissible_cut()
+      .require_every_cut_relocated();
+    // And the corpus-shaped limitation is the same here as it is for `run_partial`: the same lie,
+    // on the corpus that omits the source it diverges on, is not falsified by this tier either.
+    Harness::<LyingLexer<'_>>::over(["1."])
+      .run_refill(&OwnedChunks::over(["1."]))
+      .require_every_admissible_cut()
+      .require_every_cut_relocated();
+  }
 }
 
 // ── The other half of the value channel: a recorded value that is too low ──────────────
@@ -2603,7 +2640,7 @@ mod prefix_backtracking {
 // `State::take_probe` puts on the recorder, and the two cells below are the check on it.
 #[cfg(feature = "logos_0_16")]
 mod recorded_value {
-  use super::Harness;
+  use super::{Harness, OwnedChunks};
   use crate::lexer::LogosLexer;
   use crate::{Probe, State, Token};
 
@@ -2717,6 +2754,15 @@ mod recorded_value {
     // only because the value was ACCEPTED — which makes it a check on the accept path as much
     // as on the recorder.
     Harness::<UnderReportingLexer<'_>>::over(["1.5"]).run_partial();
+  }
+
+  #[test]
+  fn an_honest_recorded_value_passes_the_refill_tier() {
+    let corpus = ["1.5", "1.", "12 34", "1.5 2.5"];
+    Harness::<HonestLexer<'_>>::over(corpus)
+      .run_refill(&OwnedChunks::over(corpus))
+      .require_every_admissible_cut()
+      .require_every_cut_relocated();
   }
 
   #[test]
@@ -3135,6 +3181,7 @@ impl<'a, const MODE: u8> Lexer<'a> for FloatLexer<'a, MODE> {
 }
 
 type NanPayloadLexer<'a> = FloatLexer<'a, OWN_BYTE>;
+#[cfg(feature = "std")]
 type DriftingFloatLexer<'a> = FloatLexer<'a, LAST_BYTE>;
 
 #[test]
@@ -3187,6 +3234,7 @@ fn a_nan_payload_is_diagnosed_at_the_prefix_comparison() {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_reflexive_payload_of_the_same_type_still_fails_the_ordinary_way() {
   // THE CONTROL, and the whole point of it: same payload type, same lexer shape, same source
   // length, genuinely non-conforming — its payload is read off the end of the buffer — and never
@@ -3598,6 +3646,7 @@ fn an_error_payload_that_moves_between_two_integration_schedules_is_falsified() 
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_span_divergence_at_this_tier_is_still_reported_the_way_it_always_was() {
   // The control for the extension, and the reason this is not a rewrite: the tier compares MORE
   // than it did, and it must say exactly what it always said about a divergence the span decided.
@@ -3762,6 +3811,7 @@ impl<'a> Lexer<'a> for NanErrFlipLexer<'a> {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_discriminant_divergence_is_reported_even_when_a_payload_will_not_compare() {
   // THE COUNTEREXAMPLE. `"abz"` at split k=2: the complete parse has `NTok@0..1` and the prefix
   // `"ab"` yields `LexerError(0..1, FErr(NaN))`. The two sides are not the same ARM, so the
@@ -3793,6 +3843,7 @@ fn a_discriminant_divergence_is_reported_even_when_a_payload_will_not_compare() 
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_divergence_the_span_decided_is_reported_beside_a_payload_that_will_not_compare() {
   // The counterexample's second shape, and the one that says the rule is about the OPERATION
   // rather than about the discriminant alone: both sides are tokens, the payloads are `NaN` on
@@ -3978,6 +4029,7 @@ fn purity_harness<'a>() -> crate::conformance::cache::CacheHarness<
 }
 
 /// The message a panic carried, or a failure saying the kit did not panic at all.
+#[cfg(feature = "std")]
 fn panic_message(f: impl FnOnce() + std::panic::UnwindSafe) -> String {
   let panicked = std::panic::catch_unwind(f).expect_err("the purity law must fail here");
   panicked
@@ -3987,6 +4039,7 @@ fn panic_message(f: impl FnOnce() + std::panic::UnwindSafe) -> String {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_prefilled_impurity_the_prefix_decided_is_not_withheld_over_a_nan_the_appended_run_holds() {
   // THE COUNTEREXAMPLE. The prefix already proves `peek` impure and its divergence is settled by
   // the SPAN, which is reflexive — so that half's probe says nothing. The appended pair is not
@@ -4020,6 +4073,7 @@ fn a_prefilled_impurity_the_prefix_decided_is_not_withheld_over_a_nan_the_append
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_nan_in_the_appended_pair_that_actually_decided_is_still_refused() {
   // CONTROL 1, the appended half: the same fabricated `NaN`, with the prefix now reproduced
   // exactly. Nothing else decided, so the token payload is what the verdict rests on and the
@@ -4045,6 +4099,7 @@ fn a_nan_in_the_appended_pair_that_actually_decided_is_still_refused() {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_nan_in_the_prefix_pair_that_actually_decided_is_still_refused() {
   // CONTROL 1, the prefix half — the same rule on the other side of the decision, which is what
   // pins the two halves to their own labels. The spans agree here, so the token payload is what
@@ -4070,6 +4125,7 @@ fn a_nan_in_the_prefix_pair_that_actually_decided_is_still_refused() {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_prefix_impurity_with_reflexive_payloads_throughout_still_reds_the_ordinary_way() {
   // CONTROL 2: nothing here is non-reflexive, and the cache is genuinely impure on the prefix.
   // The ordinary `pure-peek` failure is the whole point of the law and must survive the repair.
@@ -4096,6 +4152,7 @@ fn a_prefix_impurity_with_reflexive_payloads_throughout_still_reds_the_ordinary_
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn an_appended_decided_impurity_is_reported_as_appended_and_not_as_the_prefix() {
   // CONTROL 3, and it pulls against the other two: a repair that always blamed the prefix would
   // pass the counterexample and control 2 while replacing one misattribution with another. The
@@ -4238,6 +4295,7 @@ fn float_item(
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn an_extra_item_outranks_a_non_reflexive_payload_at_position_zero() {
   // THE FINDING. `[Tok(NaN)]` against `[Tok(NaN), Tok(0.0)]`: identical kind, span and slice at
   // position 0, so only the payload can decide there — and it cannot decide anything, because
@@ -4281,6 +4339,7 @@ fn a_non_reflexive_payload_with_nothing_conclusive_anywhere_is_still_refused() {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn an_ordinary_divergence_over_reflexive_payloads_keeps_its_component_and_its_wording() {
   // CONTROL 2. The ordinary case is a caller `PartialEq` over two values that are BOTH self-equal
   // — the whole population of honest failures — and ranking must not demote it to a fallback. It
@@ -4309,6 +4368,7 @@ fn an_ordinary_divergence_over_reflexive_payloads_keeps_its_component_and_its_wo
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_conclusive_difference_later_in_the_stream_is_found_and_not_only_one_at_the_same_position() {
   // CONTROL 3, and it pulls a third way: a repair that only looked at the REST OF THE SAME ITEM
   // would pass the finding and control 1 and still stop at the first position that differs. The
@@ -4412,17 +4472,21 @@ fn a_purity_run_length_outranks_a_non_reflexive_entry_at_a_shared_position() {
 /// This is the brief's own falsifier and it is a legal, compiling implementation of the
 /// [`Slice`](crate::Slice) bound: nothing in the trait system, and nothing in this kit before
 /// now, asks whether the promise `Eq` makes is kept.
+#[cfg(feature = "std")]
 #[derive(Clone, Copy, Debug)]
 struct LyingSlice<'a>(&'a str);
 
+#[cfg(feature = "std")]
 impl PartialEq for LyingSlice<'_> {
   fn eq(&self, _: &Self) -> bool {
     false
   }
 }
 
+#[cfg(feature = "std")]
 impl Eq for LyingSlice<'_> {}
 
+#[cfg(feature = "std")]
 impl<'source> crate::Slice<'source> for LyingSlice<'source> {
   type Char = char;
   type Iter<'a>
@@ -4453,9 +4517,11 @@ impl<'source> crate::Slice<'source> for LyingSlice<'source> {
 
 /// A `str`-backed source whose slices are [`LyingSlice`]s. Everything else about it is `str`'s
 /// own behaviour.
+#[cfg(feature = "std")]
 #[derive(Debug)]
 struct LyingSliceSource(&'static str);
 
+#[cfg(feature = "std")]
 impl crate::Source<usize> for LyingSliceSource {
   type Slice<'source>
     = LyingSlice<'source>
@@ -4490,6 +4556,7 @@ impl crate::Source<usize> for LyingSliceSource {
 
 /// A per-character lexer over [`LyingSliceSource`], conforming in everything the contract names.
 /// The only thing wrong anywhere near it is the caller's own slice equality.
+#[cfg(feature = "std")]
 struct LyingSliceLexer<'a> {
   src: &'a LyingSliceSource,
   start: usize,
@@ -4497,6 +4564,7 @@ struct LyingSliceLexer<'a> {
   state: (),
 }
 
+#[cfg(feature = "std")]
 impl<'a> Lexer<'a> for LyingSliceLexer<'a> {
   type State = ();
   type Source = LyingSliceSource;
@@ -4556,6 +4624,7 @@ impl<'a> Lexer<'a> for LyingSliceLexer<'a> {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_slice_that_will_not_equal_itself_is_refused_and_not_blamed_on_the_lexer() {
   // THE FALSIFIER round 4's exemption had to survive, and it does not. Before this the kit said
   // "[input #0 span/slice-coherence] position 0: slice() disagrees with the source at span 0..1:
@@ -4573,6 +4642,7 @@ fn a_slice_that_will_not_equal_itself_is_refused_and_not_blamed_on_the_lexer() {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn an_honest_slice_that_genuinely_disagrees_still_reds_span_slice_coherence() {
   // The control, and the one that keeps the guard from trading a false red for a false green: a
   // lexer whose `slice()` really does disagree with its own span, over a slice type that equals
@@ -4774,6 +4844,7 @@ fn lying_offset_items(src: &LyingOffsetSource) -> Vec<super::Item<'_, LyingOffse
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_read_frontier_that_will_not_equal_itself_is_refused_and_not_blamed_on_the_lexer() {
   // Before: "[input #0 read-frontier] position 0: read_frontier() changed between calls: first
   // read ReadTo(LyingOffset(1)), probe #0 read ReadTo(LyingOffset(1))" — a purity accusation over
@@ -4791,6 +4862,7 @@ fn a_read_frontier_that_will_not_equal_itself_is_refused_and_not_blamed_on_the_l
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_span_that_will_not_equal_itself_is_refused_after_exhaustion_too() {
   // Before: "[input #0 span-survives-exhaustion] span() changed after exhaustion: first read
   // 2..2, probe #0 read 2..2". The clause this enforces is read by a refill driver, so the red it
@@ -4808,6 +4880,7 @@ fn a_span_that_will_not_equal_itself_is_refused_after_exhaustion_too() {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn an_offset_that_will_not_equal_itself_is_refused_by_the_tiling_law() {
   // Before: "[input #0 lossless] position 0: first span 0..1 does not start at 0" — a tiling
   // accusation over an offset that IS zero. Gap-free tiling is four `Offset` equalities and every
@@ -4839,6 +4912,7 @@ fn an_honest_lexer_over_the_same_lying_offset_type_is_not_what_any_of_this_rejec
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn the_cache_kits_span_valued_laws_are_shadowed_by_its_entry_comparison_today() {
   // **This cell is NOT differential for the residue, and says so on purpose.** The cache kit's
   // eleven span-valued comparisons are guarded now, and with a wholly-lying `L::Span` not one of
@@ -4960,6 +5034,7 @@ impl<'a> Lexer<'a> for MixedArmLexer<'a> {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_raised_error_divergence_is_not_withheld_over_a_nan_the_committed_arm_holds() {
   // The integration tier's two arms are one verdict, and they were two `assert` calls in a fixed
   // order — so a committed-token divergence a `NaN` decided withheld a raised-error divergence a
@@ -5016,6 +5091,7 @@ fn a_committed_arm_nan_with_a_reproduced_error_arm_is_still_refused() {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_prefilled_impurity_the_appended_run_decided_is_not_withheld_over_a_nan_in_the_prefix() {
   // THE COUNTEREXAMPLE'S MIRROR, and the third level the same finding lives at. The existing cell
   // above runs the other way — a conclusive prefix and a `NaN` in the appended run — and passed
@@ -5048,6 +5124,7 @@ fn a_prefilled_impurity_the_appended_run_decided_is_not_withheld_over_a_nan_in_t
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn one_side_that_will_not_equal_itself_is_enough_to_make_a_difference_inconclusive() {
   // Pins the AND in `Decided::is_conclusive`. Reflexivity is asked of both sides and either one
   // failing makes the comparison unusable: `NaN != 2.0` is `false` for two reasons at once and
@@ -5073,6 +5150,7 @@ fn one_side_that_will_not_equal_itself_is_enough_to_make_a_difference_inconclusi
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_later_component_of_the_same_item_outranks_an_earlier_one_the_kit_cannot_use() {
   // The ranking inside ONE item, which the stream cells cannot reach: `LyingKind` is consulted
   // first and decides nothing — it answers `false` to every comparison, its own included — while
@@ -5107,4 +5185,1638 @@ fn a_later_component_of_the_same_item_outranks_an_earlier_one_the_kit_cannot_use
     !msg.contains("non-reflexive-payload"),
     "a sound span outranks a `Kind` the kit cannot use, got: {msg}"
   );
+}
+
+// ── The refill tier: state across a change of buffer ────────────────────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum RKind {
+  Ident,
+  Number,
+}
+
+impl core::fmt::Display for RKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    match self {
+      Self::Ident => f.write_str("ident"),
+      Self::Number => f.write_str("number"),
+    }
+  }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum RTok {
+  Ident,
+  Number,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum RErr {
+  MalformedNumber,
+  Unexpected,
+}
+
+impl Token<'_> for RTok {
+  type Kind = RKind;
+  type Error = RErr;
+
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::WithinSpan;
+
+  fn kind(&self) -> RKind {
+    match self {
+      Self::Ident => RKind::Ident,
+      Self::Number => RKind::Number,
+    }
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// The scanner state of [`CommentLexer`]: the two things a `#` comment can leave behind at end of
+/// input, one of which is the fact that matters.
+#[derive(Clone, Debug, Default)]
+struct RefillScan {
+  /// **The fact.** The scanner is inside a `#` comment, so the bytes that arrive next are comment
+  /// text until a newline — not code.
+  in_comment: bool,
+  /// **The offset.** Where the reader was left. A scan that starts with one carries it instead of
+  /// re-syncing to the token start, which is what a lexer with a separate read cursor does.
+  reader: Option<usize>,
+}
+
+impl crate::state::State for RefillScan {
+  type Error = Infallible;
+
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+}
+
+/// The pql shape, as a minimal pair. Identifiers, `0b…` numbers whose two-byte prefix is read
+/// **through the reader**, and `#` comments that run to a newline or to end of input.
+///
+/// `DEFECT` picks what the comment leaves in the state when it reaches end of input:
+///
+/// - `false` — the fact: `in_comment`, so the next buffer continues the comment.
+/// - `true` — the pql defect: advance to `bytes.len()` and retain **only the lookahead offset**,
+///   losing that the scanner was still inside the comment.
+///
+/// Both modes are byte-for-byte identical on a complete source and on every fresh prefix, which
+/// is why `run` and `run_partial` are green over the defective one: neither ever puts a state
+/// across a change of buffer.
+struct CommentLexer<'a, const DEFECT: bool> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: RefillScan,
+}
+
+impl<'a, const DEFECT: bool> Lexer<'a> for CommentLexer<'a, DEFECT> {
+  type State = RefillScan;
+  type Source = str;
+  type Token = RTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: RefillScan::default(),
+    }
+  }
+  fn with_state(src: &'a str, state: RefillScan) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), RErr> {
+    Ok(())
+  }
+  fn state(&self) -> &RefillScan {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut RefillScan {
+    &mut self.state
+  }
+  fn into_state(self) -> RefillScan {
+    self.state
+  }
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<RTok, RErr>> {
+    let b = self.src.as_bytes();
+    let len = b.len();
+    self.start = self.end;
+
+    // Comment text carried in from an earlier buffer: consume it to the newline that ends it.
+    if self.state.in_comment {
+      while self.start < len && b[self.start] != b'\n' {
+        self.start += 1;
+      }
+      if self.start >= len {
+        // Still inside it at end of input, so the fact stays where it was found.
+        self.end = self.start;
+        return None;
+      }
+      self.state.in_comment = false;
+    }
+
+    loop {
+      while self.start < len && (b[self.start] == b' ' || b[self.start] == b'\n') {
+        self.start += 1;
+      }
+      if self.start < len && b[self.start] == b'#' {
+        let mut i = self.start + 1;
+        while i < len && b[i] != b'\n' {
+          i += 1;
+        }
+        if i >= len {
+          // End of input inside a comment: the fork the whole fixture exists for.
+          self.start = i;
+          self.end = i;
+          if DEFECT {
+            self.state.reader = Some(i);
+          } else {
+            self.state.in_comment = true;
+          }
+          return None;
+        }
+        self.start = i;
+        continue;
+      }
+      break;
+    }
+    if self.start >= len {
+      self.end = self.start;
+      return None;
+    }
+
+    // The reader: the token start, unless the state carries one — which the scanner trusts as
+    // "where my reader already is".
+    let reader = self.state.reader.take().unwrap_or(self.start);
+
+    if b[self.start] == b'0' {
+      // The `0b` prefix is read AT THE READER, so a stale one reads the wrong two bytes.
+      if self.src.get(reader..(reader + 2).min(len)) != Some("0b") {
+        self.end = self.start + 1;
+        return Some(Err(RErr::MalformedNumber));
+      }
+      let mut e = self.start + 2;
+      while e < len && (b[e] == b'0' || b[e] == b'1') {
+        e += 1;
+      }
+      self.end = e;
+      return Some(Ok(RTok::Number));
+    }
+    if b[self.start].is_ascii_lowercase() {
+      let mut e = self.start;
+      while e < len && b[e].is_ascii_lowercase() {
+        e += 1;
+      }
+      self.end = e;
+      return Some(Ok(RTok::Ident));
+    }
+    self.end = self.start + 1;
+    Some(Err(RErr::Unexpected))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    // Honest: the ident arm stops at its terminator, the number arm's probe is answered at or
+    // before its own span end, and the comment scan decides no item at all.
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+type KeepsTheFact<'a> = CommentLexer<'a, false>;
+type LosesTheFact<'a> = CommentLexer<'a, true>;
+
+/// The two pql witnesses, and every source around them.
+const REFILL_CORPUS: [&str; 7] = ["x #c\n0b1", "x #cd", "x #c", "#", "a 0b10 b", "", "0b"];
+/// The buffer table one schedule cell drives over: exactly what the tier resolves for itself,
+/// asked for here because these cells drive a single schedule rather than the entry point.
+fn refill_table<'a, L>(src: &'a str, chunks: &'a OwnedChunks<str>) -> Vec<Option<&'a str>>
+where
+  L: Lexer<'a, Offset = usize, Source = str>,
+{
+  super::resolve_buffers::<L, &'a OwnedChunks<str>>(0, src, &chunks).0
+}
+
+#[test]
+fn the_comment_lexer_that_keeps_the_fact_passes_every_tier() {
+  Harness::<KeepsTheFact<'_>>::over(REFILL_CORPUS).run();
+  Harness::<KeepsTheFact<'_>>::over(REFILL_CORPUS).run_partial();
+  Harness::<KeepsTheFact<'_>>::over(REFILL_CORPUS)
+    .run_refill(&OwnedChunks::over(REFILL_CORPUS))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
+}
+
+#[test]
+fn the_two_existing_tiers_are_green_over_the_defect() {
+  // THE GAP, executable. This lexer loses the in-comment fact at end of input, and both tiers
+  // that exist certify it: `run` resumes over the same source, and `run_partial` builds a FRESH
+  // lexer for every prefix, so no `L::State` ever crosses a cut in either one.
+  Harness::<LosesTheFact<'_>>::over(REFILL_CORPUS).run();
+  Harness::<LosesTheFact<'_>>::over(REFILL_CORPUS).run_partial();
+}
+
+#[test]
+#[should_panic(expected = "[input #0 refill-equivalence] refills [4, 8], position 1")]
+fn witness_one_a_guarded_arm_that_fails_on_a_stale_reader() {
+  // pql witness 1: lex `x #c`, carry its state into `x #c\n0b1`, resume. The newline is skipped
+  // with the reader still on it, the guarded `0b` arm reads `"\n0"`, and the result is
+  // `Err(MalformedNumber)` where lexing the whole source yields `Number`.
+  let src = "x #c\n0b1";
+  let budget = 8 * src.len() + 64;
+  let reference = super::lex_run::<LosesTheFact<'_>>(0, src, budget);
+  let chunks = OwnedChunks::over([src]);
+  let buffers = refill_table::<LosesTheFact<'_>>(src, &chunks);
+  super::refill_schedule::<LosesTheFact<'_>>(0, src, &reference, &buffers, &[4, src.len()], budget);
+}
+
+#[test]
+#[should_panic(expected = "[input #0 refill-equivalence] refills [4, 5]: refilling committed 2")]
+fn witness_two_an_ident_lexed_out_of_comment_text() {
+  // pql witness 2: lex `x #c`, carry into `x #cd`, resume. The resume emits `Ident` from bytes
+  // the complete-input parse reads as comment text, so the concatenation has an item the oracle
+  // does not.
+  let src = "x #cd";
+  let budget = 8 * src.len() + 64;
+  let reference = super::lex_run::<LosesTheFact<'_>>(0, src, budget);
+  let chunks = OwnedChunks::over([src]);
+  let buffers = refill_table::<LosesTheFact<'_>>(src, &chunks);
+  super::refill_schedule::<LosesTheFact<'_>>(0, src, &reference, &buffers, &[4, src.len()], budget);
+}
+
+#[test]
+#[should_panic(expected = "refill-equivalence")]
+fn the_refill_tier_reds_the_defect_from_its_own_entry_point() {
+  // The cells above drive one schedule each so the witness is exactly the pql probe. The entry
+  // point derives its cuts, so it reaches the same defect without being told where it is.
+  let _ =
+    Harness::<LosesTheFact<'_>>::over(REFILL_CORPUS).run_refill(&OwnedChunks::over(REFILL_CORPUS));
+}
+
+#[test]
+fn a_refill_that_adds_nothing_is_not_a_verdict() {
+  // The zero-growth cell on its own: a driver handed an empty chunk re-drives a buffer that grew
+  // by nothing, and the pair it carried has to survive being spent on it.
+  let src = "x #c\n0b1";
+  let budget = 8 * src.len() + 64;
+  let reference = super::lex_run::<KeepsTheFact<'_>>(0, src, budget);
+  let chunks = OwnedChunks::over([src]);
+  let buffers = refill_table::<KeepsTheFact<'_>>(src, &chunks);
+  super::refill_schedule::<KeepsTheFact<'_>>(
+    0,
+    src,
+    &reference,
+    &buffers,
+    &[4, 4, 4, src.len()],
+    budget,
+  );
+}
+
+#[test]
+fn every_conforming_hand_rolled_fixture_passes_the_refill_tier() {
+  // The other half of the acceptance: the tier must not be stricter than the contract. Every
+  // hand-rolled fixture this file certifies elsewhere is driven through it over the same corpus,
+  // and over REAL buffers — the same corpus under `SameAllocation` was what round 1 shipped.
+  let tile = ["hello world", "a", "", "x y  z", "café"];
+  Harness::<TileLexer<'_>>::over(tile)
+    .run_refill(&OwnedChunks::over(tile))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
+  let syntactic = ["ab cd ef", "one  two", "solo", ""];
+  Harness::<SyntacticLexer<'_>>::over(syntactic)
+    .run_refill(&OwnedChunks::over(syntactic))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
+  let faithful = ["a?b", "??", "?", "", "ab?cd"];
+  Harness::<FaithfulErrLexer<'_>>::over(faithful)
+    .run_refill(&OwnedChunks::over(faithful))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
+  let own_byte = ["abz", "a", "", "café"];
+  Harness::<OwnBytePayloadLexer<'_>>::over(own_byte)
+    .run_refill(&OwnedChunks::over(own_byte))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
+  let ticking = ["a?b", "??", "?", ""];
+  Harness::<TickingErrLexer<'_>>::over(ticking)
+    .run_refill(&OwnedChunks::over(ticking))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
+  Harness::<RepeatErrLexer<'_, 72>>::new("a")
+    .run_refill(&OwnedChunks::over(["a"]))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
+  Harness::<RepeatErrLexer<'_, 100>>::new("abcdefgh")
+    .run_refill(&OwnedChunks::over(["abcdefgh"]))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
+  let nan = ["ab", "a", ""];
+  Harness::<NanPayloadLexer<'_>>::over(nan)
+    .run_refill(&OwnedChunks::over(nan))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
+}
+
+// ── A terminal trip ends the document, and production never refills past one ─────────
+
+/// The state of [`TerminalWordLexer`]: whether the limit has been tripped.
+///
+/// It is carried in the `State` rather than kept as a lexer field for the reason a real limiter's
+/// is: the input layer builds a fresh lexer per operation, so a latch that lives only in the
+/// instance is lost on the next one. What survives is what the state carries.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct TripLatch {
+  tripped: bool,
+}
+
+impl crate::state::State for TripLatch {
+  type Error = Infallible;
+
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+}
+
+/// A whitespace-separated word lexer with a resource limit that **a truncated buffer trips**: a
+/// word running to the end of the buffer costs more than the limit allows, so it latches and
+/// returns an error rather than a token.
+///
+/// `TERMINAL` picks whether that latch is reported the way the crate specifies a limit trip —
+/// through a failing [`Lexer::check`](crate::Lexer::check), which is the crate's terminal
+/// predicate — or as an ordinary lexer error. It is the only difference between the two
+/// instantiations, and it is the whole differential: the input layer ranks a failing `check`
+/// **ahead** of the partial-input frontier holdback, emits the item, latches its poison boundary
+/// and never refills, while a plain error at the frontier is withheld and re-driven on the buffer
+/// that grew.
+struct TerminalWordLexer<'a, const TERMINAL: bool> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: TripLatch,
+}
+
+impl<'a, const TERMINAL: bool> Lexer<'a> for TerminalWordLexer<'a, TERMINAL> {
+  type State = TripLatch;
+  type Source = str;
+  type Token = RTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: TripLatch::default(),
+    }
+  }
+  fn with_state(src: &'a str, state: TripLatch) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), RErr> {
+    if TERMINAL && self.state.tripped {
+      return Err(RErr::Unexpected);
+    }
+    Ok(())
+  }
+  fn state(&self) -> &TripLatch {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut TripLatch {
+    &mut self.state
+  }
+  fn into_state(self) -> TripLatch {
+    self.state
+  }
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<RTok, RErr>> {
+    let b = self.src.as_bytes();
+    let len = b.len();
+    self.start = self.end;
+    while self.start < len && b[self.start] == b' ' {
+      self.start += 1;
+    }
+    if self.start >= len {
+      self.end = self.start;
+      return None;
+    }
+    let mut e = self.start;
+    while e < len && b[e] != b' ' {
+      e += 1;
+    }
+    self.end = e;
+    if e == len {
+      // The trip. A word that runs to the end of the buffer is over the limit, and the latch is
+      // sticky: the backend reports a trip as an error on the tripping token, which is the arm
+      // `InputRef::classify` asks `Lexer::check` on.
+      self.state.tripped = true;
+      return Some(Err(RErr::Unexpected));
+    }
+    Some(Ok(RTok::Ident))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+/// The trip reported the way the crate specifies one: a failing `check`, which is terminal.
+type TerminalTrip<'a> = TerminalWordLexer<'a, true>;
+/// The identical lexer, the identical error, and a `check` that stays `Ok` — so the item is an
+/// ordinary frontier error and the holdback applies to it.
+type RecoverableTrip<'a> = TerminalWordLexer<'a, false>;
+
+#[test]
+fn a_terminal_error_ends_the_schedule_where_a_plain_one_is_withheld_and_re_driven() {
+  // The [high] of round 4, as the minimal pair it is. Over `"ab"` at cut 1 the leg lexes `"a"`,
+  // the word reaches the buffer end, and the lexer latches and errors at `0..1`.
+  //
+  // With the latch reported through `check`, production terminates there: `classify` ranks the
+  // terminal probe ahead of the frontier holdback, the layer emits `Err@0..1`, latches its poison
+  // boundary, and no refill follows. The schedule is over, and there is nothing for this tier to
+  // compare — the complete-input oracle ran past a stop the driver never gets past.
+  //
+  // With the identical error and an `Ok` check, the item is a frontier item: it is withheld, the
+  // leg hands back the pair it entered with, and the tail is re-lexed on the grown buffer. That is
+  // the transition the tier exists to certify, and it still runs — `refill_schedule` returns
+  // without panicking, which is it matching `[Err@0..2]`.
+  let src = "ab";
+  let budget = 8 * src.len() + 64;
+  let chunks = OwnedChunks::over([src]);
+
+  let reference = super::lex_run::<TerminalTrip<'_>>(0, src, budget);
+  let buffers = refill_table::<TerminalTrip<'_>>(src, &chunks);
+  assert_eq!(
+    super::refill_schedule::<TerminalTrip<'_>>(0, src, &reference, &buffers, &[1, 2], budget),
+    super::LegEnd::Terminal,
+    "a leg whose error fails `check` ends the document, so the schedule certifies nothing"
+  );
+
+  let reference = super::lex_run::<RecoverableTrip<'_>>(0, src, budget);
+  let buffers = refill_table::<RecoverableTrip<'_>>(src, &chunks);
+  assert_eq!(
+    super::refill_schedule::<RecoverableTrip<'_>>(0, src, &reference, &buffers, &[1, 2], budget),
+    super::LegEnd::Refillable,
+    "the same error with an Ok check is withheld and re-driven, exactly as before"
+  );
+}
+
+#[test]
+fn the_control_passes_every_tier_it_is_read_against() {
+  // Neither instantiation may be convicted of anything by the tiers that do not model a refill:
+  // both lex identically, and `run` never asks `check` at all. This is what makes the cell above a
+  // statement about the ranking rather than about a broken fixture.
+  Harness::<TerminalTrip<'_>>::over(["ab", "ab cd "]).run();
+  Harness::<RecoverableTrip<'_>>::over(["ab", "ab cd "]).run();
+  Harness::<RecoverableTrip<'_>>::over(["ab", "ab cd "])
+    .run_refill(&OwnedChunks::over(["ab", "ab cd "]))
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
+}
+
+#[test]
+#[should_panic(expected = "[input #0 refill-terminal] every one of the 7 refill schedules")]
+fn an_input_whose_every_schedule_ends_terminally_is_refused_not_passed() {
+  // `"ab"` is a source whose every buffer trips: the sealed one included, so every schedule ends
+  // on a terminal item and not one of them drives a refill. Round 3 passed this input by
+  // withholding the trip and re-driving it — a green earned from a transition production does not
+  // have. The kit refuses it instead, in `refill-coverage`'s posture and for its reason: this
+  // input certified nothing.
+  let _ = Harness::<TerminalTrip<'_>>::over(["ab"]).run_refill(&OwnedChunks::over(["ab"]));
+}
+
+#[test]
+fn a_terminal_stop_on_some_schedules_is_a_number_and_not_a_refusal() {
+  // The other side of the refusal, and the population the certificate's new number is over.
+  // `"ab cd "` ends in a space, so no word reaches the end of the *sealed* buffer and the
+  // complete-input parse never trips. A cut inside or at the end of a word does trip, so those
+  // schedules end terminally and certify nothing, while the ones cutting on the space certify the
+  // refill they drove. Both facts are true of the same run, so the kit reports the ratio rather
+  // than refusing.
+  let corpus = ["ab cd "];
+  let coverage = Harness::<TerminalTrip<'_>>::over(corpus).run_refill(&OwnedChunks::over(corpus));
+  coverage
+    .require_every_admissible_cut()
+    .require_every_cut_relocated();
+  assert_eq!(coverage.schedules(), 19);
+  assert_eq!(coverage.non_certifying(), 14);
+  // And the same corpus over the lexer that never trips: every schedule drew its comparison.
+  let all = Harness::<RecoverableTrip<'_>>::over(corpus).run_refill(&OwnedChunks::over(corpus));
+  assert_eq!(all.schedules(), 19);
+  assert_eq!(all.non_certifying(), 0);
+}
+
+// ── A leg has to change buffer, not just length ─────────────────────────────────────
+
+/// The state of [`PointerStateLexer`]: where the buffer it was born over lives.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct BaseAddr {
+  base: Option<usize>,
+}
+
+impl crate::state::State for BaseAddr {
+  type Error = Infallible;
+
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+}
+
+/// A lexer whose `State` carries something derived from **where** the bytes are, and which reports
+/// a carried state arriving over a different allocation as an error.
+///
+/// It is not exotic: an interner keyed by address, a cached slice, or a raw pointer held for a
+/// fast path all have this shape, and every one of them is a real defect under a driver whose
+/// `String` reallocated on growth. It is the defect the tier's own subject sentence names, and
+/// round 1 certified it — see the cell below.
+struct PointerStateLexer<'a> {
+  src: &'a str,
+  start: usize,
+  end: usize,
+  state: BaseAddr,
+  moved: bool,
+}
+
+impl<'a> Lexer<'a> for PointerStateLexer<'a> {
+  type State = BaseAddr;
+  type Source = str;
+  type Token = RTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a str) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: BaseAddr {
+        base: Some(src.as_ptr() as usize),
+      },
+      moved: false,
+    }
+  }
+  fn with_state(src: &'a str, state: BaseAddr) -> Self {
+    let here = src.as_ptr() as usize;
+    let moved = matches!(state.base, Some(b) if b != here);
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: BaseAddr { base: Some(here) },
+      moved,
+    }
+  }
+  fn check(&self) -> Result<(), RErr> {
+    Ok(())
+  }
+  fn state(&self) -> &BaseAddr {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut BaseAddr {
+    &mut self.state
+  }
+  fn into_state(self) -> BaseAddr {
+    self.state
+  }
+  fn source(&self) -> &'a str {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<RTok, RErr>> {
+    let b = self.src.as_bytes();
+    let len = b.len();
+    self.start = self.end;
+    while self.start < len && b[self.start] == b' ' {
+      self.start += 1;
+    }
+    if self.start >= len {
+      self.end = self.start;
+      return None;
+    }
+    let mut e = self.start;
+    while e < len && b[e] != b' ' {
+      e += 1;
+    }
+    self.end = e;
+    if self.moved {
+      return Some(Err(RErr::Unexpected));
+    }
+    Some(Ok(RTok::Ident))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+const POINTER_CORPUS: [&str; 2] = ["ab cd", "one two"];
+
+#[test]
+fn same_allocation_certifies_a_lexer_that_keys_on_the_buffer_address() {
+  // The reduction, executable. Every leg is `&src[..k]`, so every leg shares one base address and the
+  // buffer never changes — only its length does. This lexer survives all of it, and fails on the
+  // first refill any real driver performs.
+  Harness::<PointerStateLexer<'_>>::over(POINTER_CORPUS).run();
+  Harness::<PointerStateLexer<'_>>::over(POINTER_CORPUS).run_partial();
+  let coverage = Harness::<PointerStateLexer<'_>>::over(POINTER_CORPUS).run_refill(SameAllocation);
+  // And the reduction is a number rather than a footnote: every cut exercised, not one relocated.
+  assert_eq!(coverage.exercised(), coverage.admissible());
+  assert_eq!(coverage.relocated(), Some(0));
+}
+
+#[test]
+#[should_panic(expected = "refill-equivalence")]
+fn owned_chunks_red_a_lexer_that_keys_on_the_buffer_address() {
+  // The other half of the same cell: the identical lexer, the identical corpus, the identical
+  // cuts. The only thing that changed is that a leg's bytes live in the driver's storage, so the
+  // pair really does cross a change of buffer.
+  let _ = Harness::<PointerStateLexer<'_>>::over(POINTER_CORPUS)
+    .run_refill(&OwnedChunks::over(POINTER_CORPUS));
+}
+
+#[test]
+fn owned_chunks_relocate_every_cut_they_exercise() {
+  let coverage =
+    Harness::<KeepsTheFact<'_>>::over(REFILL_CORPUS).run_refill(&OwnedChunks::over(REFILL_CORPUS));
+  // The corpus is ASCII, so every position below each source's length is a cut, and the driver
+  // narrows none of them: 8 + 5 + 4 + 1 + 8 + 0 + 2.
+  assert_eq!(coverage.inputs(), 7);
+  assert_eq!(coverage.admissible(), 28);
+  assert_eq!(coverage.exercised(), 28);
+  assert_eq!(coverage.relocated(), Some(28));
+  assert_eq!(coverage.exercised_at(0), Some(8));
+  assert_eq!(coverage.admissible_at(5), Some(0));
+  assert_eq!(coverage.exercised_at(7), None);
+}
+
+// ── A source's boundaries are not necessarily the driver's ──────────────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum BKind {
+  Char,
+  Word,
+}
+
+impl core::fmt::Display for BKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    match self {
+      Self::Char => f.write_str("char"),
+      Self::Word => f.write_str("word"),
+    }
+  }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum BTok {
+  Char,
+  Word,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct BStray;
+
+impl Token<'_> for BTok {
+  type Kind = BKind;
+  type Error = BStray;
+
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::WithinSpan;
+
+  fn kind(&self) -> BKind {
+    match self {
+      Self::Char => BKind::Char,
+      Self::Word => BKind::Word,
+    }
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// How many bytes the UTF-8 sequence starting with `lead` occupies, or `0` when `lead` cannot
+/// start one.
+fn utf8_len(lead: u8) -> usize {
+  match lead {
+    0x00..=0x7f => 1,
+    0xc2..=0xdf => 2,
+    0xe0..=0xef => 3,
+    0xf0..=0xf4 => 4,
+    _ => 0,
+  }
+}
+
+/// Whether `k` is a UTF-8 code point boundary of `src` — the cut rule of a driver that validates
+/// what it appends, which is the only kind of driver a UTF-8-decoding byte lexer ever meets.
+fn utf8_aligned(src: &[u8], k: usize) -> bool {
+  k == 0 || k >= src.len() || (src[k] & 0xc0) != 0x80
+}
+
+/// A `[u8]` lexer that decodes UTF-8 code points, written for a driver whose chunks are always
+/// code point aligned: a buffer that ends mid-sequence is a state it was never built to be in, so
+/// it treats the stump as consumed and stops.
+///
+/// Every item it emits reports an honest read frontier, so a partial driver withholds everything
+/// it decided against the buffer end. What it cannot report — because the trait has no channel for
+/// it — is *I could not decide, and I consumed nothing*: the post-exhaustion span is the only thing
+/// it hands a resuming driver, and the contract lets that span cover bytes it consumed and skipped.
+struct Utf8ByteLexer<'a> {
+  src: &'a [u8],
+  start: usize,
+  end: usize,
+  frontier: usize,
+  state: (),
+}
+
+impl<'a> Lexer<'a> for Utf8ByteLexer<'a> {
+  type State = ();
+  type Source = [u8];
+  type Token = BTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a [u8]) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      frontier: 0,
+      state: (),
+    }
+  }
+  fn with_state(src: &'a [u8], (): ()) -> Self {
+    Self::new(src)
+  }
+  fn check(&self) -> Result<(), BStray> {
+    Ok(())
+  }
+  fn state(&self) -> &() {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut () {
+    &mut self.state
+  }
+  fn into_state(self) {
+    self.state
+  }
+  fn source(&self) -> &'a [u8] {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a [u8] {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<BTok, BStray>> {
+    let b = self.src;
+    let len = b.len();
+    self.start = self.end;
+    if self.start >= len {
+      self.end = self.start;
+      return None;
+    }
+    let n = utf8_len(b[self.start]);
+    if n == 0 {
+      // A byte that cannot start a sequence, decided from that byte alone.
+      self.end = self.start + 1;
+      self.frontier = self.start;
+      return Some(Err(BStray));
+    }
+    if self.start + n > len {
+      // The buffer ended inside a code point. This lexer's driver never delivers that, so the
+      // stump is consumed and the scan is over.
+      self.end = len;
+      return None;
+    }
+    self.end = self.start + n;
+    self.frontier = self.end - 1;
+    Some(Ok(BTok::Char))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::ReadTo(self.frontier)
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+const BYTE_CORPUS: [&[u8]; 3] = ["aéb".as_bytes(), "é".as_bytes(), "a€b".as_bytes()];
+
+#[test]
+fn a_utf8_byte_lexer_passes_the_two_tiers_that_never_carry_a_state() {
+  Harness::<Utf8ByteLexer<'_>>::over(BYTE_CORPUS).run();
+  Harness::<Utf8ByteLexer<'_>>::over(BYTE_CORPUS).run_partial();
+}
+
+#[test]
+#[should_panic(expected = "[input #0 refill-equivalence] refills [1, 2, 4], position 1")]
+fn every_byte_index_reds_a_lexer_whose_driver_never_cuts_there() {
+  // The false red, executable. `Source::is_boundary` for `[u8]` is `k <= len`, so the derived cuts
+  // include one **inside** the two-byte `é` — a buffer a UTF-8-validating driver never delivers.
+  // The lexer is convicted on a schedule its driver cannot produce, which is the one thing a kit
+  // must not do (#295).
+  let _ =
+    Harness::<Utf8ByteLexer<'_>>::over(BYTE_CORPUS).run_refill(&OwnedChunks::over(BYTE_CORPUS));
+}
+
+#[test]
+fn the_driver_states_where_its_chunks_end_and_the_false_red_goes() {
+  let chunks = OwnedChunks::over_cuts(BYTE_CORPUS, utf8_aligned);
+  let coverage = Harness::<Utf8ByteLexer<'_>>::over(BYTE_CORPUS).run_refill(&chunks);
+  // And what the rule cost is a number: `[u8]` offers every byte index, the driver ends a chunk at
+  // 3 of "aéb"'s 4, 1 of "é"'s 2, and 3 of "a€b"'s 5.
+  assert_eq!(coverage.admissible(), 11);
+  assert_eq!(coverage.exercised(), 7);
+  assert_eq!(coverage.exercised_at(1), Some(1));
+  assert_eq!(coverage.relocated(), Some(7));
+}
+
+/// Whether the scanner is inside a `#` comment — the one fact [`ByteCommentLexer`] can lose.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct InComment(bool);
+
+impl crate::state::State for InComment {
+  type Error = Infallible;
+
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+}
+
+/// The pql shape over a **byte** source: `#` comments that at end of input either keep the
+/// in-comment fact (`DEFECT == false`) or forget it.
+///
+/// ASCII throughout, so every cut it diverges at is also a UTF-8 code point boundary. That is what
+/// makes it the control for the cell above: a cut rule that admits only code point boundaries must
+/// not be able to save it.
+struct ByteCommentLexer<'a, const DEFECT: bool> {
+  src: &'a [u8],
+  start: usize,
+  end: usize,
+  state: InComment,
+}
+
+impl<'a, const DEFECT: bool> Lexer<'a> for ByteCommentLexer<'a, DEFECT> {
+  type State = InComment;
+  type Source = [u8];
+  type Token = BTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a [u8]) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: InComment(false),
+    }
+  }
+  fn with_state(src: &'a [u8], state: InComment) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), BStray> {
+    Ok(())
+  }
+  fn state(&self) -> &InComment {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut InComment {
+    &mut self.state
+  }
+  fn into_state(self) -> InComment {
+    self.state
+  }
+  fn source(&self) -> &'a [u8] {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a [u8] {
+    &self.src[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<BTok, BStray>> {
+    let b = self.src;
+    let len = b.len();
+    self.start = self.end;
+
+    if self.state.0 {
+      while self.start < len && b[self.start] != b'\n' {
+        self.start += 1;
+      }
+      if self.start >= len {
+        self.end = self.start;
+        return None;
+      }
+      self.state.0 = false;
+    }
+
+    loop {
+      while self.start < len && (b[self.start] == b' ' || b[self.start] == b'\n') {
+        self.start += 1;
+      }
+      if self.start < len && b[self.start] == b'#' {
+        let mut i = self.start + 1;
+        while i < len && b[i] != b'\n' {
+          i += 1;
+        }
+        if i >= len {
+          // End of input inside a comment: the fork this fixture exists for.
+          self.start = i;
+          self.end = i;
+          if !DEFECT {
+            self.state.0 = true;
+          }
+          return None;
+        }
+        self.start = i;
+        continue;
+      }
+      break;
+    }
+
+    if self.start >= len {
+      self.end = self.start;
+      return None;
+    }
+    let mut e = self.start;
+    while e < len && b[e].is_ascii_lowercase() {
+      e += 1;
+    }
+    if e == self.start {
+      self.end = self.start + 1;
+      return Some(Err(BStray));
+    }
+    self.end = e;
+    Some(Ok(BTok::Word))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+const BYTE_COMMENT_CORPUS: [&[u8]; 3] = [
+  "x #cd".as_bytes(),
+  "x #c\nab".as_bytes(),
+  "ab cd".as_bytes(),
+];
+
+#[test]
+fn a_byte_comment_lexer_that_keeps_the_fact_passes_the_aligned_cut_rule() {
+  let chunks = OwnedChunks::over_cuts(BYTE_COMMENT_CORPUS, utf8_aligned);
+  Harness::<ByteCommentLexer<'_, false>>::over(BYTE_COMMENT_CORPUS).run();
+  Harness::<ByteCommentLexer<'_, false>>::over(BYTE_COMMENT_CORPUS).run_partial();
+  let coverage =
+    Harness::<ByteCommentLexer<'_, false>>::over(BYTE_COMMENT_CORPUS).run_refill(&chunks);
+  // Pure ASCII, so the aligned rule takes nothing away: 5 + 7 + 5.
+  assert_eq!(coverage.admissible(), 17);
+  assert_eq!(coverage.exercised(), 17);
+}
+
+#[test]
+#[should_panic(expected = "refill-equivalence")]
+fn the_aligned_cut_rule_does_not_save_a_byte_lexer_that_forgets() {
+  // The control for the cell above. A cut rule narrow enough to remove the false red must still be
+  // wide enough to keep the true one, or the trade was a false red for a false green.
+  let _ = Harness::<ByteCommentLexer<'_, true>>::over(BYTE_COMMENT_CORPUS)
+    .run_refill(&OwnedChunks::over_cuts(BYTE_COMMENT_CORPUS, utf8_aligned));
+}
+
+// ── What the kit checks about a driver, and what it refuses ──────────────────────────
+
+/// A driver that hands back a prefix one unit short of the one it was asked for.
+struct ShortBuffer;
+
+impl<'inp> super::RefillDriver<'inp, str> for ShortBuffer {
+  fn buffer(&self, _idx: usize, src: &'inp str, k: usize) -> Option<&'inp str> {
+    Some(&src[..k.saturating_sub(1)])
+  }
+}
+
+/// A driver whose buffers are the right length and the wrong bytes.
+struct OtherBytes;
+
+impl<'inp> super::RefillDriver<'inp, str> for OtherBytes {
+  fn buffer(&self, _idx: usize, _src: &'inp str, k: usize) -> Option<&'inp str> {
+    Some(&"zzzzzzzz"[..k])
+  }
+}
+
+/// A driver that can never end a chunk anywhere.
+struct NoChunkEnds;
+
+impl<'inp> super::RefillDriver<'inp, str> for NoChunkEnds {
+  fn buffer(&self, _idx: usize, _src: &'inp str, _k: usize) -> Option<&'inp str> {
+    None
+  }
+}
+
+#[test]
+#[should_panic(expected = "[input #0 refill-buffer] the RefillDriver returned a buffer of 0 units")]
+fn a_buffer_of_the_wrong_length_is_refused_and_not_lexed() {
+  let _ = Harness::<TileLexer<'_>>::new("ab cd").run_refill(ShortBuffer);
+}
+
+#[test]
+#[should_panic(expected = "[input #0 refill-buffer] the RefillDriver returned a buffer for cut")]
+fn a_buffer_of_the_wrong_bytes_is_refused_and_not_lexed() {
+  let _ = Harness::<TileLexer<'_>>::new("ab cd").run_refill(OtherBytes);
+}
+
+#[test]
+#[should_panic(expected = "[input #0 refill-coverage] the RefillDriver admitted none of the 5 cut")]
+fn a_driver_that_admits_no_cut_certifies_nothing_and_is_refused() {
+  let _ = Harness::<TileLexer<'_>>::new("ab cd").run_refill(NoChunkEnds);
+}
+
+#[test]
+fn a_source_with_no_interior_cut_is_not_refused() {
+  // The floor is "the driver narrowed everything away", not "the source is short". A one-unit
+  // source offers exactly one cut, `k = 0`, and a driver that takes it has certified the only
+  // change of buffer there is.
+  let coverage =
+    Harness::<TileLexer<'_>>::over(["a", ""]).run_refill(&OwnedChunks::over(["a", ""]));
+  assert_eq!(coverage.exercised_at(0), Some(1));
+  assert_eq!(coverage.admissible_at(1), Some(0));
+}
+
+/// A driver that records whether the kit ever asked it about a position the source cannot be
+/// sliced at.
+struct AskWatch {
+  non_boundary: core::cell::Cell<bool>,
+}
+
+impl<'inp> super::RefillDriver<'inp, str> for &AskWatch {
+  fn buffer(&self, _idx: usize, src: &'inp str, k: usize) -> Option<&'inp str> {
+    if !src.is_char_boundary(k) {
+      self.non_boundary.set(true);
+      return None;
+    }
+    Some(&src[..k])
+  }
+}
+
+#[test]
+fn a_driver_can_narrow_the_cut_set_and_can_never_widen_it() {
+  // `is_boundary` is checked BEFORE the driver is asked, so there is no position a driver could
+  // answer `Some` at that the kit could not verify a buffer for. The watch proves the ordering
+  // rather than restating it: "café" has two positions inside its `é` and neither is ever offered.
+  let watch = AskWatch {
+    non_boundary: core::cell::Cell::new(false),
+  };
+  let coverage = Harness::<TileLexer<'_>>::over(["café"]).run_refill(&watch);
+  assert!(!watch.non_boundary.get());
+  // 5 bytes, one of which is a continuation byte: `c`, `a`, `f`, the `é` lead, and offset 0.
+  assert_eq!(coverage.admissible(), 4);
+  assert_eq!(coverage.exercised(), 4);
+}
+
+// ── A buffer the driver can still reach, and a mode its slice does not carry ─────────
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ModalKind {
+  Ident,
+  Keyword,
+}
+
+impl core::fmt::Display for ModalKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    match self {
+      Self::Ident => f.write_str("ident"),
+      Self::Keyword => f.write_str("keyword"),
+    }
+  }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ModalTok {
+  kind: ModalKind,
+  head: u8,
+}
+
+impl Token<'_> for ModalTok {
+  type Kind = ModalKind;
+  type Error = Infallible;
+
+  const SCAN_LOOKAHEAD: crate::ScanLookahead = crate::ScanLookahead::WithinSpan;
+
+  fn kind(&self) -> ModalKind {
+    self.kind
+  }
+
+  fn is_trivia(&self) -> bool {
+    false
+  }
+}
+
+/// A `Source` that is **not** its slice, in all of the ways a `RefillDriver` can exploit.
+///
+/// - `text` is behind a [`Cell`](core::cell::Cell), so whoever holds the `ModalSource` can rewrite
+///   its bytes after handing a reference to it away. `str` cannot do this — a `&str` addresses
+///   immutable bytes — which is why the buffer-mutation attack needs a source of its own rather
+///   than one more `&str` driver.
+/// - `keywords` is a fact the slice does not carry: two `ModalSource`s can be equal at
+///   `Source::as_slice` and lex differently. That is the tier's stated obligation, executable.
+/// - `overwrite` rewrites this source **from inside `as_slice`**, which is the channel the driver's
+///   last callback does not close: the kit reads the buffer to validate it, and reading it is
+///   caller code. See `a_buffer_rewritten_while_the_kit_validated_it_wins_the_diagnosis`.
+///
+/// It is a sized backing, so `REFERENT_IS_BYTES` keeps its conservative default and
+/// `RefillCoverage::relocated` is `None` over it — which is the fourth thing these cells use it for.
+#[derive(Debug)]
+struct ModalSource {
+  text: core::cell::Cell<&'static str>,
+  keywords: bool,
+  /// The bytes the **second** read of this source's slice leaves behind it, if any.
+  overwrite: Option<&'static str>,
+  /// How often the slice has been asked for.
+  reads: core::cell::Cell<usize>,
+}
+
+impl ModalSource {
+  fn new(text: &'static str, keywords: bool) -> Self {
+    Self {
+      text: core::cell::Cell::new(text),
+      keywords,
+      overwrite: None,
+      reads: core::cell::Cell::new(0),
+    }
+  }
+
+  /// The same source, except that the second read of its slice hands back what it was holding and
+  /// then rewrites it.
+  ///
+  /// Two reads is the count that matters, and it is not arbitrary: the kit validates a buffer as
+  /// it arrives and again once the driver has answered every cut, so the second read is the last
+  /// validation before the schedules lex — and this rewrite happens after that comparison has
+  /// already been decided on the value it snapshotted.
+  fn rewriting_itself(text: &'static str, keywords: bool, overwrite: &'static str) -> Self {
+    Self {
+      overwrite: Some(overwrite),
+      ..Self::new(text, keywords)
+    }
+  }
+
+  fn text(&self) -> &'static str {
+    self.text.get()
+  }
+}
+
+impl crate::Source<usize> for ModalSource {
+  type Slice<'source>
+    = &'source str
+  where
+    Self: 'source;
+
+  fn is_empty(&self) -> bool {
+    self.text().is_empty()
+  }
+
+  fn len(&self) -> usize {
+    self.text().len()
+  }
+
+  fn as_slice(&self) -> Self::Slice<'_> {
+    // The snapshot is taken BEFORE the rewrite, so the caller compares the bytes this source was
+    // holding and the source is not holding them any more. Nothing here is exotic: reading a
+    // source is caller code, and so are the slice type's equality and its destructor.
+    let held = self.text();
+    self.reads.set(self.reads.get() + 1);
+    if self.reads.get() == 2
+      && let Some(next) = self.overwrite
+    {
+      self.text.set(next);
+    }
+    held
+  }
+
+  fn slice<R>(&self, range: R) -> Option<Self::Slice<'_>>
+  where
+    R: core::ops::RangeBounds<usize>,
+  {
+    self.text().get((
+      range.start_bound().map(|s| *s),
+      range.end_bound().map(|s| *s),
+    ))
+  }
+
+  fn is_boundary(&self, index: usize) -> bool {
+    self.text().is_char_boundary(index)
+  }
+}
+
+/// A whitespace-separated word lexer over [`ModalSource`], whose only mode-sensitive decision is
+/// whether the word `kw` is a keyword.
+struct ModalLexer<'a> {
+  src: &'a ModalSource,
+  start: usize,
+  end: usize,
+  state: (),
+}
+
+impl<'a> Lexer<'a> for ModalLexer<'a> {
+  type State = ();
+  type Source = ModalSource;
+  type Token = ModalTok;
+  type Span = SimpleSpan;
+  type Offset = usize;
+
+  fn new(src: &'a ModalSource) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state: (),
+    }
+  }
+  fn with_state(src: &'a ModalSource, state: ()) -> Self {
+    Self {
+      src,
+      start: 0,
+      end: 0,
+      state,
+    }
+  }
+  fn check(&self) -> Result<(), Infallible> {
+    Ok(())
+  }
+  fn state(&self) -> &() {
+    &self.state
+  }
+  fn state_mut(&mut self) -> &mut () {
+    &mut self.state
+  }
+  fn into_state(self) {
+    self.state
+  }
+  fn source(&self) -> &'a ModalSource {
+    self.src
+  }
+  fn span(&self) -> SimpleSpan {
+    SimpleSpan::new(self.start, self.end)
+  }
+  fn slice(&self) -> &'a str {
+    &self.src.text()[self.start..self.end]
+  }
+  fn lex(&mut self) -> Option<Result<ModalTok, Infallible>> {
+    let text = self.src.text();
+    let b = text.as_bytes();
+    let len = b.len();
+    self.start = self.end;
+    while self.start < len && b[self.start] == b' ' {
+      self.start += 1;
+    }
+    if self.start >= len {
+      self.end = self.start;
+      return None;
+    }
+    let mut e = self.start;
+    while e < len && b[e] != b' ' {
+      e += 1;
+    }
+    self.end = e;
+    let kind = if self.src.keywords && &text[self.start..e] == "kw" {
+      ModalKind::Keyword
+    } else {
+      ModalKind::Ident
+    };
+    Some(Ok(ModalTok {
+      kind,
+      head: b[self.start],
+    }))
+  }
+  fn read_frontier(&self) -> crate::ReadFrontier<usize> {
+    crate::ReadFrontier::SpanEnd
+  }
+  fn bump(&mut self, n: &usize) {
+    self.end += *n;
+  }
+}
+
+/// One [`ModalSource`] per cut of `text`, each holding that prefix under the given mode.
+fn modal_bufs(text: &'static str, keywords: bool) -> Vec<ModalSource> {
+  (0..text.len())
+    .map(|k| ModalSource::new(&text[..k], keywords))
+    .collect()
+}
+
+/// A driver that hands back correct buffers and then **rewrites one it already handed over**,
+/// while it is being asked about a later cut.
+struct MutatingChunks {
+  bufs: Vec<ModalSource>,
+  /// The cut whose callback performs the write.
+  strike: usize,
+  /// The already-validated buffer that callback rewrites, and what it rewrites it to.
+  victim: usize,
+  overwrite: &'static str,
+}
+
+impl<'inp> super::RefillDriver<'inp, ModalSource> for &'inp MutatingChunks {
+  fn buffer(&self, _idx: usize, _src: &'inp ModalSource, k: usize) -> Option<&'inp ModalSource> {
+    // Copied out of `&self` first, for `OwnedChunks`'s reason: `Self` is itself a `&'inp _`.
+    let owner: &'inp MutatingChunks = self;
+    if k == owner.strike {
+      owner.bufs[owner.victim].text.set(owner.overwrite);
+    }
+    owner.bufs.get(k)
+  }
+}
+
+/// A driver whose buffers carry the right text in a mode the source does not have.
+struct WrongMode {
+  bufs: Vec<ModalSource>,
+}
+
+impl<'inp> super::RefillDriver<'inp, ModalSource> for &'inp WrongMode {
+  fn buffer(&self, _idx: usize, _src: &'inp ModalSource, k: usize) -> Option<&'inp ModalSource> {
+    let owner: &'inp WrongMode = self;
+    owner.bufs.get(k)
+  }
+}
+
+#[test]
+fn the_modal_lexer_is_conforming_over_a_driver_that_agrees_with_its_source() {
+  // The control every cell below is read against: the same lexer, the same source, buffers that
+  // carry the source's own mode and are never written to again. Nothing here reds, so what reds
+  // below is the driver's doing and not the lexer's.
+  //
+  // There is no `run_partial` leg, and its absence is the tier's own argument made executable:
+  // `ModalSource` has no `Index<RangeTo<usize>, Output = Self>`, so the entry point that slices its
+  // own prefixes does not apply to this source and this one does — the buffers are the driver's.
+  let src = ModalSource::new("kw x", true);
+  let honest = WrongMode {
+    bufs: modal_bufs("kw x", true),
+  };
+  Harness::<ModalLexer<'_>>::new(&src).run();
+  let coverage = Harness::<ModalLexer<'_>>::new(&src).run_refill(&honest);
+  coverage.require_every_admissible_cut();
+  // A sized backing keeps `REFERENT_IS_BYTES = false`, so the kit refuses to read an address
+  // comparison over it at all rather than reporting one that proves nothing.
+  assert_eq!(coverage.relocated(), None);
+}
+
+#[test]
+#[should_panic(
+  expected = "[input #0 refill-buffer] the RefillDriver returned a buffer for cut \
+                           k=3 whose contents differ"
+)]
+fn a_buffer_rewritten_after_it_passed_is_refused_as_the_drivers_doing() {
+  // Round 3's second finding, executable. Cut 3's buffer is `"ab "` and passes the moment it is
+  // handed over; answering cut 4 rewrites it to `"xb "`. Nothing asks the driver again, so a table
+  // validated only on arrival carries the rewrite into every schedule built from it: `[3, 5]`
+  // commits `x` where the oracle has `a`, and the kit reports `refill-equivalence` against a lexer
+  // that did exactly what it was handed. Validating the settled table is what turns that verdict
+  // back into the driver refusal it always was.
+  let src = ModalSource::new("ab cd", false);
+  let driver = MutatingChunks {
+    bufs: modal_bufs("ab cd", false),
+    strike: 4,
+    victim: 3,
+    overwrite: "xb ",
+  };
+  let _ = Harness::<ModalLexer<'_>>::new(&src).run_refill(&driver);
+}
+
+#[test]
+#[should_panic(
+  expected = "being asked once stops a driver giving a second answer and does not \
+                           stop it writing through the reference it already gave"
+)]
+fn the_rewrite_refusal_says_which_of_the_kits_two_promises_did_not_cover_it() {
+  // The wording is the repair: "asked once" is a fact about callbacks, and the reader has to be
+  // told it was never a fact about referents, or the refusal reads as the earlier one it is not.
+  let src = ModalSource::new("ab cd", false);
+  let driver = MutatingChunks {
+    bufs: modal_bufs("ab cd", false),
+    strike: 4,
+    victim: 3,
+    overwrite: "xb ",
+  };
+  let _ = Harness::<ModalLexer<'_>>::new(&src).run_refill(&driver);
+}
+
+/// A driver whose buffers are correct on arrival, and one of which rewrites **itself** while the
+/// kit is taking its second look at it.
+struct RewritesUnderValidation {
+  bufs: Vec<ModalSource>,
+}
+
+impl<'inp> super::RefillDriver<'inp, ModalSource> for &'inp RewritesUnderValidation {
+  fn buffer(&self, _idx: usize, _src: &'inp ModalSource, k: usize) -> Option<&'inp ModalSource> {
+    let owner: &'inp RewritesUnderValidation = self;
+    owner.bufs.get(k)
+  }
+}
+
+/// The buffers for `text`, with the one at `strike` rewriting itself to `overwrite` on the second
+/// read of its slice.
+fn rewriting_bufs(text: &'static str, strike: usize, overwrite: &'static str) -> Vec<ModalSource> {
+  (0..text.len())
+    .map(|k| {
+      if k == strike {
+        ModalSource::rewriting_itself(&text[..k], false, overwrite)
+      } else {
+        ModalSource::new(&text[..k], false)
+      }
+    })
+    .collect()
+}
+
+#[test]
+#[should_panic(
+  expected = "[input #0 refill-buffer] the RefillDriver returned a buffer for cut \
+                           k=3 whose contents differ from the source: expected \"ab \", got \"xb \""
+)]
+fn a_buffer_rewritten_while_the_kit_validated_it_wins_the_diagnosis() {
+  // Round 4's first [medium], executable. Every callback has been answered and both of the
+  // validations that precede a run have passed — the second one on the value this buffer handed
+  // back **and then stopped holding**. Round 3's claim was that the settled pass establishes every
+  // prefix at the same time; it does not, because the pass runs caller code at every step and the
+  // schedules run more of it afterwards.
+  //
+  // So the leg lexes `"xb "` and commits an `x` the oracle does not have. What the repair changes
+  // is who that is reported against: the buffers this schedule lexed are asked once more on the
+  // way to the verdict, and the one that is no longer a prefix takes it. Before the repair this
+  // was `refill-equivalence` at position 0 — the kit convicting a lexer that did exactly what it
+  // was handed.
+  let src = ModalSource::new("ab cd", false);
+  let driver = RewritesUnderValidation {
+    bufs: rewriting_bufs("ab cd", 3, "xb "),
+  };
+  let _ = Harness::<ModalLexer<'_>>::new(&src).run_refill(&driver);
+}
+
+#[test]
+#[should_panic(expected = "about to report this schedule against the lexer")]
+fn the_late_rewrite_refusal_names_the_verdict_it_replaced() {
+  // The wording is half the repair, as it was for the settled pass: a reader who is not told that
+  // this refusal stands **in place of** a lexer-blaming divergence cannot tell it from the arrival
+  // check, which is a different fact about a different moment.
+  let src = ModalSource::new("ab cd", false);
+  let driver = RewritesUnderValidation {
+    bufs: rewriting_bufs("ab cd", 3, "xb "),
+  };
+  let _ = Harness::<ModalLexer<'_>>::new(&src).run_refill(&driver);
+}
+
+#[test]
+#[should_panic(
+  expected = "[input #0 refill-buffer] the RefillDriver returned a buffer for cut \
+                           k=2 whose contents differ from the source: expected \"ab\", got \"xb\""
+)]
+fn a_rewrite_that_diverges_nowhere_is_still_not_a_pass() {
+  // The other half, and the one no divergence can catch: cut 2's buffer is `"ab"`, whose only item
+  // reaches the buffer end and is therefore **withheld** on every leg that lexes it. Rewriting it
+  // to `"xb"` changes nothing any schedule commits, so every comparison passes and the run is
+  // green — over a buffer that was not the prefix. That green is the one outcome a later
+  // comparison cannot take back, which is why the table is validated once more after the last
+  // schedule has run rather than only on the way to a failure.
+  let src = ModalSource::new("ab cd", false);
+  let driver = RewritesUnderValidation {
+    bufs: rewriting_bufs("ab cd", 2, "xb"),
+  };
+  let _ = Harness::<ModalLexer<'_>>::new(&src).run_refill(&driver);
+}
+
+#[test]
+#[should_panic(expected = "Every schedule of this input has now run")]
+fn the_silent_rewrite_refusal_says_which_moment_it_speaks_from() {
+  let src = ModalSource::new("ab cd", false);
+  let driver = RewritesUnderValidation {
+    bufs: rewriting_bufs("ab cd", 2, "xb"),
+  };
+  let _ = Harness::<ModalLexer<'_>>::new(&src).run_refill(&driver);
+}
+
+#[test]
+fn a_driver_whose_buffers_hold_still_reaches_none_of_those_refusals() {
+  // The control for all four: the identical driver shape over the identical source, with no
+  // rewrite armed. Nothing here reds, so what reds above is the rewrite and not the fixture.
+  let src = ModalSource::new("ab cd", false);
+  let driver = RewritesUnderValidation {
+    bufs: rewriting_bufs("ab cd", usize::MAX, "unused"),
+  };
+  let coverage = Harness::<ModalLexer<'_>>::new(&src).run_refill(&driver);
+  coverage.require_every_admissible_cut();
+  assert_eq!(coverage.non_certifying(), 0);
+}
+
+#[test]
+#[should_panic(expected = "[input #0 refill-equivalence] refills [2, 3, 4], position 0")]
+fn a_buffer_in_the_wrong_mode_passes_validation_and_the_verdict_names_the_lexer() {
+  // Round 3's third finding, executable — and it is a **documented obligation** rather than a
+  // repair, so this cell pins the boundary instead of a fix. Every buffer here is the right text:
+  // `Source::as_slice` at cut 3 is `"kw "` on both sides and the length matches, so the kit's
+  // validation passes. What differs is `keywords`, which the slice does not carry, so the leg
+  // commits an ident where the oracle has a keyword and the kit convicts a conforming lexer.
+  //
+  // The kit cannot close this without either a caller-supplied semantic hook (a caller-supplied
+  // exemption, which is what the cut rule already is and why it is a value in the caller's own
+  // source) or a whole-source equality it has no value to build. So `RefillDriver` states it: this
+  // tier assumes a source whose lexical semantics are fully represented by its `Slice`. If this
+  // cell ever stops panicking, the assumption became a check and that contract needs rewriting.
+  let src = ModalSource::new("kw x", true);
+  let driver = WrongMode {
+    bufs: modal_bufs("kw x", false),
+  };
+  let _ = Harness::<ModalLexer<'_>>::new(&src).run_refill(&driver);
+}
+
+// ── The certificate, and the two requirements it can be read with ───────────────────
+
+#[test]
+#[should_panic(
+  expected = "[refill-coverage] the run drove schedules from 7 of the 11 cut \
+                           positions the corpus offers"
+)]
+fn requiring_every_admissible_cut_reds_a_run_whose_driver_narrowed_them() {
+  // The same green run the coverage cell above reads by hand: 7 of 11, because the driver's chunks
+  // are UTF-8 aligned. Read as numbers that is the cut rule working; required as a whole it is
+  // unmet, and the caller says which of the two they meant.
+  let chunks = OwnedChunks::over_cuts(BYTE_CORPUS, utf8_aligned);
+  Harness::<Utf8ByteLexer<'_>>::over(BYTE_CORPUS)
+    .run_refill(&chunks)
+    .require_every_admissible_cut();
+}
+
+#[test]
+#[should_panic(
+  expected = "[refill-coverage] 0 of the 12 cuts this run exercised got a buffer at \
+                           an address the source does not share"
+)]
+fn requiring_relocation_reds_the_mode_that_cannot_relocate() {
+  // `SameAllocation`'s stated reduction, as a failed requirement rather than as a paragraph: the
+  // lexer that keys on the buffer address passes this run, and passes it because nothing moved.
+  Harness::<PointerStateLexer<'_>>::over(POINTER_CORPUS)
+    .run_refill(SameAllocation)
+    .require_every_cut_relocated();
+}
+
+#[test]
+#[should_panic(
+  expected = "[refill-coverage] this call required every exercised cut to change \
+                           allocation, and over this source the kit cannot answer that honestly"
+)]
+fn requiring_relocation_over_a_source_that_cannot_answer_is_unanswerable_not_unmet() {
+  // The `None` arm, and the reason it is a different sentence: `ModalSource` is a sized backing, so
+  // `&Self` addresses a variable rather than the bytes and an inequality between two of them proves
+  // nothing. Reporting that as "no cut relocated" would be reporting a number the kit refuses to
+  // read anywhere else in the crate.
+  let src = ModalSource::new("kw x", true);
+  let honest = WrongMode {
+    bufs: modal_bufs("kw x", true),
+  };
+  Harness::<ModalLexer<'_>>::new(&src)
+    .run_refill(&honest)
+    .require_every_cut_relocated();
 }
