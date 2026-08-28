@@ -98,32 +98,71 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/feature-cfg-selftest.XXXXXX") || exit 1
 trap 'rm -rf "$work"' EXIT INT TERM
 
 # One pristine copy, re-cloned per case. `cargo metadata --no-deps` needs EVERY workspace
-# member's manifest — a `members` entry it cannot load is a hard error, not a skipped package —
-# and it needs each explicitly-`path`'d target to exist, so `tokora-benches` comes over whole
-# (#216). tokora's own `examples/` do not, because its `[[example]]` sections are the only
-# declared targets left whose sources this copy omits and `cargo metadata` is content with a
-# missing autodiscovered directory.
+# member's manifest to be present and parseable — a `members` entry it cannot load is a hard
+# error for the whole command, not a skipped package. Beyond that it is far less demanding than
+# it looks: an EXPLICITLY declared target (`[[bin]]`, `[[bench]]`, `[[example]]`, ...) never
+# needs its source file to exist — verified directly, by building a fixture with
+# `tokora-benches/benches/` and `tokora/examples/` both absent and confirming `cargo metadata`
+# still reports every bench and example target, straight out of the manifest, without opening
+# any of them. The one thing it DOES require is that a package resolve to at least one target
+# somehow, and a package with no explicit target section at all falls back to convention —
+# `src/lib.rs` / `src/main.rs` — which this time has to be FOUND, not just declared: an empty
+# member with neither dies with "no targets specified in the manifest", the same hard error as a
+# missing member, just one level in. `tokora-benches` clears this without a `src/` because its
+# five `[[bench]]` sections are the explicit kind; a plain library member with no such section
+# would not.
 #
-# `tokora/tests` comes over WHOLE, not filtered to the `*.rs` the suite scan globs. The gate
-# reads only the top level today; a fixture trimmed to exactly what a scan reads is a fixture
-# that silently under-supplies the day the scan widens, and this file's own history is the
-# argument — see the paragraph below.
-#
-# Copying the workspace root manifest and then NOT copying a member is the failure this comment
-# exists to prevent: it makes all six cases die inside `feature_map()` with a `cargo metadata`
-# exit 101, which reads like a broken gate rather than a broken fixture. It happened a second
-# time on 2026-08-11, from the other end: the gate learned to scan `tokora/tests`, this fixture
-# did not copy it, and all six cases died on `tokora/tests does not exist`. Loud, and caught by
-# the selftest itself — which is the shape a fixture gap is supposed to have.
+# This is the third time a workspace member and this fixture have drifted apart. The second time
+# was on 2026-08-11, from the other end: the gate learned to scan `tokora/tests`, this fixture
+# did not copy it, and every case died on "tokora/tests does not exist" — and that is when the
+# paragraph here, in an earlier form, first spelled out that copying the root manifest and then
+# not copying a member is the failure it exists to prevent. The third time is #328:
+# `tokora-icount` was added to `[workspace] members` with no matching line here, and every case
+# died inside `feature_map()` on a `cargo metadata` exit 101 that reads like a broken gate rather
+# than a broken fixture — the exact failure the comment named, the first time naming it was
+# tested against a real new member. A comment asking a human to keep two places in sync is not a
+# mechanism, it is a hope, and it was wrong the first time it was tested. So the member list
+# below is read out of the root manifest instead of hand-listed: a member this loop cannot see is
+# a member `cargo metadata` cannot see either, and there is now exactly one place that lists
+# workspace members — the manifest itself. (This reads `[workspace] members` as literal paths,
+# matching every entry the manifest has ever had; a glob member would need this loop taught to
+# expand it, loudly, not silently.)
+members=$(python3 - "$root/Cargo.toml" <<'PY'
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as f:
+    doc = tomllib.load(f)
+for member in doc["workspace"]["members"]:
+    print(member)
+PY
+) || exit 1
+[ -n "$members" ] || { echo "selftest: $root/Cargo.toml declares no [workspace] members" >&2; exit 1; }
+
 base=$work/base
-mkdir -p "$base/ci" "$base/tokora" || exit 1
+mkdir -p "$base/ci" || exit 1
 cp "$root/Cargo.toml" "$base/" || exit 1
 [ -f "$root/Cargo.lock" ] && cp "$root/Cargo.lock" "$base/"
 cp "$root/$GATE" "$base/ci/" || exit 1
-cp "$root/tokora/Cargo.toml" "$base/tokora/" || exit 1
-cp -R "$root/tokora/src" "$base/tokora/" || exit 1
+while IFS= read -r member; do
+  mkdir -p "$base/$member" || exit 1
+  cp "$root/$member/Cargo.toml" "$base/$member/" || exit 1
+  # Only `src/` — see above for why a member can need it found, never opened, and never for a
+  # reason deeper than that. `tokora-benches` has none and needs none; a member that does gets
+  # it here, uniformly, so no member's shape is a fixture gap waiting to be discovered by adding
+  # one.
+  [ -d "$root/$member/src" ] && { cp -R "$root/$member/src" "$base/$member/" || exit 1; }
+done <<< "$members"
+
+# `tokora` is additionally the crate under test: the gate reads its `tests/` directly off disk —
+# not through `cargo metadata`, and not satisfied by the loop above — so that needs real content
+# too. It comes over WHOLE, not filtered to the `*.rs` the suite scan globs: the gate reads only
+# the top level today, and a fixture trimmed to exactly what a scan reads is a fixture that
+# silently under-supplies the day the scan widens — which is exactly what the 2026-08-11 drift
+# above was. `examples/`, `build.rs`, `tools/` and every other non-`src/` corner of every member
+# are not read by anything here and stay out; if a future member needs more than the loop above
+# gives it, that need belongs right here, spelled out, not folded silently into the loop.
 cp -R "$root/tokora/tests" "$base/tokora/" || exit 1
-cp -R "$root/tokora-benches" "$base/" || exit 1
 
 fails=0
 total=0
