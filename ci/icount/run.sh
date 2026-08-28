@@ -45,9 +45,15 @@ set -euo pipefail
 
 # ── The threshold ───────────────────────────────────────────────────────────────────────────
 #
-# THE CLAIM A CALLER RELIES ON: **this gate can see a 1% regression in any one workload.** On
-# `sep_while`, the most heavily monomorphised axis, 1% is about 7 instructions per parsed
-# element.
+# THE CLAIM A CALLER RELIES ON: **this gate can see a 1% regression in any one workload.** What
+# 1% IS depends on where the regression is paid, and the workloads are chosen so that both
+# answers are small. Paid per parsed ELEMENT, 1% of `sep_while` is about 7 instructions. Paid
+# once per parsed COLLECTION it is 55 instructions on `sep_while` and 18 on `sep_while_shallow`,
+# which is the whole reason the three axes with no other witness are read at two collection
+# depths rather than one. `tokora-icount/src/workloads.rs` carries the per-row arithmetic; the
+# short form is that a deep source divides a per-collection cost by however many elements one
+# collection holds, and a suite of deep sources alone is close to blind to the very failure
+# #259 is most likely to produce.
 #
 # It is not a round number picked for comfort. Four populations were measured under callgrind
 # before it was chosen. They were taken on Linux/aarch64 (valgrind 3.19) and are quoted as
@@ -58,35 +64,77 @@ set -euo pipefail
 # time this workflow is dispatched on `main`.
 #
 #   1. **The gate's own floor.** `--self` builds the identical source twice, in two directories,
-#      into two target directories, and measures both. All ten workloads came back at a
+#      into two target directories, and measures both. All thirteen workloads came back at a
 #      difference of **EXACTLY ZERO instructions** — not "within noise", zero. There is no
 #      run-to-run spread to clear, because callgrind counts what the binary does and the binary
 #      does the same thing every time. A machine under load returns the same number as an idle
 #      one, which is the property the criterion benches do not have.
 #
 #   2. **A prose-only change.** A commit adding one `///` line to `SeparatedWhile`'s docs and one
-#      `//` comment inside the hottest line of the `sep_while` engine: all ten at +0.000%.
+#      `//` comment inside the hottest line of the `sep_while` engine: all thirteen at +0.000%.
+#      This is the population a shallow row is likeliest to fail, because a shallow row divides
+#      by fewer elements — and it does not fail it, because there is nothing to divide.
 #
-#   3. **Real merged commits.** Five recent `main` commits were replayed against their own
+#   3. **Real merged commits.** The same five recent `main` commits, replayed against their own
 #      parents with this instrument on top — the population this gate will actually meet.
 #      `a218439` (13 files under `parser/`), `b1faab1` (`feat(pratt)!`) and `73572b5`
-#      (`feat(conformance)`) moved every workload by +0.000%. `a35a1d0` (`fix(input)!`, 13 files
-#      under `src/`) spanned -0.323% to +0.005%. `abde449` — `fix(many)`, 21 files under
-#      `parser/`, a correctness fix in these very engines — moved `sep_while` by **-1.413%** (an
-#      improvement) and `repeated_while` by **+0.239%**, and left the other eight at +0.000%.
-#      So the largest INCIDENTAL positive drift any of the five produced is a quarter of a
-#      percent, and the threshold has four times that in hand. Note where the ONE reading over
-#      1% sits: in the axis the commit changed, and in the improving direction, which this gate
-#      reports and does not fail.
+#      (`feat(conformance)`) moved every one of the thirteen workloads by +0.000%. `a35a1d0`
+#      (`fix(input)!`, 13 files under `src/`) spanned -1.257% to +0.004%. `abde449` — `fix(many)`,
+#      21 files under `parser/`, a correctness fix in these very engines — moved `sep_while` by
+#      **-1.292%** (an improvement, in the axis it changed) and left the other twelve at +0.000%.
+#      The largest INCIDENTAL POSITIVE drift any of the five produced on any row is **+0.004%**,
+#      and on a SHALLOW row it is **+0.002%**. That last number is the one that decided the
+#      shallow rows could share this ceiling rather than needing a wider one of their own: a
+#      shallow source is not uniformly more sensitive, it is re-weighted — sharper on a
+#      per-collection cost and slightly blunter on a per-element one — and incidental changes in
+#      this population are not per-collection costs. Note where the two readings over 1% in
+#      MAGNITUDE sit: `sep_while` on `abde449` and `separated` on `a35a1d0`, both improvements,
+#      which this gate reports and does not fail.
 #
-#   4. **A planted lost inline.** `#[inline(never)]` on `SeparatedWhile::handle_continue` — the
-#      per-element handler every `sep_while/parse/*` specialisation inlines today, and exactly
-#      the boundary a consolidation into shared engines introduces — moved `sep_while` by
-#      **+10.797%** and `separated_while` by **+11.403%**, and left the other seven axes and the
-#      control inside ±0.5%. The same attribute on `SeparatedWhile::parse`, which contains the
-#      element loop rather than sitting inside it, cost **+0.998%**: one call per collection
-#      instead of one per element, and the gate would just miss it. That is the honest bound on
-#      what a 1% threshold does not see.
+#      A caveat the replay itself produced, and the reason the ceiling is NOT re-derived downward
+#      from those numbers. The same five commits were replayed a second time against the ten-row
+#      instrument #328 shipped, and that reproduces #328's readings exactly: `abde449` at
+#      `sep_while` -1.413% and `repeated_while` +0.239%, `a35a1d0` spanning -0.323% to +0.005%.
+#      So a commit's incidental drift is not a property of the commit alone — adding three
+#      workloads to this binary moved `repeated_while` on `abde449` from +0.239% to +0.000%,
+#      because three more instantiations move what ThinLTO inlines, on both sides of the
+#      comparison. The honest bound is therefore the worst reading either instrument produced:
+#      a quarter of a percent, exactly where #328 left it, with four times that in hand.
+#
+#   4. **Planted lost inlines, at both granularities.**
+#
+#      *Per element.* `#[inline(never)]` on `SeparatedWhile::handle_continue` — the per-element
+#      handler every `sep_while/parse/*` specialisation inlines today — moved `sep_while` by
+#      **+10.235%** and `separated_while` by **+10.332%**, and left every axis it does not reach
+#      at +0.000%. The shallow twins read the same plant at +8.187% and +6.695%: LOWER, because a
+#      per-element cost is divided by a bigger per-iteration total. That is why the deep rows
+#      stay — each granularity has the row that reads it best.
+#
+#      *Per collection.* The same attribute ONE LEVEL OUT, on `SeparatedWhile::parse`, which
+#      CONTAINS the element loop rather than sitting inside it, is one call per collection
+#      instead of one per element: 44 instructions, every time. `sep_while` reads that as
+#      **+0.798%** and reports it `ok`, while `sep_while_shallow` reads the same binary at
+#      **+2.484%** and fails. This is the plant #328 shipped knowing it slipped, and the
+#      arithmetic has not moved under it: replayed against the ten-row instrument that PR
+#      shipped, the same plant still reads **+0.998%** on `sep_while` — its number, unchanged.
+#      What changed is that there is now a row it does not slip past. Two more
+#      per-collection plants, because one plant proves the plant and not the property:
+#      `#[inline(never)]` on `Repeated::parse` reads +1.363% on `at_most` and **+2.347%** on
+#      `at_most_shallow`; and a fixed cost planted in `SeparatedWhile::parse`'s per-collection
+#      prologue — 14 instructions a collection plus 3 an element, on the unbounded
+#      specialisation — reads **+0.557%** on `separated_while`, which passes, and **+1.206%** on
+#      `separated_while_shallow`, which does not. Splitting that last one by granularity: its
+#      per-collection half is +0.005% on the deep row and +0.84% on the shallow one, a factor of
+#      167, which is exactly the ratio of the two rows' collections-per-iteration to their
+#      per-iteration totals.
+#
+#      One thing the first plant found and is worth recording: it does NOT move `separated_while`
+#      at all, deep or shallow — +0.000%. The unbounded `sep_while` specialisation already
+#      reaches its engine through an out-of-line call today (`unbounded.rs` passes
+#      `block3_inline = false`), so `#[inline(never)]` moves WHICH function is the boundary
+#      without adding one. An axis that already pays the call cannot lose the inline; it can
+#      still get more expensive per collection, which is what the third plant shows and what the
+#      shallow row is there to read.
 #
 # So the margin is not for noise; there is none. It is for the changes that legitimately move a
 # count without being a performance regression — an added match arm, a widened struct, a

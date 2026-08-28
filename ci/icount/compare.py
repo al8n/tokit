@@ -19,6 +19,13 @@ import sys
 # moves at once.
 CONTROL = "scan_drain"
 
+# Three axes are measured twice: once over few long collections and once over many short ones.
+# The suffix is how the pair is found, DERIVED from the names the binary declared rather than
+# written down here — a table of pairs is a table that stops matching the day a workload is
+# renamed, and stops silently, because a note that does not fire looks exactly like a note that
+# had nothing to say. `tokora-icount/src/workloads.rs` explains what the two depths are for.
+SHALLOW_SUFFIX = "_shallow"
+
 # `Perf-accept: <workload> +<pct>% <reason>`
 ACCEPT_RE = re.compile(
     r"^\s*Perf-accept:\s*(?P<workload>[A-Za-z0-9_]+)\s*\+?(?P<pct>[0-9]+(?:\.[0-9]+)?)\s*%"
@@ -136,6 +143,31 @@ def main():
             print(
                 f"\nnote: every axis moved and the `{CONTROL}` control did not. Whatever changed "
                 "is shared by the repetition families and not by the scanner beneath them."
+            )
+
+    # A pair that splits says WHERE the cost is paid, which is the reason the pair exists.
+    verdicts = {r[0]: r[3] > args.threshold for r in rows}
+    for name, failing in sorted(verdicts.items()):
+        if not name.endswith(SHALLOW_SUFFIX):
+            continue
+        deep = name[: -len(SHALLOW_SUFFIX)]
+        if deep not in verdicts or failing == verdicts[deep]:
+            continue
+        if failing:
+            print(
+                f"\nnote: `{name}` moved past the threshold and `{deep}` did not. They parse the "
+                "same elements through the same engine and differ only in how many collections "
+                "those elements are spread over, so a cost that reads on the shallow row alone is "
+                "paid once per COLLECTION rather than once per element — the shape a consolidation "
+                "into shared engines produces, and the shape a deep source amortises away."
+            )
+        else:
+            print(
+                f"\nnote: `{deep}` moved past the threshold and `{name}` did not. A per-element "
+                "cost reads slightly higher on the deep row, whose per-iteration total is the "
+                "smaller of the two; and where the pair is a bounded axis, the deep source is "
+                "also the only half whose groups reach their limit, so the `TooMany` "
+                "short-circuit is reached there and nowhere else."
             )
 
     if args.summary:
