@@ -4,6 +4,8 @@
 
 use core::convert::Infallible;
 
+use std::{format, vec, vec::Vec};
+
 use super::{Harness, OwnedChunks, SameAllocation};
 use crate::{Lexer, SimpleSpan, Token};
 
@@ -3179,6 +3181,7 @@ impl<'a, const MODE: u8> Lexer<'a> for FloatLexer<'a, MODE> {
 }
 
 type NanPayloadLexer<'a> = FloatLexer<'a, OWN_BYTE>;
+#[cfg(feature = "std")]
 type DriftingFloatLexer<'a> = FloatLexer<'a, LAST_BYTE>;
 
 #[test]
@@ -3231,6 +3234,7 @@ fn a_nan_payload_is_diagnosed_at_the_prefix_comparison() {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_reflexive_payload_of_the_same_type_still_fails_the_ordinary_way() {
   // THE CONTROL, and the whole point of it: same payload type, same lexer shape, same source
   // length, genuinely non-conforming — its payload is read off the end of the buffer — and never
@@ -3642,6 +3646,7 @@ fn an_error_payload_that_moves_between_two_integration_schedules_is_falsified() 
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_span_divergence_at_this_tier_is_still_reported_the_way_it_always_was() {
   // The control for the extension, and the reason this is not a rewrite: the tier compares MORE
   // than it did, and it must say exactly what it always said about a divergence the span decided.
@@ -3806,6 +3811,7 @@ impl<'a> Lexer<'a> for NanErrFlipLexer<'a> {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_discriminant_divergence_is_reported_even_when_a_payload_will_not_compare() {
   // THE COUNTEREXAMPLE. `"abz"` at split k=2: the complete parse has `NTok@0..1` and the prefix
   // `"ab"` yields `LexerError(0..1, FErr(NaN))`. The two sides are not the same ARM, so the
@@ -3837,6 +3843,7 @@ fn a_discriminant_divergence_is_reported_even_when_a_payload_will_not_compare() 
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_divergence_the_span_decided_is_reported_beside_a_payload_that_will_not_compare() {
   // The counterexample's second shape, and the one that says the rule is about the OPERATION
   // rather than about the discriminant alone: both sides are tokens, the payloads are `NaN` on
@@ -4022,6 +4029,7 @@ fn purity_harness<'a>() -> crate::conformance::cache::CacheHarness<
 }
 
 /// The message a panic carried, or a failure saying the kit did not panic at all.
+#[cfg(feature = "std")]
 fn panic_message(f: impl FnOnce() + std::panic::UnwindSafe) -> String {
   let panicked = std::panic::catch_unwind(f).expect_err("the purity law must fail here");
   panicked
@@ -4031,6 +4039,7 @@ fn panic_message(f: impl FnOnce() + std::panic::UnwindSafe) -> String {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_prefilled_impurity_the_prefix_decided_is_not_withheld_over_a_nan_the_appended_run_holds() {
   // THE COUNTEREXAMPLE. The prefix already proves `peek` impure and its divergence is settled by
   // the SPAN, which is reflexive — so that half's probe says nothing. The appended pair is not
@@ -4064,6 +4073,7 @@ fn a_prefilled_impurity_the_prefix_decided_is_not_withheld_over_a_nan_the_append
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_nan_in_the_appended_pair_that_actually_decided_is_still_refused() {
   // CONTROL 1, the appended half: the same fabricated `NaN`, with the prefix now reproduced
   // exactly. Nothing else decided, so the token payload is what the verdict rests on and the
@@ -4089,6 +4099,7 @@ fn a_nan_in_the_appended_pair_that_actually_decided_is_still_refused() {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_nan_in_the_prefix_pair_that_actually_decided_is_still_refused() {
   // CONTROL 1, the prefix half — the same rule on the other side of the decision, which is what
   // pins the two halves to their own labels. The spans agree here, so the token payload is what
@@ -4114,6 +4125,7 @@ fn a_nan_in_the_prefix_pair_that_actually_decided_is_still_refused() {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_prefix_impurity_with_reflexive_payloads_throughout_still_reds_the_ordinary_way() {
   // CONTROL 2: nothing here is non-reflexive, and the cache is genuinely impure on the prefix.
   // The ordinary `pure-peek` failure is the whole point of the law and must survive the repair.
@@ -4140,6 +4152,7 @@ fn a_prefix_impurity_with_reflexive_payloads_throughout_still_reds_the_ordinary_
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn an_appended_decided_impurity_is_reported_as_appended_and_not_as_the_prefix() {
   // CONTROL 3, and it pulls against the other two: a repair that always blamed the prefix would
   // pass the counterexample and control 2 while replacing one misattribution with another. The
@@ -4282,6 +4295,7 @@ fn float_item(
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn an_extra_item_outranks_a_non_reflexive_payload_at_position_zero() {
   // THE FINDING. `[Tok(NaN)]` against `[Tok(NaN), Tok(0.0)]`: identical kind, span and slice at
   // position 0, so only the payload can decide there — and it cannot decide anything, because
@@ -4325,6 +4339,7 @@ fn a_non_reflexive_payload_with_nothing_conclusive_anywhere_is_still_refused() {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn an_ordinary_divergence_over_reflexive_payloads_keeps_its_component_and_its_wording() {
   // CONTROL 2. The ordinary case is a caller `PartialEq` over two values that are BOTH self-equal
   // — the whole population of honest failures — and ranking must not demote it to a fallback. It
@@ -4353,6 +4368,7 @@ fn an_ordinary_divergence_over_reflexive_payloads_keeps_its_component_and_its_wo
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_conclusive_difference_later_in_the_stream_is_found_and_not_only_one_at_the_same_position() {
   // CONTROL 3, and it pulls a third way: a repair that only looked at the REST OF THE SAME ITEM
   // would pass the finding and control 1 and still stop at the first position that differs. The
@@ -4456,17 +4472,21 @@ fn a_purity_run_length_outranks_a_non_reflexive_entry_at_a_shared_position() {
 /// This is the brief's own falsifier and it is a legal, compiling implementation of the
 /// [`Slice`](crate::Slice) bound: nothing in the trait system, and nothing in this kit before
 /// now, asks whether the promise `Eq` makes is kept.
+#[cfg(feature = "std")]
 #[derive(Clone, Copy, Debug)]
 struct LyingSlice<'a>(&'a str);
 
+#[cfg(feature = "std")]
 impl PartialEq for LyingSlice<'_> {
   fn eq(&self, _: &Self) -> bool {
     false
   }
 }
 
+#[cfg(feature = "std")]
 impl Eq for LyingSlice<'_> {}
 
+#[cfg(feature = "std")]
 impl<'source> crate::Slice<'source> for LyingSlice<'source> {
   type Char = char;
   type Iter<'a>
@@ -4497,9 +4517,11 @@ impl<'source> crate::Slice<'source> for LyingSlice<'source> {
 
 /// A `str`-backed source whose slices are [`LyingSlice`]s. Everything else about it is `str`'s
 /// own behaviour.
+#[cfg(feature = "std")]
 #[derive(Debug)]
 struct LyingSliceSource(&'static str);
 
+#[cfg(feature = "std")]
 impl crate::Source<usize> for LyingSliceSource {
   type Slice<'source>
     = LyingSlice<'source>
@@ -4534,6 +4556,7 @@ impl crate::Source<usize> for LyingSliceSource {
 
 /// A per-character lexer over [`LyingSliceSource`], conforming in everything the contract names.
 /// The only thing wrong anywhere near it is the caller's own slice equality.
+#[cfg(feature = "std")]
 struct LyingSliceLexer<'a> {
   src: &'a LyingSliceSource,
   start: usize,
@@ -4541,6 +4564,7 @@ struct LyingSliceLexer<'a> {
   state: (),
 }
 
+#[cfg(feature = "std")]
 impl<'a> Lexer<'a> for LyingSliceLexer<'a> {
   type State = ();
   type Source = LyingSliceSource;
@@ -4600,6 +4624,7 @@ impl<'a> Lexer<'a> for LyingSliceLexer<'a> {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_slice_that_will_not_equal_itself_is_refused_and_not_blamed_on_the_lexer() {
   // THE FALSIFIER round 4's exemption had to survive, and it does not. Before this the kit said
   // "[input #0 span/slice-coherence] position 0: slice() disagrees with the source at span 0..1:
@@ -4617,6 +4642,7 @@ fn a_slice_that_will_not_equal_itself_is_refused_and_not_blamed_on_the_lexer() {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn an_honest_slice_that_genuinely_disagrees_still_reds_span_slice_coherence() {
   // The control, and the one that keeps the guard from trading a false red for a false green: a
   // lexer whose `slice()` really does disagree with its own span, over a slice type that equals
@@ -4818,6 +4844,7 @@ fn lying_offset_items(src: &LyingOffsetSource) -> Vec<super::Item<'_, LyingOffse
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_read_frontier_that_will_not_equal_itself_is_refused_and_not_blamed_on_the_lexer() {
   // Before: "[input #0 read-frontier] position 0: read_frontier() changed between calls: first
   // read ReadTo(LyingOffset(1)), probe #0 read ReadTo(LyingOffset(1))" — a purity accusation over
@@ -4835,6 +4862,7 @@ fn a_read_frontier_that_will_not_equal_itself_is_refused_and_not_blamed_on_the_l
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_span_that_will_not_equal_itself_is_refused_after_exhaustion_too() {
   // Before: "[input #0 span-survives-exhaustion] span() changed after exhaustion: first read
   // 2..2, probe #0 read 2..2". The clause this enforces is read by a refill driver, so the red it
@@ -4852,6 +4880,7 @@ fn a_span_that_will_not_equal_itself_is_refused_after_exhaustion_too() {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn an_offset_that_will_not_equal_itself_is_refused_by_the_tiling_law() {
   // Before: "[input #0 lossless] position 0: first span 0..1 does not start at 0" — a tiling
   // accusation over an offset that IS zero. Gap-free tiling is four `Offset` equalities and every
@@ -4883,6 +4912,7 @@ fn an_honest_lexer_over_the_same_lying_offset_type_is_not_what_any_of_this_rejec
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn the_cache_kits_span_valued_laws_are_shadowed_by_its_entry_comparison_today() {
   // **This cell is NOT differential for the residue, and says so on purpose.** The cache kit's
   // eleven span-valued comparisons are guarded now, and with a wholly-lying `L::Span` not one of
@@ -5004,6 +5034,7 @@ impl<'a> Lexer<'a> for MixedArmLexer<'a> {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_raised_error_divergence_is_not_withheld_over_a_nan_the_committed_arm_holds() {
   // The integration tier's two arms are one verdict, and they were two `assert` calls in a fixed
   // order — so a committed-token divergence a `NaN` decided withheld a raised-error divergence a
@@ -5060,6 +5091,7 @@ fn a_committed_arm_nan_with_a_reproduced_error_arm_is_still_refused() {
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_prefilled_impurity_the_appended_run_decided_is_not_withheld_over_a_nan_in_the_prefix() {
   // THE COUNTEREXAMPLE'S MIRROR, and the third level the same finding lives at. The existing cell
   // above runs the other way — a conclusive prefix and a `NaN` in the appended run — and passed
@@ -5092,6 +5124,7 @@ fn a_prefilled_impurity_the_appended_run_decided_is_not_withheld_over_a_nan_in_t
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn one_side_that_will_not_equal_itself_is_enough_to_make_a_difference_inconclusive() {
   // Pins the AND in `Decided::is_conclusive`. Reflexivity is asked of both sides and either one
   // failing makes the comparison unusable: `NaN != 2.0` is `false` for two reasons at once and
@@ -5117,6 +5150,7 @@ fn one_side_that_will_not_equal_itself_is_enough_to_make_a_difference_inconclusi
 }
 
 #[test]
+#[cfg(feature = "std")]
 fn a_later_component_of_the_same_item_outranks_an_earlier_one_the_kit_cannot_use() {
   // The ranking inside ONE item, which the stream cells cannot reach: `LyingKind` is consulted
   // first and decides nothing — it answers `false` to every comparison, its own included — while
