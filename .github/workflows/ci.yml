@@ -23,6 +23,20 @@ name: CI
 #     bash ci/name_collision/run.sh <merge-base> <inventory.json>   # see that job for the
 #                                                                  # inventory it requires
 #
+# And one line that is LINUX-ONLY, so it is not in the set above and is not expected to have been
+# run before a push from a mac:
+#
+#     bash ci/icount/run.sh --self          # needs valgrind; unusable on current macOS/arm64
+#
+# Its self-test is NOT Linux-only and belongs in the set above; it needs only python3 and runs in
+# about a second:
+#
+#     bash ci/icount/compare_selftest.sh
+#
+# It is the instruction-count gate's own noise floor — the same commit built and measured twice —
+# and it is what the `icount` job's threshold rests on. Dispatching this workflow on `main` runs
+# exactly that comparison on a runner, which is the way to re-check it without a Linux box.
+#
 # Two of those lines carry a package selection that is not decoration. The workspace declares
 # `default-members = ["tokora"]` — see the root `Cargo.toml` for why — so a bare `cargo clippy`
 # or `cargo bench` at the root does NOT see `tokora-benches`, the member the five benches moved
@@ -73,13 +87,26 @@ name: CI
 # `cargo metadata --no-deps`'s, and every "linted by" below was counted off the
 # `--message-format=json` artifact stream, not inferred from a flag's name.
 #
-# There is a SECOND axis now, and it is the same shape: since #216 the workspace has two members
-# and `default-members = ["tokora"]`, so a job that names no package sees tokora's targets and
-# not `tokora-benches`'s. The counts below are tokora's unless the row says otherwise.
+# There is a SECOND axis now, and it is the same shape: since #216 the workspace has more than one
+# member and `default-members = ["tokora"]`, so a job that names no package sees tokora's targets
+# and NEITHER of the other two members'. The counts below are tokora's unless the row says
+# otherwise. The members are `tokora`, `tokora-benches` (criterion; #216) and `tokora-icount`
+# (the instruction-count workloads, reached only by the `icount` job) — and the reason there are
+# three rather than two is written in `tokora-icount/Cargo.toml`: criterion is a dev-dependency of
+# `tokora-benches`, and the instrument that has to be built against an OLDER `tokora` cannot
+# afford one.
 #
 #   * **lib** (1) — built by nearly every job. Clippy-linted by `clippy` and `hack-clippy`; run
 #     as a unittest by `test`, `test-valve-off`, `test-release`, `no-std` and `coverage`.
-#   * **bins** (0) — none declared. `--all-targets` on the `clippy` line carries any that appear.
+#   * **bins** (0 in tokora; 1 in `tokora-icount`) — tokora declares none. `--all-targets` on the
+#     `clippy` line carries any that appear, and `--workspace` is what puts `tokora-icount`'s in
+#     front of it. That bin is a `[[bin]]` and NOT a `[[bench]]` on purpose: `bench (smoke)` runs
+#     every declared bench target, and a bench that needs valgrind to mean anything would either
+#     be run there without it or be missed by it. It is built by the `icount` job, which names it.
+#
+#     Note the shape this leaves: `cargo clippy --workspace --all-targets` is the ONLY line that
+#     compiles `tokora-icount` outside the `icount` job. A `cargo build` at the root does not —
+#     `default-members` — and neither does any test job.
 #   * **custom-build** (1, `tokora/build.rs`) — built by every job that builds the crate, and it
 #     IS clippy-linted, which is worth knowing because no `--<kind>` flag names it: it rides
 #     along with the package. Confirmed by injecting a `clippy::len_zero` into it and watching
@@ -908,7 +935,12 @@ jobs:
   # silently disappearing. Raise the floor when a bench is added.
   #
   # NOT a timed regression gate: GitHub runners are far too noisy for the ±2% discipline these
-  # benches are held to locally, so regression numbers are gathered off-CI.
+  # benches are held to locally, so regression numbers are gathered off-CI. The `icount` job
+  # below is the regression gate that a runner CAN carry — it counts instructions rather than
+  # seconds, over the repetition combinators only. The two are not substitutes: these five
+  # benches cover surfaces `tokora-icount` does not touch at all (the scanner protocol, the
+  # typed pratt driver, the CST builder, the raw checkpoint triple), and they measure the thing
+  # a user feels. Adding a bench here does not add an axis there, and vice versa.
   bench-smoke:
     name: bench (smoke)
     runs-on: ubuntu-latest
@@ -966,6 +998,122 @@ jobs:
           for n in "${names[@]}"; do args+=(--bench "$n"); done
           echo "bench (smoke): ${#names[@]} named targets — ${names[*]}"
           cargo bench -p tokora-benches "${args[@]}" -- --test
+
+  # ── Gate: instruction counts over the repetition matrix ─────────────────────
+  #
+  # `bench (smoke)` above says why the criterion benches are not a regression gate: a GitHub
+  # runner's wall clock is far too noisy for the ±2% discipline those benches are held to. This
+  # job is the other half of that sentence. It measures the same repetition engines with an
+  # instrument that has NO noise — callgrind counts the instructions a binary executes, which is
+  # a property of the binary and not of the machine it ran on, so a loaded runner and an idle one
+  # return the same number.
+  #
+  # It exists because #259 consolidates 259 files and 338 `impl` blocks of
+  # `tokora/src/parser/many` into shared engines, under a requirement that performance be
+  # unchanged. That matrix exists BECAUSE each combination is monomorphised, so consolidating it
+  # is exactly the shape that loses inlining — and "did we lose inlining" is what an instruction
+  # count directly answers. The criterion benches cannot: the repetition engine is a third to a
+  # half of each of them and their run-to-run spread is 4.3-4.8%, so the smallest engine
+  # regression they can distinguish from noise is around 9-10%. This gate sees 1%.
+  #
+  # ── WHY THERE IS NO COMMITTED BASELINE ─────────────────────────────────────────────────────
+  #
+  # Both sides are built and measured inside this one job, on this one runner, with this one
+  # toolchain. `ci/icount/run.sh`'s header carries the argument in full; the short form is that
+  # instruction counts are deterministic GIVEN a toolchain and drift on every rustc upgrade, std
+  # change and dependency bump. A checked-in baseline turns each of those into a red gate for a
+  # change nobody made, and a gate that reds for reasons nobody caused is a gate that gets
+  # disabled — which is strictly worse than never building it. A same-run A/B cancels the drift
+  # because both sides meet the same compiler.
+  #
+  # ── REQUIRED, NOT ADVISORY ─────────────────────────────────────────────────────────────────
+  #
+  # A failure here reds the run, and the run's conclusion is what a merge waits for. The usual
+  # reason to start a performance gate advisory is that it is expected to false-positive; this
+  # one structurally cannot, because the self-comparison — the same commit built twice and
+  # measured twice — comes back at exactly zero difference on every workload. An advisory perf
+  # job is a job nobody reads.
+  #
+  # What it costs is that a DELIBERATE trade needs a way through, or the gate's first collision
+  # with one gets resolved by deleting the gate. The way through is a `Perf-accept:` trailer in a
+  # commit on the branch; `run.sh` harvests them from `$merge_base..HEAD`, so an acceptance
+  # licenses the commits it travels with and is gone from the next branch's range. It cannot
+  # silently become a standing allowance for a workload the way a checked-in exemption file
+  # would — which against a merge-base comparison that resets every time is an unbounded
+  # allowance written as a bounded one. `compare.py` prints the exact trailer to add when it
+  # fails, and refuses one that carries no reason.
+  #
+  # ── THE SELF-TEST RUNS FIRST, AND IS NOT OPTIONAL ──────────────────────────────────────────
+  #
+  # `measure.py` is watched by its own reading: a broken callgrind parse gives an absurd number
+  # or none at all, and `--linearity` refuses to report on a curve that is not a line. The
+  # DECISION logic has no such witness — a `compare.py` that returned 0 on everything would
+  # leave this job green, the table printed, the numbers right, and the gate off. So
+  # `ci/icount/compare_selftest.sh` runs before anything is built, over synthetic readings, in
+  # about a second. It has been watched going red rather than merely written: degenerating the
+  # acceptance ceiling into "a trailer exists" reds one case, and short-circuiting the verdict
+  # to pass reds three.
+  #
+  # ── PULL REQUESTS ONLY, AND NO PATH FILTER ─────────────────────────────────────────────────
+  #
+  # `pull_request` is where a merge-base is defined. Every commit that reaches `main` came
+  # through a PR this job already examined, so running it again on the push adds a second reading
+  # of the same delta — and on a squash merge it would have to find the branch's `Perf-accept:`
+  # trailers inside a message GitHub composed, which is a way for `main` to go red over
+  # bookkeeping. `workflow_dispatch` is kept: dispatching this workflow ON `main` makes HEAD its
+  # own merge-base, which runs the self-comparison and re-checks the zero the threshold rests on.
+  #
+  # There is deliberately NO `paths:` filter narrowing this to `tokora/src/parser/**`. The
+  # repetition engines are generic over the lexer, the emitter, the container and `InputRef`, and
+  # they are `#[inline]`-heavy across all four: a change in `tokora/src/input/`, `src/lexer/`,
+  # `src/container/`, `src/emitter/` or a dependency requirement in `tokora/Cargo.toml` can cost
+  # them their inlining without touching a file under `parser/many/`. A filter narrower than the
+  # code a gate protects is the defect this repository has hit six times (#181, #195, #200, #208,
+  # #217, #220), and it would exempt exactly the regressions that are hardest to attribute.
+  icount:
+    name: instruction counts
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Both revisions are read out of this clone with `git archive`, and the merge-base is
+          # computed here rather than taken from the event payload — see `run.sh`. A shallow
+          # clone has neither.
+          fetch-depth: 0
+      - name: compare.py self-test, before anything is built
+        run: bash ci/icount/compare_selftest.sh
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          # The registry only. The two target directories live under `RUNNER_TEMP` and are
+          # deliberately not cached: a restored artefact from another toolchain is the one thing
+          # that could make the two sides of this comparison differ for a reason that is not the
+          # branch.
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-icount-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-icount-
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: Install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind
+          valgrind --version
+      - name: Instruction counts, this branch against its merge-base
+        run: bash ci/icount/run.sh "${{ github.event.pull_request.base.sha || 'origin/main' }}"
+      - name: Upload both sides' readings
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          # The head side's file is the per-axis baseline #259 starts from, so it is kept
+          # whether the job passed or failed.
+          name: icount-readings
+          path: ${{ runner.temp }}/icount/*.json
+          if-no-files-found: warn
 
   # ── Gate: cross-compile smoke across extra platforms ────────────────────────
   cross:
@@ -1033,14 +1181,22 @@ jobs:
           key: ${{ runner.os }}-coverage-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-coverage-
-      # `--exclude tokora-benches` keeps the measured package set exactly what `--workspace` meant
-      # before #216, when `tokora` was the only member. The bench package has no tests and no
-      # library — instrumenting it would add criterion to this job's build for zero covered
-      # lines. `--workspace --exclude <name>` rather than `-p tokora` on purpose: a third member
-      # added later is covered by default and has to be excluded deliberately, where a `-p` list
-      # would silently omit it.
+      # The two exclusions keep the measured package set exactly what `--workspace` meant before
+      # #216, when `tokora` was the only member. `--workspace --exclude <name>` rather than
+      # `-p tokora` on purpose: a member added later is covered BY DEFAULT and has to be
+      # excluded deliberately, where a `-p` list would silently omit it. That is what happened
+      # when `tokora-icount` arrived — this line picked it up with no other edit, which is the
+      # design working, and the decision it forced is recorded here rather than made silently.
+      #
+      #   * `tokora-benches` has no tests and no library, so instrumenting it would add criterion
+      #     to this job's build for zero covered lines.
+      #   * `tokora-icount` has no tests and no library either, and its lines are executed only
+      #     under valgrind by the `icount` job — never by anything `llvm-cov` drives. Including
+      #     it would add ~800 permanently-uncovered lines and make the reported figure a
+      #     function of the instrument's SIZE rather than of the library's tested surface. A
+      #     future member that carries real tests should NOT be added to this list.
       - name: Generate coverage with llvm-cov
-        run: cargo llvm-cov --all-features --workspace --exclude tokora-benches --doctests --lcov --output-path lcov.info
+        run: cargo llvm-cov --all-features --workspace --exclude tokora-benches --exclude tokora-icount --doctests --lcov --output-path lcov.info
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v7
         with:

@@ -1,0 +1,83 @@
+[package]
+name = "tokora-icount"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "tokora's instruction-count workloads over the repetition matrix. Not published; carries no measurement framework of its own so that it can be built on either side of a comparison."
+
+# ── WHY THIS IS A THIRD PACKAGE AND NOT A TARGET IN `tokora-benches` ────────────────────────
+#
+# Two independent reasons, and each on its own is sufficient.
+#
+# **The `alloca` hazard.** `tokora-benches/Cargo.toml`'s header records what a dev-dependency
+# costs: `criterion` pulls `alloca`, whose cc-rs build script hands the host `cc` an
+# `-arch x86_64 -mmacosx-version-min=10.7` that a Linux `cc` rejects, so any package with
+# criterion in `[dev-dependencies]` cannot have its targets built for an apple target from
+# Linux — and `cargo miri test --target x86_64-apple-darwin --test span` died in `alloca`
+# before Miri ran (#216). Cargo has no optional dev-dependency, so the package boundary is
+# the mechanism. Putting the instruction-count workloads in `tokora-benches` would put
+# criterion — and `alloca` — back in front of every command that builds them. This package's
+# `[dev-dependencies]` is EMPTY and stays that way; the reason there is no measurement
+# framework here at all is the next paragraph.
+#
+# **The instrument has to be buildable against an OLDER `tokora`.** `ci/icount/run.sh` builds
+# this package twice — once against the branch's `tokora/`, once against the merge-base's —
+# and the two counts are only comparable if the harness is byte-for-byte the same code both
+# times. Every dependency this package acquires is a dependency that has to resolve, compile
+# and behave identically on both sides. So it has none beyond `tokora` itself: no criterion,
+# no `iai-callgrind`, no timing crate. The binary takes a workload name and an iteration
+# count on argv, runs the loop, prints a checksum, and exits. Everything that counts
+# instructions lives OUTSIDE the compiled artefact, in valgrind.
+#
+# ── AND WHY IT IS A `[[bin]]` AND NOT A `[[bench]]` ─────────────────────────────────────────
+#
+# `bench (smoke)` in `.github/workflows/ci.yml` derives its target list from `cargo metadata`
+# and runs every `[[bench]]` in `tokora-benches` with `-- --test`. A `[[bench]]` here would
+# either be missed by that job (a bench nothing builds — #181's shape) or picked up by it and
+# run without valgrind, where it measures nothing and merely burns a minute. A `[[bin]]` is
+# reached by exactly the thing that needs it: `cargo build -p tokora-icount --release`, from
+# `ci/icount/run.sh`. `--benches` against this package matches nothing, and that is correct.
+
+[dependencies]
+# The same feature point `tokora-benches` pins, minus what these workloads do not name.
+# `default-features = false` so the set is the one written here rather than that plus
+# whatever `default` happens to carry, and so that a change to tokora's `default` cannot move
+# a number this package reports.
+#
+# `combinators` is the umbrella that carries `many` — the repetition families under
+# `tokora/src/parser/many/`, which is the whole subject of this package. `logos` supplies the
+# lexer the workloads drive, and `std` is what `Vec` and the process's own `println!` need.
+# NOT `rowan`, NOT `unstable-raw`, NOT `trace`: nothing here names them, and every feature
+# that is on is more code for both sides of a comparison to compile.
+tokora = { path = "../tokora", default-features = false, features = [
+  "std",
+  "logos",
+  "combinators",
+] }
+
+# `src/workloads.rs` names `generic_arraydeque::typenum::U1` directly, to size the peek window
+# the `*_while` families' `Decision` callback is handed. It is a public dependency of tokora —
+# the window type appears in tokora's own signatures — and the requirement here is the same
+# `0.2` with the same features, so cargo resolves ONE copy and the typenum types match.
+generic-arraydeque = { version = "0.2", default-features = false, features = ["unstable"] }
+
+# `logos` itself is NOT a dependency: the workloads reach it as `tokora::logos`, the re-export
+# tokora publishes for whichever logos major its features select, and the `#[logos(crate =
+# logos)]` attribute resolves against that import. Depending on logos here would let this
+# package's copy drift from the one tokora derives against — and on the base side of a
+# comparison, "the two sides linked different logos versions" would read as a regression.
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tokora-icount"
+path = "src/main.rs"
+
+# The workloads are measured under callgrind, which reports what the CPU would retire — so the
+# codegen has to be the codegen that ships. `[profile.bench]` in the root manifest is the one
+# the criterion benches are held to; `ci/icount/run.sh` builds this bin with
+# `--profile bench` so the two instruments agree on optimisation level, LTO and codegen-units,
+# and a number here means the same thing a number there does.

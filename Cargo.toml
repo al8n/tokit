@@ -2,6 +2,7 @@
 members = [
   "tokora",
   "tokora-benches",
+  "tokora-icount",
 ]
 
 # ── WHY `default-members` IS NOT THE MEMBER LIST ────────────────────────────────────────────
