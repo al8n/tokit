@@ -67,7 +67,7 @@ red the day this section became `0.9.0`. `ci/changelog_structure.sh` enforces ev
 and will red until they do.
 -->
 
-## Unreleased
+## 0.10.0 (2026-08-29)
 
 ### Added
 
