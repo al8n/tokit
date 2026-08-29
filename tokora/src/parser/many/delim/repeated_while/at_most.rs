@@ -53,3 +53,99 @@ where
       .map(|(_, collected)| collected)
   }
 }
+
+/// The **spanned owning** destination: the container and the construct's span together.
+///
+/// One of the two contracts this family did not implement until
+/// [#259](https://github.com/al8n/tokora/issues/259)'s stage 3.
+impl<'inp, L, P, O, Condition, Container, Ctx, Delim, W, Lang: ?Sized>
+  ParseInput<'inp, L, Spanned<Container, L::Span>, Ctx, Lang>
+  for Collect<
+    DelimitedBy<AtMost<RepeatedWhile<P, Condition, O, W, L, Ctx, Lang>>, Delim>,
+    Container,
+    Ctx,
+    Lang,
+  >
+where
+  Delim: Delimiter<'inp, L, Lang>,
+  L: Lexer<'inp>,
+  P: ParseInput<'inp, L, O, Ctx, Lang>,
+  Condition: Decision<'inp, L, Ctx::Emitter, W, Lang>,
+  W: Window,
+  Ctx: ParseContext<'inp, L, Lang>,
+  Ctx::Emitter: FullContainerEmitter<'inp, L, Lang>
+    + TooManyEmitter<'inp, L, Lang>
+    + UnclosedEmitter<'inp, L, Lang>,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
+  Container: Default + ContainerT<O> + DelimiterHandler<'inp, L>,
+{
+  fn parse_input(
+    &mut self,
+    inp: &mut InputRef<'inp, '_, L, Ctx, Lang>,
+  ) -> Result<Spanned<Container, L::Span>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+  where
+    L: Lexer<'inp>,
+    Ctx: ParseContext<'inp, L, Lang>,
+  {
+    let maximum = self.parser.parser.maximum();
+
+    self
+      .attempt(|c| {
+        let Collect {
+          parser, container, ..
+        } = c;
+        DelimitedBy::<_, Delim>::new(parser.parser.parser_mut()).parse_repeated(
+          inp,
+          container,
+          &maximum,
+          |_, _, _| Ok(()),
+        )
+      })
+      .map(|(span, collected)| Spanned::new(span, collected))
+  }
+}
+
+/// The **borrowed** destination: the caller keeps the storage, so it can read what the construct
+/// admitted on the **failure** arm too, which the owning form cannot expose.
+///
+/// The second contract this family did not implement until
+/// [#259](https://github.com/al8n/tokora/issues/259)'s stage 3.
+impl<'inp, 'c, L, P, O, Condition, Container, Ctx, Delim, W, Lang: ?Sized>
+  ParseInput<'inp, L, L::Span, Ctx, Lang>
+  for Collect<
+    &'c mut DelimitedBy<AtMost<RepeatedWhile<P, Condition, O, W, L, Ctx, Lang>>, Delim>,
+    &'c mut Container,
+    Ctx,
+    Lang,
+  >
+where
+  Delim: Delimiter<'inp, L, Lang>,
+  L: Lexer<'inp>,
+  P: ParseInput<'inp, L, O, Ctx, Lang>,
+  Condition: Decision<'inp, L, Ctx::Emitter, W, Lang>,
+  W: Window,
+  Ctx: ParseContext<'inp, L, Lang>,
+  Ctx::Emitter: FullContainerEmitter<'inp, L, Lang>
+    + TooManyEmitter<'inp, L, Lang>
+    + UnclosedEmitter<'inp, L, Lang>,
+  <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
+  Container: ContainerT<O> + DelimiterHandler<'inp, L>,
+{
+  fn parse_input(
+    &mut self,
+    inp: &mut InputRef<'inp, '_, L, Ctx, Lang>,
+  ) -> Result<L::Span, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+  where
+    L: Lexer<'inp>,
+    Ctx: ParseContext<'inp, L, Lang>,
+  {
+    let maximum = self.parser.parser.maximum();
+
+    DelimitedBy::<_, Delim>::new(self.parser.parser.parser_mut()).parse_repeated(
+      inp,
+      &mut self.container,
+      &maximum,
+      |_, _, _| Ok(()),
+    )
+  }
+}

@@ -749,18 +749,16 @@ variants! {
 // ── The borrowed destination ──────────────────────────────────────────────────
 //
 // `Collect<&mut _, &mut Container>` is the other ownership contract: the caller keeps the
-// storage and can read it on the **failure** arm, which the owning form cannot expose. Six of the
-// eight drivers implement it; `delim/repeated` and `delim/repeated_while` implement only the
-// owning form, so they have no row here. That asymmetry is a fact about the crate rather than a
-// gap in this file, and it is the reason the main table above is the owning one. #259 stage 2
-// found it **incidental** rather than forced — `sep/delim` and `sep_while/delim` are delimited
-// too and implement the borrowed contract — so these rows return when those two drivers do.
+// storage and can read it on the **failure** arm, which the owning form cannot expose. **All
+// eight** drivers implement it. Two of them did not until #259 stage 3: `delim/repeated` and
+// `delim/repeated_while` implemented only the owning form, and stage 2 found that **incidental**
+// rather than forced — `sep/delim` and `sep_while/delim` are delimited too and implement the
+// borrowed contract — so the rows returned when those two drivers did.
 //
-// The count is twenty-four against the main table's forty-eight, and the two subtractions are
-// different in kind. Fourteen rows are the two drivers above, which have no borrowed impl to
-// drive. The other ten are the `exact2*` spellings: three construction paths to one cardinality
-// is A2's subject, and relating them through a second ownership contract asks nothing A2 and A5
-// do not already ask separately.
+// The count is thirty-two against the main table's forty-eight, and the sixteen missing rows are
+// all one kind now: the `exact2*` spellings. Three construction paths to one cardinality is A2's
+// subject, and relating them through a second ownership contract asks nothing A2 and A5 do not
+// already ask separately.
 
 /// One row of the borrowed-destination table.
 struct Borrowed {
@@ -875,6 +873,26 @@ borrowed_variants! { te, pe => {
       .delimited::<Bracket<(), (), ()>>();
   b_dsepw_bnd13: Comma true ~ dsepw_bnd13 =
     (&mut pe).separated_by_comma_while::<_, U1>(decide_num::<Ctx<'_>>).bounded(1, 3)
+      .delimited::<Bracket<(), (), ()>>();
+
+  b_drep_unb: Space true ~ drep_unb = te.repeated().delimited::<Bracket<(), (), ()>>();
+  b_drep_min2: Space true ~ drep_min2 =
+    te.repeated().at_least(2).delimited::<Bracket<(), (), ()>>();
+  b_drep_max2: Space true ~ drep_max2 =
+    te.repeated().at_most(2).delimited::<Bracket<(), (), ()>>();
+  b_drep_bnd13: Space true ~ drep_bnd13 =
+    te.repeated().bounded(1, 3).delimited::<Bracket<(), (), ()>>();
+
+  b_drepw_unb: Space true ~ drepw_unb =
+    pe.repeated_while::<_, U1>(decide_num::<Ctx<'_>>).delimited::<Bracket<(), (), ()>>();
+  b_drepw_min2: Space true ~ drepw_min2 =
+    pe.repeated_while::<_, U1>(decide_num::<Ctx<'_>>).at_least(2)
+      .delimited::<Bracket<(), (), ()>>();
+  b_drepw_max2: Space true ~ drepw_max2 =
+    pe.repeated_while::<_, U1>(decide_num::<Ctx<'_>>).at_most(2)
+      .delimited::<Bracket<(), (), ()>>();
+  b_drepw_bnd13: Space true ~ drepw_bnd13 =
+    pe.repeated_while::<_, U1>(decide_num::<Ctx<'_>>).bounded(1, 3)
       .delimited::<Bracket<(), (), ()>>();
 }}
 
@@ -1538,8 +1556,10 @@ fn a_delimiter_does_not_change_what_is_collected_inside_it() {
 /// loops that have drifted — the multiplication #259's evidence section describes, in the one
 /// place the crate genuinely writes a driver twice.
 ///
-/// Only the six drivers that implement both contracts have a row; `delim/repeated` and
-/// `delim/repeated_while` implement the owning form alone.
+/// All eight drivers have a row: `delim/repeated` and `delim/repeated_while` implemented the
+/// owning form alone until #259 stage 3 gave them the other two contracts. Each row is also this
+/// file's non-vacuity guard for its borrowed twin — a borrowed path that collected nothing would
+/// disagree with an owning twin that collected, rather than passing every property quietly.
 #[test]
 fn the_owning_and_borrowed_contracts_collect_the_same_elements() {
   let mut r = Report::new(
@@ -1702,7 +1722,7 @@ fn every_declared_driver_has_a_row() {
   );
   assert_eq!(
     BORROWED.len(),
-    24,
+    32,
     "the borrowed-destination table changed size; every row here must name a main-table twin"
   );
   assert_eq!(FIXTURES.len(), 10, "the fixture set changed size");

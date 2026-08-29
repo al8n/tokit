@@ -4,6 +4,25 @@ use crate::input::Complete;
 
 /// A parser that collects results into a container.
 ///
+/// # The three destinations, on every repetition driver
+///
+/// A collection can be asked for its container, for that container paired with the construct's
+/// span, or — when the caller owns the storage — for the span alone:
+///
+/// * `Collect<P, Container>` parsing to `Container`, the owning form;
+/// * `Collect<P, Container>` parsing to [`Spanned<Container, L::Span>`](crate::span::Spanned),
+///   the same transfer with the span beside it;
+/// * `Collect<&mut P, &mut Container>` parsing to `L::Span`, the **borrowed** form. It is the only
+///   one that leaves the caller holding the container on the **failure** arm, so it is how a
+///   partially-parsed collection is inspected after an error.
+///
+/// All three are available on every repetition driver — plain and separated, `while` and not,
+/// delimited and not. The separated families add a fourth arrangement for their separator
+/// policies. `tokora/tests/repetition_behavioural_matrix.rs`'s
+/// `the_owning_and_borrowed_contracts_collect_the_same_elements` holds the owning and borrowed
+/// forms to the same collection over every driver, and
+/// `a_failed_borrowed_attempt_holds_only_what_it_parsed` is what the borrowed one exists for.
+///
 /// # Where the input rests, and what the reported span therefore covers
 ///
 /// The span this combinator hands back — directly, as the `L::Span` of a borrowed collection, and
