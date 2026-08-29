@@ -331,6 +331,11 @@
 //! [pratt]: tokora::parser::pratt
 //! [`InputRef::pratt`]: tokora::InputRef::pratt
 
+/// The wall-clock regression gate's measurement window, shared by all five bench binaries.
+/// A no-op unless `ci/wallclock/run.sh` set its environment; see the module for what it
+/// overrides and why it is not the criterion command line.
+mod support;
+
 use core::fmt::Write as _;
 use std::hint::black_box;
 
@@ -1494,6 +1499,7 @@ fn typed_pratt_bench(c: &mut Criterion) {
 
   let mut group = c.benchmark_group("pratt/typed");
   // No `measurement_time`/`warm_up_time` here, deliberately — see the module header.
+  support::gate_overrides(&mut group);
 
   for cell in &cells {
     group.throughput(Throughput::Bytes(cell.src.len() as u64));

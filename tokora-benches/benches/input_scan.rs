@@ -24,6 +24,11 @@
 //! the peek fill's cache-hit exit and its staged overflow region, neither of which any
 //! other id in this repository enters. See that group's own header.
 
+/// The wall-clock regression gate's measurement window, shared by all five bench binaries.
+/// A no-op unless `ci/wallclock/run.sh` set its environment; see the module for what it
+/// overrides and why it is not the criterion command line.
+mod support;
+
 use core::{fmt::Write as _, time::Duration};
 use std::hint::black_box;
 
@@ -280,6 +285,7 @@ fn bench(c: &mut Criterion) {
   group.throughput(Throughput::Bytes(src.len() as u64));
   group.measurement_time(Duration::from_secs(3));
   group.warm_up_time(Duration::from_secs(1));
+  support::gate_overrides(&mut group);
 
   group.bench_function("next_drain", |b| {
     b.iter(|| {
@@ -674,6 +680,7 @@ fn dispatch_bench(c: &mut Criterion) {
   group.throughput(Throughput::Bytes(src.len() as u64));
   group.measurement_time(Duration::from_secs(3));
   group.warm_up_time(Duration::from_secs(1));
+  support::gate_overrides(&mut group);
 
   macro_rules! bench_driver {
     ($name:literal, $driver:ident) => {
@@ -991,6 +998,7 @@ fn peek_probe_bench(c: &mut Criterion) {
   group.throughput(Throughput::Bytes(src.len() as u64));
   group.measurement_time(Duration::from_secs(3));
   group.warm_up_time(Duration::from_secs(1));
+  support::gate_overrides(&mut group);
 
   group.bench_function("r4_peek1_hit8", |b| {
     b.iter(|| {

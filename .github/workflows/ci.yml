@@ -28,10 +28,21 @@ name: CI
 #
 #     bash ci/icount/run.sh --self          # needs valgrind; unusable on current macOS/arm64
 #
-# Its self-test is NOT Linux-only and belongs in the set above; it needs only python3 and runs in
-# about a second:
+# And one that is not Linux-only but is worthless from a developer's machine, which is a
+# different reason to leave it out of the set:
+#
+#     bash ci/wallclock/run.sh --self       # a wall-clock A/B; needs a quiet host to mean anything
+#
+# A laptop running an editor, a browser and three other builds produces a spread that says
+# nothing about the runner the gate will live on, and a threshold derived from it would be a
+# threshold derived from the wrong machine. Dispatch this workflow instead — on `main` that runs
+# exactly this self-comparison, on the host the job actually gets.
+#
+# Both gates' self-tests ARE in the set above: neither is Linux-only, both need only python3, and
+# both run in about a second:
 #
 #     bash ci/icount/compare_selftest.sh
+#     bash ci/wallclock/compare_selftest.sh
 #
 # It is the instruction-count gate's own noise floor — the same commit built and measured twice —
 # and it is what the `icount` job's threshold rests on. Dispatching this workflow on `main` runs
@@ -183,6 +194,18 @@ on:
       - "LICENSE-*"
       - "*.txt"
   workflow_dispatch:
+    inputs:
+      wallclock_plant:
+        description: >-
+          Apply one of ci/wallclock/plants/*.py to the HEAD side of the `wall clock` job's
+          extracted work tree, to watch that gate fire (or correctly not fire). Leave empty for
+          a plain self-comparison, which is what re-derives its threshold.
+          Names a file in that directory without its extension: `cold_line_per_token` is a
+          cache-hostile read per token, which this gate must catch; `docs_only` is prose, which
+          it must not.
+        required: false
+        type: string
+        default: ""
   schedule:
     - cron: "0 1 1 * *"
 
@@ -934,13 +957,18 @@ jobs:
   # a SIXTH bench from being silently unbuilt; the floor is what keeps one of the five from
   # silently disappearing. Raise the floor when a bench is added.
   #
-  # NOT a timed regression gate: GitHub runners are far too noisy for the ±2% discipline these
-  # benches are held to locally, so regression numbers are gathered off-CI. The `icount` job
-  # below is the regression gate that a runner CAN carry — it counts instructions rather than
-  # seconds, over the repetition combinators only. The two are not substitutes: these five
-  # benches cover surfaces `tokora-icount` does not touch at all (the scanner protocol, the
-  # typed pratt driver, the CST builder, the raw checkpoint triple), and they measure the thing
-  # a user feels. Adding a bench here does not add an axis there, and vice versa.
+  # NOT a timed regression gate, and still not: this step runs each id once, under `--test`, and
+  # reads no number at all. GitHub runners remain far too noisy for the ±2% discipline these
+  # benches are held to locally, so numbers at that resolution are still gathered off-CI.
+  #
+  # Two jobs below do carry regression gates, and they are not substitutes for each other or for
+  # this one. `icount` counts instructions rather than seconds, over the repetition combinators
+  # only, and resolves 1%. `wall clock (advisory)` times these same five targets in a same-run
+  # A/B and resolves something coarse — a cache cliff, an allocation added per element — which is
+  # exactly the class an instruction count is blind to. These five benches also cover surfaces
+  # `tokora-icount` does not touch at all (the scanner protocol, the typed pratt driver, the CST
+  # builder, the raw checkpoint triple). Adding a bench here adds an id to the wall-clock gate
+  # and does not add an axis to `icount`; adding a workload there does the reverse.
   bench-smoke:
     name: bench (smoke)
     runs-on: ubuntu-latest
@@ -1015,6 +1043,12 @@ jobs:
   # count directly answers. The criterion benches cannot: the repetition engine is a third to a
   # half of each of them and their run-to-run spread is 4.3-4.8%, so the smallest engine
   # regression they can distinguish from noise is around 9-10%. This gate sees 1%.
+  #
+  # That sentence is now also a job: `wall clock (advisory)` below reads those same benches with a
+  # clock, at that coarse resolution, precisely because an instruction count cannot see a cache
+  # cliff or an allocation added to a hot loop. The two answer different questions and neither
+  # subsumes the other. This one is required and that one is not, and the reason is in its header:
+  # this gate's self-comparison is exactly zero, and that gate's is a spread.
   #
   # ── WHY THERE IS NO COMMITTED BASELINE ─────────────────────────────────────────────────────
   #
@@ -1113,6 +1147,152 @@ jobs:
           # whether the job passed or failed.
           name: icount-readings
           path: ${{ runner.temp }}/icount/*.json
+          if-no-files-found: warn
+
+  # ── Gate (advisory): wall clock over the criterion benches ──────────────────
+  #
+  # The `icount` job above counts instructions, which is a property of the binary and not of the
+  # machine — and that is exactly what it cannot see. An instruction count does not know where
+  # those instructions read from. A change that keeps `Ir` to the byte can still fall off a
+  # cache, lose a branch predictor, add an allocation to a hot loop, or move data it used not to
+  # move, and cost real time for every one of them. This job is the other half of that sentence,
+  # and it is the ONLY half it is: a coarse layer, over the five criterion benches, measured with
+  # a clock.
+  #
+  # ── WHAT IT CAN ACTUALLY SEE ───────────────────────────────────────────────────────────────
+  #
+  # Not the ±2% the benches are held to locally, and not the 1% the `icount` job resolves. Three
+  # measured facts from this repository set the ceiling:
+  #
+  #   * `tokora-benches` under criterion showed a run-to-run spread of 4.3-4.8% ON A DEDICATED
+  #     MACHINE, and one full-suite run moved all nine benches in lockstep by +82% on code that
+  #     had not changed.
+  #   * The repetition engine is a third to a half of each bench's work, so a regression IN the
+  #     engine reads here at roughly half its own amplitude.
+  #   * A GitHub-hosted runner is a shared VM on an unstated CPU model. It is worse than the
+  #     dedicated machine those numbers came from, and `ci/wallclock/run.sh --self` is what says
+  #     by how much on the host of the day.
+  #
+  # So the claim is deliberately modest: this job sees a cache cliff, an allocation added per
+  # element, or a data-movement change large enough to be worth reverting. It does not see a lost
+  # inline. When the two perf jobs disagree, `icount` is the tighter statement about what the
+  # compiler did and this one is the statement about what a user would feel.
+  #
+  # ── SAME-RUN A/B, NO COMMITTED BASELINE ────────────────────────────────────────────────────
+  #
+  # Same decision as the `icount` job, for a reason that is strictly stronger here. Instruction
+  # counts drift with the toolchain; wall-clock times do not travel between HOSTS at all, and
+  # GitHub hands out several CPU generations under one `ubuntu-latest` label. A checked-in
+  # baseline would be comparing this run's host against whichever host last wrote the file, which
+  # is a red gate for a change nobody made — and a gate that reds for reasons nobody caused is a
+  # gate that gets disabled. Both sides are built and measured inside this one job.
+  #
+  # And the same trick makes it mean what it is read to mean: the base side is not a checkout of
+  # the merge-base, it is this branch's tree with `tokora/` swapped for the merge-base's. The
+  # instrument — fixtures, ids, iteration counts, measurement window — is the constant and the
+  # library is the variable. `ci/wallclock/run.sh`'s header carries the argument in full.
+  #
+  # ── ADVISORY, AND WHAT WOULD PROMOTE IT ────────────────────────────────────────────────────
+  #
+  # `continue-on-error: true`, the same mechanism `semver-checks (advisory)` uses: a red here
+  # does not fail the run and does not block a merge.
+  #
+  # That is not modesty, it is the honest reading of the evidence above. The `icount` job is
+  # required because its self-comparison comes back at EXACTLY ZERO on every workload — it
+  # structurally cannot false-positive. This one cannot make that claim: its self-comparison is a
+  # spread, not a zero, and the threshold is a bet that the spread stays where it was measured.
+  # A performance gate promoted to required before its false-positive rate is known is the gate
+  # that reds during a bad week on GitHub's fleet and gets deleted in the pull request that was
+  # trying to ship something else.
+  #
+  # What would justify promoting it, in order:
+  #
+  #   1. A false-positive count. Thirty consecutive pull requests whose `wall clock` verdict
+  #      agrees with `icount` and with review — no row over the threshold that a human then had
+  #      to wave through — is evidence; two good weeks is not.
+  #   2. A self-comparison re-run on several days, showing the floor is a property of the
+  #      configuration and not of the afternoon it was first measured. Dispatch this workflow on
+  #      `main`: that runs `--self`, which builds one commit twice and reports the spread.
+  #   3. A threshold that still has room after (2). If the floor's own variation eats the margin,
+  #      the answer is a wider threshold or fewer ids, not a promotion.
+  #
+  # Until all three, a red here is a prompt to look, and `Perf-accept:` is how a deliberate trade
+  # is recorded — the same trailer, with the same one-shot lifetime, that the `icount` job reads.
+  #
+  # ── THE SELF-TEST RUNS FIRST, AND MATTERS MORE HERE ────────────────────────────────────────
+  #
+  # `ci/wallclock/compare_selftest.sh` runs before anything is built, over synthetic readings, in
+  # about a second. A `compare.py` that returned 0 on everything would leave this job green, the
+  # table printed and the gate off — and an ADVISORY job's green is the one nobody is waiting on,
+  # so nothing else would notice. It has been watched going red rather than merely written: the
+  # verdict short-circuited to pass reds ten cases, an acceptance that ignores its ceiling reds
+  # one, the self-comparison taking a signed maximum instead of an absolute one reds one, and
+  # replacing either half of the min-of-N estimator with a mean reds three.
+  #
+  # ── PULL REQUESTS AND DISPATCH, AND WHAT EACH ONE MEANS ────────────────────────────────────
+  #
+  # On a `pull_request` it is an A/B against the merge-base. On `workflow_dispatch` it is a
+  # SELF-comparison — the same commit on both sides — because that is the calibration the
+  # threshold rests on and there is no other way to run it. `wallclock_plant` optionally applies
+  # one of `ci/wallclock/plants/*.py` to the head side of the extracted work tree, which is how
+  # this gate is watched firing on a regression and staying quiet on a change that is not one
+  # without either plant ever reaching a commit.
+  #
+  # There is deliberately no `paths:` filter. The benches reach the scanner, the lexer, the
+  # container, the emitter, the CST builder and the checkpoint triple, and a cache regression in
+  # any of them is what this job exists to see. A filter narrower than the code a gate protects
+  # is the defect this repository has hit six times (#181, #195, #200, #208, #217, #220).
+  wallclock:
+    name: wall clock (advisory)
+    runs-on: ubuntu-latest
+    # Advisory: the same mechanism `semver-checks (advisory)` uses. A failure is reported on the
+    # job and does not fail the run.
+    continue-on-error: true
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Both revisions are read out of this clone with `git archive`, and the merge-base is
+          # computed here rather than taken from the event payload. A shallow clone has neither.
+          fetch-depth: 0
+      - name: compare.py self-test, before anything is built
+        run: bash ci/wallclock/compare_selftest.sh
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          # The registry only. The two target directories live under `RUNNER_TEMP` and are
+          # deliberately not cached — a restored artefact from another toolchain is the one thing
+          # that could make the two sides of this comparison differ for a reason that is not the
+          # branch, and for a comparison of TIMES it would also be a restored artefact whose code
+          # layout nothing in this run chose.
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-wallclock-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-wallclock-
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: Wall clock, this branch against its merge-base
+        env:
+          # On a dispatch there is no merge-base to speak of, and the reason to dispatch this
+          # workflow is to re-derive the floor — so a dispatch is a self-comparison.
+          WALL_BASE: ${{ github.event.pull_request.base.sha || '--self' }}
+          WALL_PLANT: ${{ inputs.wallclock_plant }}
+        run: |
+          set -euo pipefail
+          plant=()
+          if [ -n "${WALL_PLANT:-}" ]; then plant=(--plant "$WALL_PLANT"); fi
+          bash ci/wallclock/run.sh "$WALL_BASE" "${plant[@]}"
+      - name: Upload the interleaved readings
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          # Every round of every side, not just the folded verdict: the minimum discards the
+          # rounds it did not pick, and those rounds are the record of what the runner was doing
+          # while this job ran. Kept whether the job passed or failed.
+          name: wallclock-readings
+          path: ${{ runner.temp }}/wallclock/readings.jsonl
           if-no-files-found: warn
 
   # ── Gate: cross-compile smoke across extra platforms ────────────────────────
