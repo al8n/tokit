@@ -1281,9 +1281,11 @@ jobs:
           WALL_PLANT: ${{ inputs.wallclock_plant }}
         run: |
           set -euo pipefail
-          plant=()
-          if [ -n "${WALL_PLANT:-}" ]; then plant=(--plant "$WALL_PLANT"); fi
-          bash ci/wallclock/run.sh "$WALL_BASE" "${plant[@]}"
+          if [ -n "${WALL_PLANT:-}" ]; then
+            bash ci/wallclock/run.sh "$WALL_BASE" --plant "$WALL_PLANT"
+          else
+            bash ci/wallclock/run.sh "$WALL_BASE"
+          fi
       - name: Upload the interleaved readings
         if: always()
         uses: actions/upload-artifact@v5

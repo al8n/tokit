@@ -131,29 +131,30 @@ repo="$(git rev-parse --show-toplevel)"
 cd "$repo"
 
 plant=""
-args=()
+target_ref=""
+positional=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --plant)
       [ "$#" -ge 2 ] || { echo "::error::--plant needs a name"; exit 2; }
       plant="$2"; shift 2 ;;
-    *) args+=("$1"); shift ;;
+    *) target_ref="$1"; positional=$((positional + 1)); shift ;;
   esac
 done
 
-if [ "${#args[@]}" -ne 1 ]; then
+if [ "$positional" -ne 1 ]; then
   # Both patterns are anchored at `^# ` so that THIS line — which contains the start pattern as
   # data — cannot re-open the range and print the rest of the script.
   sed -n '/^# ── USAGE/,/^# Environment/p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 fi
 
-if [ "${args[0]}" = "--self" ]; then
+if [ "$target_ref" = "--self" ]; then
   base="$(git rev-parse HEAD)"
   mode="self-comparison"
   self=1
 else
-  base="$(git merge-base HEAD "$(git rev-parse "${args[0]}")")"
+  base="$(git merge-base HEAD "$(git rev-parse "$target_ref")")"
   mode="vs merge-base"
   self=0
 fi
@@ -285,11 +286,20 @@ if [ -s "$WALL_WORK/accept.txt" ]; then
   sed 's/^/wallclock:   /' "$WALL_WORK/accept.txt"
 fi
 
-self_flag=()
-if [ "$self" = 1 ] && [ -z "$plant" ]; then self_flag=(--self-comparison); fi
+# `--self-comparison` only when the two sides really are the same source. A PLANTED self run is
+# not one: it has a difference to find, and telling `compare.py` otherwise would have it report a
+# floor over a regression.
+self_flag=""
+if [ "$self" = 1 ] && [ -z "$plant" ]; then self_flag="--self-comparison"; fi
 
+# A plain string rather than an array, because `"${arr[@]}"` on an EMPTY array is an unbound
+# variable under `set -u` in bash 3.2 — which is what `/bin/bash` still is on macOS, where the
+# by-hand gate set at the top of `.github/workflows/ci.yml` is run. The value is a fixed literal
+# from the line above, never anything a caller supplies, so leaving it unquoted splits nothing
+# that could carry a space.
+# shellcheck disable=SC2086
 python3 ci/wallclock/compare.py "$readings" \
   --threshold "$WALL_THRESHOLD" \
   --accept-file "$WALL_WORK/accept.txt" \
-  "${self_flag[@]}" \
+  $self_flag \
   ${GITHUB_STEP_SUMMARY:+--summary "$GITHUB_STEP_SUMMARY"}
