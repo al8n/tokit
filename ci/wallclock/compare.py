@@ -245,6 +245,28 @@ def main():
                 "it was meant for this one, the id is misspelled and licenses nothing."
             )
 
+    def write_summary(headline, trailer):
+        if not args.summary:
+            return
+        with open(args.summary, "a", encoding="utf-8") as fh:
+            fh.write(f"### {headline}\n\n")
+            fh.write("| id | base ns/iter | head ns/iter | delta | own noise | verdict |\n")
+            fh.write("| --- | ---: | ---: | ---: | ---: | --- |\n")
+            for r in rows:
+                note = (
+                    f" — {r['reason']}" if r["reason"] and r["verdict"].startswith("accepted")
+                    else ""
+                )
+                fh.write(
+                    f"| `{r['id']}` | {r['base_ns']:,.0f} | {r['head_ns']:,.0f} | "
+                    f"{r['pct']:+.2f}% | {r['noise_pct']:.2f}% | {r['verdict']}{note} |\n"
+                )
+            fh.write(
+                f"\nMin of {n_rounds} interleaved rounds a side; both sides built and measured "
+                f"in this run on this runner. Worst same-build round-to-round spread this job: "
+                f"**{worst_noise:.2f}%**. {trailer}\n"
+            )
+
     if args.self_comparison:
         # The calibration run. There is no regression to find — both sides are the same commit —
         # so the interesting quantity is the spread, and the verdict is about the THRESHOLD.
@@ -266,10 +288,22 @@ def main():
                 f"threshold of +{args.threshold:g}%. As configured this gate reds on unchanged "
                 "code. Re-derive WALL_THRESHOLD from this run before trusting a verdict from it."
             )
+            write_summary(
+                "wall clock: SELF-COMPARISON EXCEEDS ITS OWN THRESHOLD (advisory)",
+                f"Both sides are the same source and the largest delta is **{worst:.2f}%**, "
+                f"past the **+{args.threshold:g}%** threshold. As configured this gate reds on "
+                "unchanged code.",
+            )
             return 1
         print(
             f"the configured threshold of +{args.threshold:g}% clears the floor by "
             f"{args.threshold - worst:.2f} points."
+        )
+        write_summary(
+            "wall clock: SELF-COMPARISON (advisory)",
+            f"Both sides are the same source, so every delta above is noise: the largest is "
+            f"**{worst:.2f}%** and that is this runner's floor. Threshold **+"
+            f"{args.threshold:g}%**.",
         )
         return 0
 
@@ -297,25 +331,10 @@ def main():
             "before reading this as a regression."
         )
 
-    if args.summary:
-        with open(args.summary, "a", encoding="utf-8") as fh:
-            fh.write("### wall clock vs merge-base (advisory)\n\n")
-            fh.write("| id | base ns/iter | head ns/iter | delta | own noise | verdict |\n")
-            fh.write("| --- | ---: | ---: | ---: | ---: | --- |\n")
-            for r in rows:
-                note = (
-                    f" — {r['reason']}" if r["reason"] and r["verdict"].startswith("accepted")
-                    else ""
-                )
-                fh.write(
-                    f"| `{r['id']}` | {r['base_ns']:,.0f} | {r['head_ns']:,.0f} | "
-                    f"{r['pct']:+.2f}% | {r['noise_pct']:.2f}% | {r['verdict']}{note} |\n"
-                )
-            fh.write(
-                f"\nThreshold **+{args.threshold:g}%**, min of {n_rounds} interleaved rounds a "
-                f"side; both sides built and measured in this run on this runner. Worst "
-                f"same-build round-to-round spread this job: **{worst_noise:.2f}%**.\n"
-            )
+    write_summary(
+        "wall clock vs merge-base (advisory)",
+        f"Threshold **+{args.threshold:g}%**.",
+    )
 
     if not failed:
         print("\nwallclock: no id regressed past the threshold.")

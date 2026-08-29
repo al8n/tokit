@@ -200,9 +200,9 @@ on:
           Apply one of ci/wallclock/plants/*.py to the HEAD side of the `wall clock` job's
           extracted work tree, to watch that gate fire (or correctly not fire). Leave empty for
           a plain self-comparison, which is what re-derives its threshold.
-          Names a file in that directory without its extension: `cold_line_per_token` is a
-          cache-hostile read per token, which this gate must catch; `docs_only` is prose, which
-          it must not.
+          Names a file in that directory without its extension: `alloc_per_token` is a heap
+          allocation added to the per-token path, which this gate must catch; `docs_only` is
+          prose, which it must not.
         required: false
         type: string
         default: ""
@@ -1236,7 +1236,9 @@ jobs:
   # threshold rests on and there is no other way to run it. `wallclock_plant` optionally applies
   # one of `ci/wallclock/plants/*.py` to the head side of the extracted work tree, which is how
   # this gate is watched firing on a regression and staying quiet on a change that is not one
-  # without either plant ever reaching a commit.
+  # without either plant ever reaching a commit. `alloc_per_token` must fire, `docs_only` must
+  # not, and `WALLGATE_PLANT_RATE` sizes the first — so the threshold's meaning can be measured by
+  # raising it until the gate loses the regression, rather than asserted.
   #
   # There is deliberately no `paths:` filter. The benches reach the scanner, the lexer, the
   # container, the emitter, the CST builder and the checkpoint triple, and a cache regression in

@@ -351,6 +351,24 @@ else
   failures=$((failures + 1))
 fi
 
+# A SELF-COMPARISON's summary is the one that matters most and was the one missing: the early
+# return skipped the writer entirely, so every run that relabelled itself — which is every pull
+# request that does not touch `tokora/` — wrote nothing where a reviewer looks.
+for case in self_ok:0 self_bad:1; do
+  file="${case%%:*}"
+  rm -f "$tmp/summary.md"
+  python3 "$here/compare.py" "$tmp/$file.jsonl" --threshold 10 --self-comparison \
+    --summary "$tmp/summary.md" > /dev/null 2>&1 || true
+  if [ -s "$tmp/summary.md" ] && grep -qiF 'self-comparison' "$tmp/summary.md" \
+     && grep -qF '| `parser/repeated_collect` |' "$tmp/summary.md"; then
+    echo "ok   a self-comparison writes a labelled step summary ($file)"
+  else
+    echo "FAIL a self-comparison wrote no usable step summary ($file)"
+    sed 's/^/    /' "$tmp/summary.md" 2>/dev/null || echo "    (file absent)"
+    failures=$((failures + 1))
+  fi
+done
+
 if [ "$failures" -ne 0 ]; then
   echo
   echo "::error::compare.py self-test: $failures case(s) failed"

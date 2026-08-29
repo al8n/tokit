@@ -94,7 +94,8 @@
 # fails loudly rather than silently planting nothing.
 #
 # Environment: WALL_THRESHOLD, WALL_ROUNDS, WALL_WARMUP_MS, WALL_MEASURE_MS, WALL_SAMPLES,
-# WALL_WORK.
+# WALL_WORK — and WALLGATE_PLANT_RATE, which sizes `alloc_per_token` and is how the gate's edge is
+# found rather than asserted: raise it until the plant stops firing.
 
 set -euo pipefail
 
