@@ -128,21 +128,40 @@ set -euo pipefail
 # **And the floor is not the measurement.** `input/backtrack/stacked_savepoint_cycle` came back
 # **+16.22%** with the two sides' five rounds each stable to under 1% and their two clusters
 # COMPLETELY DISJOINT — base 672-677 us across all five rounds, head 781-788 us across all five.
-# That is not noise. Noise overlaps; this does not. It is a stable property of the two sides,
-# which were compiled from byte-identical source, so it is code or data placement — the class
-# every practitioner of this measurement eventually meets, and the reason a wall-clock A/B of two
-# BUILDS has a floor that no number of rounds lowers. Eight further ids showed the same signature
-# at a much smaller size (disjoint clusters at 0.5-1.4%).
+# That is not noise. Noise overlaps; this does not. Eight further ids carried the same signature
+# two orders of magnitude smaller (disjoint clusters at 0.5-1.4%).
 #
-# So the resolution of this gate is set by build-to-build placement, not by the runner's noise,
-# and the honest threshold has to clear it. **25%** is about 1.5x the single outlier that was
-# observed. It is deliberately NOT the mechanical 2x-the-floor rule, which would give 32.4%: the
-# floor here is not one distribution but a body at ~1% plus one placement outlier, and with n=1
-# on that outlier the right response is to write down what would move the number — see the
+# **What it is NOT is codegen**, and that took a second run and a new diagnostic to establish.
+# Run 33226885912 printed what run 33225301618 could not: on a self-comparison the two sides'
+# binaries are **byte-identical**, on all five targets. `--remap-path-prefix` maps two
+# equal-length source directories to one string, so rustc emits the same bytes twice, and a
+# self-comparison therefore runs ONE PROGRAM against itself. Whatever moved that row 16% was
+# per-process placement — where the loader mapped the image, where the allocator's arenas landed,
+# how the stack aligned — and not a difference between two compilations.
+#
+# **And it is intermittent.** The second self-comparison, same configuration, same day, put the
+# same id at **-0.15%** (base 662-672 us, head 660-666 us) and the whole population at a median of
+# 0.19% with a maximum of 5.01%. So the outlier is not a property of that benchmark; it is a
+# property of a process, it appeared in one run of two, and no number of rounds WITHIN a run can
+# see past it, because within a run it is stable to under 1%.
+#
+#   | self-comparison | median | p90   | ids over 5% | max     |
+#   |-----------------|--------|-------|-------------|---------|
+#   | 33225301618     | 0.36%  | 1.35% | 1 of 46     | 16.22%  |
+#   | 33226885912     | 0.19%  | 2.40% | 1 of 46     |  5.01%  |
+#
+# So the resolution of this gate is set by placement, not by the runner's noise, and the honest
+# threshold has to clear it. **25%** is about 1.5x the worst of the two observations. It is
+# deliberately NOT the mechanical 2x-the-floor rule, which would give 32.4%: the floor is not one
+# distribution but a body at ~0.2-0.4% plus an intermittent placement outlier, and with two
+# samples of that outlier the right response is to write down what would move the number — see the
 # `wall clock` job's promotion criteria — rather than to inflate it until nothing could reach it.
 #
-# A consequence worth stating plainly: this gate cannot support a claim about a single id moving
-# 20%, because placement alone produced 16% on a single id with nothing changed.
+# Two consequences worth stating plainly. This gate cannot support a claim about a single id
+# moving 20%, because placement alone produced 16% on a single id with nothing changed. And
+# 16.22% is a LOWER bound on what a real comparison faces: a self-comparison runs one identical
+# binary twice, while a merge-base comparison runs two different ones, which adds the codegen
+# placement this measurement was able to exclude.
 : "${WALL_THRESHOLD:=25.0}"
 
 # Five rounds a side. The minimum needs at least one clean round per side to land on, and
