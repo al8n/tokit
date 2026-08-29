@@ -1,3 +1,113 @@
+/// The try-driven element cycle, stated once for the two drivers that run it: `Repeated::parse`
+/// and `delim/repeated.rs`'s `parse_repeated`.
+///
+/// Expands to a `loop` **expression** whose value is the trip baseline of the attempt that
+/// concluded absence — the value each driver's epilogue hands to `many::absence_after_element`.
+///
+/// # What the cycle is, and what it is not
+///
+/// Descent baseline, element attempt, the admission arm, the failure-chokepoint arm, the stall
+/// test, the bookkeeping. Nothing else: no absence gate, no close probe, no stop hook. The plain
+/// driver's decline is a bare `break trips`; the delimited driver's is its whole four-way close
+/// probe — both arrive through `on_decline:` as the caller's own tokens, so `many::close_after_element`
+/// stays reachable from delimited driver text alone and this macro contains no close, absence or
+/// stop code at all. That is stage 2's verdict turned into structure: the delimited try driver is
+/// the plain cycle under an opener, with the close position in the decline hole, and nothing else.
+///
+/// # Why this is a macro and not a function, and what that costs to keep
+///
+/// [#259](https://github.com/al8n/tokora/issues/259) asks for a shared engine, and the
+/// function-shaped one was measured. Extracting this loop into a `drive_elements` method preserved
+/// behaviour and moved three witnessed instruction-count rows — `at_least` +2.383%,
+/// `at_most_shallow` +1.214% (aarch64) / +1.030% (x86_64), `at_most` +0.535% — while nine other
+/// rows read +0.000%. The cost is not a per-element tax the signature introduces: `#[inline(always)]`
+/// on the extracted function produced a byte-identical binary, `repeated` and `at_least`
+/// monomorphize the *same* extracted loop with the same no-op hook and read +0.000% and +2.383%
+/// respectively, the `at_most` cost decomposes as ~15–18 instructions per COLLECTION rather than
+/// per element, and a different LLVM makes the same function *smaller*. It is a codegen re-roll —
+/// a whole-function register-allocation re-solve seeded by the new boundary — so it lands
+/// unpredictably, per monomorphization and per ISA, and its best case is a tie with what this macro
+/// guarantees.
+///
+/// A `macro_rules!` expansion presents the same tokens the driver spelled before. Same tokens, same
+/// MIR, same object code, same instructions executed: exactly +0.000% on every row, on both ISAs
+/// and any toolchain, without measuring them. That guarantee is the whole reason for this shape,
+/// and it holds only while both expansions stay token-identical to the text they replaced — which
+/// is what the constraints below protect.
+///
+/// * **This macro declares nothing of the caller's state and moves no declaration.** Every local
+///   keeps its name, its position and its initializer in the driver, and arrives as an `ident`.
+///   The two drivers initialize their error anchor differently — `anchor.clone()` in the plain one,
+///   `inp.cursor().clone()` in the delimited one. Those are semantically equal at that point and
+///   token-different, and unifying them is one of the re-roll's suspects, so each initializer stays
+///   where it is.
+/// * **No declaration moves relative to any other, in either driver.** MIR is scheduled as
+///   written, so reordering two pure snapshot reads is semantically inert and still re-rolls.
+/// * **`Ok(Decline) => $decline` takes each driver's arm verbatim.** In particular the delimited
+///   driver's two close-probe sites are *not* unified into one epilogue: that is a separate,
+///   unmeasured restructure, deliberately not taken here.
+/// * **Hygiene.** `$trips` is the caller's ident, so `let $trips = …` declares the caller's binding
+///   and the caller's `on_decline` tokens can name it — the same dance this file documents for
+///   `self` in the `impl_separated_*` macros. `break` inside `$decline` binds to the `loop` here
+///   regardless of hygiene, and `?`/`return` inside it leave the driver function. `Accept`,
+///   `Decline`, `admit_element` and `file_element_failure` resolve at the expansion site against
+///   each driver's own imports, exactly as every other body in this file does.
+///
+/// The static check that keeps all of that honest is a text-section comparison, not a benchmark:
+/// build `tokora-icount --profile bench` on either side and diff every symbol's disassembly with
+/// addresses normalized. Zero differing symbols is the acceptance, and any differing symbol names
+/// the exact token that leaked.
+macro_rules! try_element_cycle {
+  (
+    $inp:ident, $f:expr, $counts:expr, $container:ident,
+    anchor: $anchor:ident,
+    error_anchor: $cursor:ident,
+    committed: $committed:ident,
+    full: $full:ident,
+    nums: $nums:ident,
+    scans: $scans:ident,
+    trips: $trips:ident,
+    on_decline: $decline:expr $(,)?
+  ) => {
+    loop {
+      // The descent witness's baseline, taken once per ELEMENT — the attempt the chokepoint below
+      // judges, and the one each driver's absence exits judge too. `many::file_element_failure`
+      // says why it belongs here and not out beside `latch`.
+      let $trips = $inp.trip_snapshot();
+      match $f.try_parse_input($inp) {
+        // One admission, and it settles this element's count bound before the destination is
+        // offered the element — see `many::admit_element` for why that order is the function's
+        // rather than this cycle's.
+        // TODO(al8n): tracing dropped element
+        Ok(Accept(item)) => admit_element($counts, &mut $nums, &mut $full, $container, item, $inp, &$anchor)?,
+        // No more elements. The plain driver breaks with the baseline; the delimited one probes
+        // the close position here, which is the delimiter's entire contribution to this cycle.
+        Ok(Decline) => $decline,
+        // File the failure as a diagnostic and keep looping — unless it is one of the three the
+        // never-recoverable law forbids spending, in which case re-raise it untouched. The gate is
+        // the chokepoint's, not this cycle's: see `many::file_element_failure` for the three
+        // witnesses and for why `trips` is taken per ELEMENT rather than per collection. `?` here
+        // propagates both a re-raise and an emitter that refused the diagnostic, exactly as the
+        // hand-written arms this replaced did.
+        Err(err) => file_element_failure($inp, err, &$cursor, $scans, $trips)?,
+      }
+
+      // A cycle that consumed nothing re-sees the same input and would retry forever. The progress
+      // metric is committed consumption (`span().end()`), never the cache-front cursor — a lookahead
+      // fill (a `probe_close` or `try_expect` decline pushing a token back) moves that across skipped
+      // trivia without consuming, reading a zero-width element as false progress. `<=`, not `==`: the
+      // watermark cannot regress within a cycle, so anything not strictly ahead is a stall. The
+      // error-span anchor stays whichever cursor the driver named.
+      let new_committed = $inp.span().end();
+      if new_committed <= $committed {
+        break $trips;
+      }
+      $committed = new_committed;
+      $cursor = $inp.cursor().clone();
+    }
+  };
+}
+
 /// The `delimited*` surface every many-builder carries.
 ///
 /// A built-in pair marker is branded — `Paren<S, C, Lang>` — and its `Delimiter` impl names

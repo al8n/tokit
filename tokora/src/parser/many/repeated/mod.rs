@@ -272,39 +272,24 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
     // The trip baseline of the LAST element attempt, carried out by whichever break concluded
     // absence — see `many::absence_after_element` for what the gate below does with it, and why the
     // value has to be carried rather than re-read after the loop.
-    let elem_trips = loop {
-      // The descent witness's baseline, taken once per ELEMENT — the attempt the chokepoint below
-      // judges, and the one the absence gate after the loop judges too.
-      // `many::file_element_failure` says why it belongs here and not out beside `latch`.
-      let trips = inp.trip_snapshot();
-      match self.f.try_parse_input(inp) {
-        // One admission, and it settles this element's count bound before the destination is
-        // offered the element — see `many::admit_element` for why that order is the function's
-        // rather than this loop's.
-        Ok(Accept(item)) => admit_element(rh, &mut num, &mut full, container, item, inp, &anchor)?,
-        Ok(Decline) => break trips,
-        // File the failure as a diagnostic and keep looping — unless it is one of the three the
-        // never-recoverable law forbids spending, in which case re-raise it untouched. The gate is
-        // the chokepoint's, not this loop's: see `file_element_failure` for the three witnesses and
-        // for why `trips` is taken per ELEMENT rather than per collection. `?` here propagates both
-        // a re-raise and an emitter that refused the diagnostic, exactly as the hand-written arms
-        // this replaced did.
-        Err(err) => file_element_failure(inp, err, &cursor, scans, trips)?,
-      }
-
-      // A cycle that consumed nothing re-sees the same input and would retry forever. The progress
-      // metric is committed consumption (`span().end()`), never the cache-front cursor — a lookahead
-      // fill (a `try_expect` decline pushing a token back) moves that across skipped trivia without
-      // consuming, reading a zero-width element as false progress. `<=`, not `==`: the watermark
-      // cannot regress within a cycle, so anything not strictly ahead is a stall. `cursor` stays the
-      // error-span anchor.
-      let new_committed = inp.span().end();
-      if new_committed <= committed {
-        break trips;
-      }
-      committed = new_committed;
-      cursor = inp.cursor().clone();
-    };
+    //
+    // The cycle itself is `try_element_cycle!`, shared with `delim/repeated.rs`: descent baseline,
+    // attempt, admission, failure chokepoint, stall test, bookkeeping. This driver's decline is the
+    // bare `break trips` below; the delimited one puts its close probe in the same hole. Every local
+    // the cycle touches is declared above, in this order, with this initializer — the macro declares
+    // and moves nothing, which is what makes the expansion the text it replaced. See the macro for
+    // why that is worth a macro.
+    let elem_trips = try_element_cycle!(
+      inp, self.f, rh, container,
+      anchor: anchor,
+      error_anchor: cursor,
+      committed: committed,
+      full: full,
+      nums: num,
+      scans: scans,
+      trips: trips,
+      on_decline: break trips,
+    );
 
     // Both ways out of the loop above — the element declining, and a cycle that committed nothing —
     // conclude *absence*: "no more elements", on the strength of what the last element attempt did.

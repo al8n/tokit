@@ -161,6 +161,11 @@
 //! ## What all eight already share
 //!
 //! Counted comment-blind, the way `END_STATE_CENSUS` counts, so a prose mention is not a site.
+//! Counted per **loop**, which is no longer the same as per file: `repeated` and `delim/repeated`
+//! run one loop text between them, `many/macros.rs`'s `try_element_cycle!`, so the rows below that
+//! sit inside the element cycle — the stall test, the descent baseline, the element `Err` and the
+//! admission — are spelled six times for eight drivers. `GATE_CENSUS` counts the sources
+//! accordingly and reads that one body with needles written for macro text.
 //!
 //! | law | one mechanism, in every loop | sites per loop |
 //! |---|---|---|
@@ -184,8 +189,50 @@
 //! | `sep/delim` | the same state machine under an opener and a closer, with the slot probed by `try_expect_map` because the same position may hold the closer | **essential** on both counts. The three-way probe exists because a delimited list's separator slot is also a close position; the undelimited form has no closer there and needs the terminal re-raise instead |
 //! | `sep_while/parse` | `sep/parse`'s slot with `repeated_while`'s condition | **essential**, as the union of the two axes above |
 //! | `sep_while/delim` | `sep/delim`'s slot and closer with `repeated_while`'s condition | **essential**, as the union of the three axes above |
-//! | `delim/repeated` | a delimited *plain* loop that re-states `repeated`'s element loop instead of wrapping it; takes its count hook and its stop hook as two separate arguments, a third stop-hook shape; implements **one** destination contract | **essential** on the delimiter alone. **Incidental** on the other three — `sep/delim` is delimited too and reuses its undelimited sibling's handlers, carries one hook, and implements four contracts |
-//! | `delim/repeated_while` | the same three, with `repeated_while`'s condition | same verdict, same evidence |
+//! | `delim/repeated` | a delimited *plain* loop that **shares** `repeated`'s element cycle through `try_element_cycle!` and adds an opener, a close position in the cycle's decline hole, and a close-probe epilogue; takes its count hook and its stop hook as two separate arguments, a third stop-hook shape; implements **one** destination contract | **essential** on the delimiter alone, and that is now what the source shows: the cycle is one text and the delimiter is one hole in it. **Incidental** on the other three — `sep/delim` is delimited too and reuses its undelimited sibling's handlers, carries one hook, and implements four contracts |
+//! | `delim/repeated_while` | the same three, with `repeated_while`'s condition — and, unlike its try-driven sibling, it still **re-states** the element loop rather than sharing one | same verdict on the three. The re-statement is the **documented exception** below: the delimiter enters that cycle at its core rather than at its edge, so there is no contiguous cycle to share |
+//!
+//! ## The one re-stated cycle, documented rather than removed
+//!
+//! [#259](https://github.com/al8n/tokora/issues/259)'s criterion admits "a clearly identified
+//! shared engine **or deliberately documented exceptions**". Of the two plain pairs whose element
+//! loop was re-stated, one is now shared and the other is that exception, and the split is
+//! structural rather than a matter of effort.
+//!
+//! **The try pair shares.** `repeated` and `delim/repeated` run the same cycle — descent baseline,
+//! attempt, `Accept →` [`admit_element`], `Err →` [`file_element_failure`], stall test,
+//! bookkeeping — differing *only* in the decline arm, where the plain driver breaks and the
+//! delimited one probes its close position. The delimiter enters that cycle **at its edge**, so
+//! the cycle is a skeleton with one hole and both of the old texts were exact instances of it.
+//! `many/macros.rs`'s `try_element_cycle!` is that skeleton, invoked once by each driver, and the
+//! hole takes each driver's own decline arm verbatim — which is why
+//! [`close_after_element`] is still reachable from delimited driver text alone.
+//!
+//! **The while pair does not, and the reason is where the delimiter enters.** In
+//! `delim/repeated_while` the closer is probed **first, every cycle, before the decision window**,
+//! because a while-driver must not ask the caller's condition about a closer token — so the probe
+//! cannot follow the decision the way the try family's follows the element's own decline. The
+//! delimiter enters that cycle **at its core**. What the two while loops actually share is the
+//! window peek plus the terminal check (four lines), the `Continue` arm (two), and the stall tail
+//! — non-contiguous fragments *nested inside* the delimited probe's third arm, with the stop arms
+//! differing besides. Sharing them needs a mid-cycle hole whose tokens receive the probe's binding
+//! and re-invoke the skeleton from inside the caller's own hole; the result would be the least
+//! readable macro in the crate, to retire about eight scattered lines per driver.
+//!
+//! **Why the price is not paid anyway.** The extraction was measured, in the function shape, on
+//! 2026-08-22: it preserved behaviour and moved three witnessed instruction-count rows —
+//! `at_least` +2.383%, `at_most_shallow` +1.214% (aarch64) / +1.030% (x86_64), `at_most` +0.535% —
+//! while nine rows read +0.000%. The cost is a codegen re-roll rather than a semantic tax
+//! (`try_element_cycle!`'s own documentation carries the evidence), so it lands unpredictably, per
+//! monomorphization and per ISA, and the only candidate whose cost is knowable in advance is the
+//! token-identical one. That candidate is available for the try cycle and not for the while cycle,
+//! which is exactly the split above.
+//!
+//! So this is the terminal state, not a retreat: every incidental duplication the verdicts above
+//! found is now either consolidated — the sixteen destination impls, and the try cycle — or
+//! documented here with the reason and the measurement that priced it. What holds the eight
+//! drivers to one behaviour is `tokora/tests/repetition_behavioural_matrix.rs`'s seventeen
+//! properties, not source resemblance, and that was true before either consolidation.
 //!
 //! ## Where the input rests, and why it is not a family difference
 //!
@@ -228,16 +275,22 @@
 //! Only the incidental findings are here; the essential ones above are the exceptions the
 //! criterion asks to be documented rather than removed.
 //!
-//! 1. **`delim/repeated` and `delim/repeated_while` re-state the plain element loop instead of
-//!    wrapping it.** Two files, 593 lines, each carrying its own stall test, its own
-//!    [`admit_element`] call and its own absence exits, and `delim/repeated` its own
-//!    [`file_element_failure`] gate besides — where `sep/delim` and `sep_while/delim` drive the
-//!    *same* state handlers their undelimited siblings do and carry no admission at all. It is the
-//!    largest incidental difference and the one that pays twice: the two missing destination
-//!    contracts are missing *because* the loop is spelled
+//! 1. ~~**`delim/repeated` and `delim/repeated_while` re-state the plain element loop instead of
+//!    wrapping it.**~~ **Taken for the try pair; documented for the while pair.** It was the
+//!    largest incidental difference, and it paid twice — the loop spelling, plus the destination
+//!    contracts that were missing *because* the loop was spelled
 //!    `parse_repeated(inp, container, counts, on_stop)` rather than as `Repeated::parse` under a
-//!    delimiter, so a driver that wrapped would inherit both, and the matrix's borrowed half would
-//!    cover eight drivers instead of six. The instruction-count gate is what bounds the cost.
+//!    delimiter. The second half was banked by
+//!    [#334](https://github.com/al8n/tokora/pull/334), which gave the eight delimited leaves the
+//!    destination contracts directly. The first half splits by where the delimiter enters the
+//!    cycle — `delim/repeated` shares
+//!    `try_element_cycle!` with `repeated` and carries no stall test, admission or
+//!    [`file_element_failure`] gate of its own, and `delim/repeated_while` is the one documented
+//!    re-statement, for the reason and at the price recorded under "the one re-stated cycle" above.
+//!    What remains here is the *wrapping*: both delimited drivers still spell their own
+//!    `parse_repeated`-shaped entry point rather than driving the plain parser under a delimiter,
+//!    which is what `sep/delim` and `sep_while/delim` do with their undelimited siblings' handlers.
+//!    The instruction-count gate is what bounds the cost of taking it.
 //! 2. **Three stop-hook shapes for one end-of-construct pass.** [`RepeatedHandler::on_stop`]
 //!    returning the span (`repeated` uses it, `repeated_while` discards it and rebuilds the same
 //!    span itself), `EndStateHandler`'s four state-dispatched methods, and a bare
@@ -982,6 +1035,28 @@ mod gate_census {
   const BASELINE: &str = "inp.trip_snapshot()";
   const HOSTING_LOOP: &str = "loop {";
 
+  /// The shared try-driven cycle: its invocation in a driver, and its own source.
+  ///
+  /// `repeated` and `delim/repeated` no longer spell the element cycle. They invoke
+  /// `try_element_cycle!`, whose single body carries the loop, the baseline, the attempt, the
+  /// admission and the chokepoint call for both — so for those two sources the invocation is what
+  /// [`HOSTING_LOOP`] is for the other ten, and every region scan anchors on it instead.
+  const CYCLE: &str = "try_element_cycle!(";
+  pub(super) const CYCLE_NAME: &str = "many/macros.rs";
+  pub(super) const CYCLE_SRC: &str = include_str!("macros.rs");
+
+  /// [`BASELINE`] and [`ATTEMPT`] as the macro spells them.
+  ///
+  /// Written for macro text on purpose, because half of these needles substring-match through a
+  /// `$` sigil by accident and half do not: `inp.trip_snapshot()` *is* inside
+  /// `$inp.trip_snapshot()`, and `try_parse_input(inp)` is *not* inside `$f.try_parse_input($inp)`.
+  /// A census that let the first kind ride its accident would be counting a site it cannot
+  /// describe, and would silently report nothing for the second. So the cycle's own sites are
+  /// counted with needles that name the `$`, and the driver-facing needles above stay at zero in
+  /// the two sources that now invoke the macro.
+  const MACRO_BASELINE: &str = "$inp.trip_snapshot()";
+  const MACRO_ATTEMPT: &str = "$f.try_parse_input($inp)";
+
   /// The **scanner** witness's baseline, and the latch baseline it must sit beside.
   ///
   /// The mirror image of [`BASELINE`], and the reason it is scanned separately: this one is per
@@ -993,32 +1068,59 @@ mod gate_census {
   const LATCH_BASELINE: &str = "inp.latch_snapshot()";
 
   /// SWALLOW SCAN — every source in the `many` and `fold` trees that can reach an [`InputRef`]
-  /// inside a repetition: the eight collection drivers, the four folds, and the three tree `mod.rs`
-  /// files that could host a driver of their own. Only these are read for [`EMIT`], and
+  /// inside a repetition: the eight collection drivers, the four folds, the three tree `mod.rs`
+  /// files that could host a driver of their own, and `many/macros.rs`, which hosts the try-driven
+  /// element cycle itself. Only these are read for [`EMIT`], and
   /// [`the_gate_census_covers_every_driver_module`] is what keeps the list from silently falling
   /// behind the tree.
   ///
+  /// `macros.rs` is here because driver-reachable *loop* code lives there now. It is not a driver
+  /// — it takes no baseline of its own per collection and carries no exit — so it is deliberately
+  /// not in [`progress_guard_sites`]; the swallow scan is the one list whose question ("does this
+  /// source file a diagnostic behind the gate's back?") the cycle's body can answer.
+  ///
   /// [`InputRef`]: crate::InputRef
-  fn swallow_scan_sites() -> [(&'static str, &'static str); 15] {
-    let mut sites = [("", ""); 15];
+  fn swallow_scan_sites() -> [(&'static str, &'static str); 16] {
+    let mut sites = [("", ""); 16];
     let (guarded, rest) = sites.split_at_mut(12);
     guarded.copy_from_slice(&progress_guard_sites());
     rest.copy_from_slice(&[
       ("many/delim/mod.rs", include_str!("delim/mod.rs")),
       ("many/sep/mod.rs", include_str!("sep/mod.rs")),
       ("many/sep_while/mod.rs", include_str!("sep_while/mod.rs")),
+      (CYCLE_NAME, CYCLE_SRC),
     ]);
     sites
   }
 
-  /// The four try-driven families: the only drivers that swallow, and therefore the only ones that
-  /// call the chokepoint.
-  fn try_driven_sites() -> [(&'static str, &'static str); 4] {
+  /// The four try-driven families: the only drivers that swallow, and therefore the only ones whose
+  /// element cycle reaches the chokepoint.
+  ///
+  /// The third column is where that cycle's TEXT lives. The two `sep` drivers spell their own; the
+  /// two plain ones share `try_element_cycle!`, so their chokepoint call, attempt and baseline are
+  /// counted once in [`CYCLE_SRC`] rather than once each here.
+  fn try_driven_sites() -> [(&'static str, &'static str, bool); 4] {
     [
-      ("many/repeated/mod.rs", include_str!("repeated/mod.rs")),
-      ("many/delim/repeated.rs", include_str!("delim/repeated.rs")),
-      ("many/sep/parse/mod.rs", include_str!("sep/parse/mod.rs")),
-      ("many/sep/delim/mod.rs", include_str!("sep/delim/mod.rs")),
+      (
+        "many/repeated/mod.rs",
+        include_str!("repeated/mod.rs"),
+        false,
+      ),
+      (
+        "many/delim/repeated.rs",
+        include_str!("delim/repeated.rs"),
+        false,
+      ),
+      (
+        "many/sep/parse/mod.rs",
+        include_str!("sep/parse/mod.rs"),
+        true,
+      ),
+      (
+        "many/sep/delim/mod.rs",
+        include_str!("sep/delim/mod.rs"),
+        true,
+      ),
     ]
   }
 
@@ -1127,13 +1229,20 @@ mod gate_census {
     }
   }
 
-  /// Every driver that calls the chokepoint takes its trip baseline **inside the loop that hosts
-  /// the call**, once per element.
+  /// Every try-driven element cycle takes its trip baseline **inside the loop that hosts the
+  /// chokepoint call**, once per element — in the two sources that spell their own cycle, and in
+  /// the one macro body the other two share.
   ///
   /// The half the chokepoint cannot own: `trips` is passed in, so the caller decides whether the
   /// comparison means "this element tripped" or "this parse has tripped". The `rfind` panics
   /// rather than passing when a call is not inside a loop at all, so this cannot be satisfied by a
   /// source that has stopped looking like a driver.
+  ///
+  /// Four drivers, three cycle texts. `repeated` and `delim/repeated` invoke `try_element_cycle!`,
+  /// so what is asserted of them is that they spell **none** of the cycle themselves and invoke it
+  /// exactly once — the "nothing left to balance" form, the same one the swallow scan uses. The
+  /// cycle's own body is then read once, with needles written for macro text, because
+  /// [`BASELINE`] rides a `$` accidentally there and [`ATTEMPT`] would silently match nothing.
   #[test]
   #[cfg_attr(
     miri,
@@ -1141,7 +1250,29 @@ mod gate_census {
   )]
   fn every_element_loop_baselines_its_trip_witness_per_element() {
     let mut routed = 0;
-    for (name, src) in try_driven_sites() {
+    let mut invocations = 0;
+    for (name, src, own) in try_driven_sites() {
+      if !own {
+        assert_eq!(
+          code_matches(src, CYCLE),
+          1,
+          "{name}: a driver that does not spell its own element cycle invokes `{CYCLE}` exactly \
+           once. Two invocations are two cycles under one collection's baselines; none means the \
+           element loop went somewhere this census cannot read"
+        );
+        for needle in [CHOKEPOINT, ATTEMPT, BASELINE, HOSTING_LOOP] {
+          assert_eq!(
+            code_matches(src, needle),
+            0,
+            "{name}: this driver shares the cycle, so it spells none of it — `{needle}` here is a \
+             second, unshared element loop, or the shared one being re-stated beside its own \
+             invocation"
+          );
+        }
+        invocations += 1;
+        continue;
+      }
+
       let calls = code_matches(src, CHOKEPOINT);
       assert_eq!(
         calls, 1,
@@ -1186,34 +1317,83 @@ mod gate_census {
       routed += calls;
     }
     assert_eq!(
-      routed, 4,
-      "the try-driven families carry exactly four gated loop bodies"
+      (routed, invocations),
+      (2, 2),
+      "the try-driven families carry exactly four gated element cycles: two spelled in their own \
+       source, and two invocations of the one shared `try_element_cycle!`"
+    );
+
+    // The shared cycle, read once, with needles written for its own text. Everything the two
+    // invoking drivers stopped spelling has to be here, exactly once, and in the same relation.
+    for (needle, want) in [
+      (HOSTING_LOOP, 1),
+      (MACRO_BASELINE, 1),
+      (MACRO_ATTEMPT, 1),
+      (CHOKEPOINT, 1),
+      (ABSENCE, 0),
+      (CLOSE_GATE, 0),
+    ] {
+      assert_eq!(
+        code_matches(CYCLE_SRC, needle),
+        want,
+        "{CYCLE_NAME}: the shared try cycle is one loop, one baseline, one attempt and one \
+         chokepoint call, and it holds no absence or close gate at all — those stay in driver \
+         text, which is what keeps `close_after_element` the delimited four's alone. `{needle}` \
+         is not {want}"
+      );
+    }
+    let call_at = code_find(CYCLE_SRC, CHOKEPOINT).expect("the shared cycle calls the chokepoint");
+    let loop_at = CYCLE_SRC[..call_at].rfind(HOSTING_LOOP).unwrap_or_else(|| {
+      panic!("{CYCLE_NAME}: the chokepoint call is not inside the cycle's loop")
+    });
+    assert_eq!(
+      code_matches(&CYCLE_SRC[loop_at..call_at], MACRO_BASELINE),
+      1,
+      "{CYCLE_NAME}: the descent witness is attempt-relative — the shared cycle takes its \
+       `trip_snapshot()` baseline INSIDE its own loop, once per element, for both drivers at once. \
+       Hoisting it out of the macro body would make it per collection in two drivers with one edit"
     );
   }
 
-  /// How many element loops each guard-bearing source runs — and therefore how many per-element
-  /// trip baselines it takes. Index-aligned with [`progress_guard_sites`].
+  /// How many element cycles each guard-bearing source runs, and how many of them it **spells
+  /// itself**. Index-aligned with [`progress_guard_sites`].
   ///
   /// One row per source rather than a bare total, because the two fold sources that host three
-  /// driver impls each are exactly where a fourth impl could land without one. The count is
-  /// asserted against **two** independent needles — the `loop {` openers and the
-  /// `trip_snapshot()` calls — so a loop added without a baseline, or a baseline added outside a
-  /// loop, breaks the equality rather than being absorbed by it.
-  fn element_loop_counts() -> [(&'static str, usize); 12] {
+  /// driver impls each are exactly where a fourth impl could land without one. Each row's count is
+  /// asserted against **two** independent needles — the cycle openers (`loop {` for a source that
+  /// spells its own, `try_element_cycle!(` for one that shares) and the `trip_snapshot()` calls —
+  /// so a loop added without a baseline, or a baseline added outside a loop, breaks the equality
+  /// rather than being absorbed by it.
+  ///
+  /// The second column is `0` for exactly two sources: `repeated` and `delim/repeated` invoke
+  /// `try_element_cycle!`, whose one body holds both their loops and both their baselines. Those
+  /// rows therefore assert the *absence* of both needles in driver text plus one invocation, and
+  /// the shared body is read once by
+  /// [`every_element_loop_baselines_its_trip_witness_per_element`]. A source that grew a second,
+  /// unshared loop moves its first column and fails here before it can be trusted.
+  fn element_loop_counts() -> [(&'static str, usize, usize); 12] {
     [
-      ("many/repeated/mod.rs", 1),
-      ("many/repeated_while/mod.rs", 1),
-      ("many/delim/repeated.rs", 1),
-      ("many/delim/repeated_while.rs", 1),
-      ("many/sep/parse/mod.rs", 1),
-      ("many/sep/delim/mod.rs", 1),
-      ("many/sep_while/parse/mod.rs", 1),
-      ("many/sep_while/delim/mod.rs", 1),
-      ("fold/mod.rs", 3),
-      ("fold/rfold.rs", 1),
-      ("fold/fold_while.rs", 3),
-      ("fold/rfold_while.rs", 1),
+      ("many/repeated/mod.rs", 1, 0),
+      ("many/repeated_while/mod.rs", 1, 1),
+      ("many/delim/repeated.rs", 1, 0),
+      ("many/delim/repeated_while.rs", 1, 1),
+      ("many/sep/parse/mod.rs", 1, 1),
+      ("many/sep/delim/mod.rs", 1, 1),
+      ("many/sep_while/parse/mod.rs", 1, 1),
+      ("many/sep_while/delim/mod.rs", 1, 1),
+      ("fold/mod.rs", 3, 3),
+      ("fold/rfold.rs", 1, 1),
+      ("fold/fold_while.rs", 3, 3),
+      ("fold/rfold_while.rs", 1, 1),
     ]
+  }
+
+  /// The needle that opens a source's element cycle: its own `loop {`, or the invocation of the
+  /// shared one. Every region scan below anchors on whichever of the two the source uses, so a
+  /// driver that shares the cycle is scanned from the invocation exactly as one that spells it is
+  /// scanned from its `loop {`.
+  const fn cycle_opener(own: usize) -> &'static str {
+    if own == 0 { CYCLE } else { HOSTING_LOOP }
   }
 
   /// **All twelve** guard-bearing drivers take their trip baseline inside the element loop, once per
@@ -1252,7 +1432,8 @@ mod gate_census {
     let mut gates = 0;
     for i in 0..sites.len() {
       let (name, src) = sites[i];
-      let (classified, loops) = counts[i];
+      let (classified, loops, own) = counts[i];
+      let opener = cycle_opener(own);
       assert_eq!(
         name, classified,
         "the guard-bearing source list and the element-loop classification have drifted apart at \
@@ -1261,35 +1442,48 @@ mod gate_census {
       );
       assert_eq!(
         code_matches(src, HOSTING_LOOP),
-        loops,
-        "{name}: expected {loops} element loop(s). A driver impl added to this source needs its own \
-         baseline and its own classification row before it can be trusted"
+        own,
+        "{name}: expected {own} element loop(s) spelled in this source. A driver impl added here \
+         needs its own baseline and its own classification row before it can be trusted, and a \
+         driver that shares `try_element_cycle!` must not re-state the cycle beside its invocation"
+      );
+      assert_eq!(
+        code_matches(src, CYCLE),
+        loops - own,
+        "{name}: expected {} invocation(s) of the shared `{CYCLE}`. The row says this source drives \
+         {loops} element cycle(s) and spells {own} of them, so the rest are invocations — a count \
+         that has drifted means a cycle is running under baselines nobody classified",
+        loops - own
       );
       assert_eq!(
         code_matches(src, BASELINE),
-        loops,
-        "{name}: exactly one `trip_snapshot()` baseline per element loop — a loop without one leaves \
-         its exits ungated, and a second, stray read of the counter is how a session-absolute test \
-         gets back in"
+        own,
+        "{name}: exactly one `trip_snapshot()` baseline per element loop THIS SOURCE SPELLS — a \
+         loop without one leaves its exits ungated, a second, stray read of the counter is how a \
+         session-absolute test gets back in, and a baseline in a source that shares the cycle is a \
+         second reading beside the one the macro already took"
       );
 
-      // Every chokepoint call, of all three kinds, reads a baseline taken inside the loop that
-      // hosts it. The region is `loop {` → call, so a baseline hoisted above the loop leaves the
-      // region empty and fails here.
+      // Every chokepoint call, of all three kinds, reads a baseline taken inside the cycle that
+      // hosts it. The region is `loop {` → call for a source that spells its own cycle, so a
+      // baseline hoisted above the loop leaves the region empty and fails here; and
+      // `try_element_cycle!(` → call for one that shares, where the baseline is the macro's and
+      // the region must therefore hold none — a reading taken between the invocation and a gate is
+      // a second, per-collection one.
       for needle in [CHOKEPOINT, ABSENCE, CLOSE_GATE] {
         let mut from = 0;
         while let Some(at) = code_find(&src[from..], needle) {
           let call_at = from + at;
-          let loop_at = src[..call_at].rfind(HOSTING_LOOP).unwrap_or_else(|| {
-            panic!("{name}: a `{needle}` call that is not inside a repetition loop")
+          let loop_at = src[..call_at].rfind(opener).unwrap_or_else(|| {
+            panic!("{name}: a `{needle}` call that is not inside an element cycle (`{opener}`)")
           });
           assert_eq!(
             code_matches(&src[loop_at..call_at], BASELINE),
-            1,
-            "{name}: the descent witness is attempt-relative — take the `trip_snapshot()` baseline \
-             INSIDE the element loop, once per element. Hoisted out of it the comparison degrades \
-             into a read of the monotone session counter, and every absence exit after the parse's \
-             first trip refuses, ordinary ends of construct included"
+            usize::from(own > 0),
+            "{name}: the descent witness is attempt-relative — the `trip_snapshot()` baseline is \
+             taken INSIDE the element cycle, once per element. Hoisted out of it the comparison \
+             degrades into a read of the monotone session counter, and every absence exit after \
+             the parse's first trip refuses, ordinary ends of construct included"
           );
           gates += 1;
           from = call_at + needle.len();
@@ -1299,10 +1493,13 @@ mod gate_census {
     }
     assert_eq!(
       (baselines, gates),
-      (16, 42),
-      "sixteen element loops across the twelve sources, each with its own baseline, and \
-       forty-two chokepoint calls reading one: four failure gates, thirty absence gates and eight \
-       real-closer gates. The totals are pinned so a gate cannot move between sources unnoticed"
+      (16, 40),
+      "sixteen element cycles across the twelve sources, each with its own baseline, and forty \
+       chokepoint calls in driver text reading one: two failure gates, thirty absence gates and \
+       eight real-closer gates. The other two failure gates are the one `try_element_cycle!` body \
+       serves, counted by \
+       `every_element_loop_baselines_its_trip_witness_per_element`. The totals are pinned so a \
+       gate cannot move between sources unnoticed"
     );
   }
 
@@ -1324,9 +1521,16 @@ mod gate_census {
   /// has always done, and what the counter now also does when a rollback erased the latch.
   ///
   /// Both directions are pinned. The count per source stops a second, stray baseline from being
-  /// added (which would silently re-narrow one gate), and the region scan — `loop {` → call, which
-  /// must contain **zero** of them — stops the baseline being moved into the loop. The `rfind`
-  /// panics rather than passing when a call is not inside a loop at all.
+  /// added (which would silently re-narrow one gate), and the region scan — the source's cycle
+  /// opener → call, which must contain **zero** of them — stops the baseline being moved into the
+  /// loop. The `rfind` panics rather than passing when a call is not inside a cycle at all.
+  ///
+  /// This one counts per COLLECTION, so its per-source count is the row's cycle count and not the
+  /// number of cycles the source spells: `repeated` and `delim/repeated` share
+  /// `try_element_cycle!` and still take their own scanner baseline and their own latch, above
+  /// their own invocation, because those are the collection's and not the cycle's. That is the
+  /// same asymmetry stated as a diff — the descent baseline moved into the shared body and these
+  /// two did not.
   #[test]
   #[cfg_attr(
     miri,
@@ -1339,7 +1543,8 @@ mod gate_census {
     let mut gates = 0;
     for i in 0..sites.len() {
       let (name, src) = sites[i];
-      let (classified, loops) = counts[i];
+      let (classified, loops, own) = counts[i];
+      let opener = cycle_opener(own);
       assert_eq!(
         name, classified,
         "the guard-bearing source list and the element-loop classification have drifted apart at \
@@ -1362,14 +1567,14 @@ mod gate_census {
          and its neighbour is not"
       );
 
-      // The two gates that read it, and the negative half: NOTHING between the hosting loop and the
-      // call may take this baseline, because taking it there makes it per element.
+      // The two gates that read it, and the negative half: NOTHING between the hosting cycle's
+      // opener and the call may take this baseline, because taking it there makes it per element.
       for needle in [CHOKEPOINT, ABSENCE] {
         let mut from = 0;
         while let Some(at) = code_find(&src[from..], needle) {
           let call_at = from + at;
-          let loop_at = src[..call_at].rfind(HOSTING_LOOP).unwrap_or_else(|| {
-            panic!("{name}: a `{needle}` call that is not inside a repetition loop")
+          let loop_at = src[..call_at].rfind(opener).unwrap_or_else(|| {
+            panic!("{name}: a `{needle}` call that is not inside an element cycle (`{opener}`)")
           });
           assert_eq!(
             code_matches(&src[loop_at..call_at], SCANNER_BASELINE),
@@ -1387,12 +1592,26 @@ mod gate_census {
     }
     assert_eq!(
       (baselines, gates),
-      (16, 34),
+      (16, 32),
       "sixteen collections across the twelve sources, each with its own scanner baseline, and \
-       thirty-four gates reading one: four failure gates and thirty absence gates. The eight \
-       real-closer gates are deliberately NOT among them — see `close_after_element` — so this total \
-       is the previous test's forty-two minus exactly those eight"
+       thirty-two gates in driver text reading one: two failure gates and thirty absence gates. \
+       The other two failure gates are the shared `try_element_cycle!` body's, which takes no \
+       scanner baseline at all — that one is the collection's, and stays above each driver's \
+       invocation. The eight real-closer gates are deliberately NOT among them — see \
+       `close_after_element` — so this total is the previous test's forty minus exactly those eight"
     );
+
+    // The shared cycle takes NEITHER collection-relative baseline: both stay in driver text, above
+    // the invocation, one per collection. A baseline moved into the macro would become per element
+    // in two drivers at once, which is the defect this test exists to make unspellable.
+    for needle in [SCANNER_BASELINE, LATCH_BASELINE] {
+      assert_eq!(
+        code_matches(CYCLE_SRC, needle),
+        0,
+        "{CYCLE_NAME}: the shared try cycle is per ELEMENT, so it takes no `{needle}` — that \
+         baseline is the collection's and belongs above each driver's invocation, beside the other"
+      );
+    }
   }
 
   /// The bound arrangements every driver family re-exposes, and the separator arrangements the
@@ -1413,8 +1632,8 @@ mod gate_census {
   /// The census's own frontier, stated as data: every `mod` declaration in the `many` and `fold`
   /// driver trees, grouped.
   ///
-  /// One row for every source [`swallow_scan_sites`] reads, plus the three tree `mod.rs` files that
-  /// declare them. A row with no groups declares no modules today, and a `mod` added to it reds
+  /// One row for every source [`swallow_scan_sites`] reads, plus `many/mod.rs` itself, which
+  /// declares them. A row with no groups declares no modules today, and a `mod` added to it reds
   /// this test rather than quietly widening the tree past the scan.
   ///
   /// **What this closes and what it does not.** It closes the "fifth file" hole for the trees the
@@ -1426,8 +1645,9 @@ mod gate_census {
     &'static str,
     &'static str,
     &'static [&'static [&'static str]],
-  ); 16] {
+  ); 17] {
     [
+      (CYCLE_NAME, CYCLE_SRC, &[]),
       (
         "many/mod.rs",
         super::end_state_census::many_mod_production(),
@@ -2078,9 +2298,17 @@ mod gate_census {
   /// anything, which a cursor-keyed guard reads as false progress — a zero-width element behind a
   /// trivia gap then runs an extra cycle. This pins the metric across every guard-bearing driver so
   /// the class cannot regrow.
+  ///
+  /// [`CYCLE_SRC`] is scanned beside them because two of those guards moved there: the stall test
+  /// `repeated` and `delim/repeated` used to spell each is now the shared cycle's one. A census
+  /// that kept reading only the twelve driver sources would have stopped looking at the site it
+  /// was written for, and would still have passed.
   #[test]
   fn every_progress_guard_reads_committed_progress() {
-    for (name, src) in progress_guard_sites() {
+    for (name, src) in progress_guard_sites()
+      .into_iter()
+      .chain([(CYCLE_NAME, CYCLE_SRC)])
+    {
       assert!(
         !src.contains(".as_inner() == ") && !src.contains(".as_inner() != "),
         "{name}: no-progress guards must compare committed consumption (`span().end()`), never a \
@@ -2399,10 +2627,15 @@ pub(super) mod end_state_census {
   fn every_driver_admits_its_elements_through_the_one_chokepoint() {
     /// Admissions per driver source. The four separated engines are two `handle_continue`
     /// bodies of four state arms each, shared with their delimited twins.
+    ///
+    /// The two try-driven plain drivers read zero for the same kind of reason and a different
+    /// mechanism: their admission is the one inside `try_element_cycle!`, counted once in
+    /// `many/macros.rs` below and serving both. Wiring either of them to a container directly
+    /// would raise its count off zero and fail here, exactly as it would for `sep{,_while}/delim`.
     const ADMISSIONS: &[(&str, usize)] = &[
-      ("many/repeated/mod.rs", 1),
+      ("many/repeated/mod.rs", 0),
       ("many/repeated_while/mod.rs", 1),
-      ("many/delim/repeated.rs", 1),
+      ("many/delim/repeated.rs", 0),
       ("many/delim/repeated_while.rs", 1),
       ("many/sep/parse/mod.rs", 4),
       ("many/sep/delim/mod.rs", 0),
@@ -2439,10 +2672,35 @@ pub(super) mod end_state_census {
       );
       total += got;
     }
+
+    // The shared try cycle's own admission, counted with the same three needles, because it hosts
+    // driver-reachable loop code and a push written there would reach two drivers at once.
+    let (cycle_name, cycle_src) = (
+      super::gate_census::CYCLE_NAME,
+      super::gate_census::CYCLE_SRC,
+    );
+    for needle in ["container.push(", "on_element("] {
+      assert_eq!(
+        code_matches(cycle_src, needle),
+        0,
+        "{cycle_name}: the shared element cycle admits through `many::admit_element` like every \
+         driver — `{needle}` here is the one place a bypass would serve two drivers at once"
+      );
+    }
+    let cycle_admissions = code_matches(cycle_src, "admit_element(");
     assert_eq!(
-      total, 12,
-      "twelve element admissions across the eight drivers; `sep{{,_while}}/delim` reach a \
-       container through their non-delimited twin's `handle_continue`"
+      cycle_admissions, 1,
+      "{cycle_name}: `try_element_cycle!` carries exactly one admission — the one `repeated` and \
+       `delim/repeated` stopped spelling. A second is a second element admitted per cycle"
+    );
+    total += cycle_admissions;
+
+    assert_eq!(
+      total, 11,
+      "eleven element admissions across the eight drivers and the one shared cycle; \
+       `sep{{,_while}}/delim` reach a container through their non-delimited twin's \
+       `handle_continue`, and `repeated`/`delim/repeated` through `try_element_cycle!` — which is \
+       why the total is eleven for twelve driver-visible admissions"
     );
 
     // The order, as a region: the count hook is called before the container is asked.
