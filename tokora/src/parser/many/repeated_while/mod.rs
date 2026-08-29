@@ -277,9 +277,161 @@ impl<F, Condition, O, W, L, Ctx, Lang: ?Sized, Cmpl>
   }
 }
 
+/// What a `*_while` cycle's element boundary found, probed at the top of that cycle and ahead of
+/// its decision.
+///
+/// An undelimited collection has no boundary and answers `Open(())` without reading the input; a
+/// delimited one answers `Closed` when the closer is genuinely there, and otherwise carries its
+/// close verdict into this cycle's stop exit, where it becomes the close-miss diagnostic.
+pub(super) enum Probed<P, C> {
+  /// Nothing closed here. `P` is whatever the boundary saw, carried to the stop exit.
+  Open(P),
+  /// The boundary concluded the construct itself, and has already done whatever committing that
+  /// took. `C` is what it carries out to the driver.
+  Closed(C),
+}
+
+/// How a `*_while` element loop ended, and the trip baseline of the attempt that ended it.
+///
+/// The three are separate because the delimited driver does three different things with them and
+/// the plain one does the same thing with two: a boundary that closed has nothing left to gate, a
+/// stop carries the boundary verdict its close-miss diagnostic is built from, and a stall carries
+/// none because the epilogue probes the close position afresh.
+pub(super) enum WhileExit<'closure, P, C> {
+  /// The boundary closed the construct at the top of a cycle, before that cycle's decision ran.
+  ///
+  /// No trip baseline travels with this one. A boundary that closes has already gated the exit it
+  /// made — the real-closer gate is descent-only and runs at the probe, where the token is still
+  /// in hand — so there is nothing left for the driver to witness.
+  Closed(C),
+  /// The caller's condition said stop, carrying this cycle's boundary verdict.
+  Stopped(ResourceTripBaseline<'closure>, P),
+  /// A cycle committed nothing.
+  Stalled(ResourceTripBaseline<'closure>),
+}
+
 impl<'inp, 'c, L, F, Condition, O, Ctx, Lang: ?Sized, W>
   RepeatedWhile<F, Condition, O, W, L, Ctx, Lang>
 {
+  /// The `*_while` element loop itself — one terminal-checked decision window per cycle, one
+  /// admission, one stall test — and **no conclusion of its own**.
+  ///
+  /// Two drivers run it. [`parse`](Self::parse) runs it with no boundary at all;
+  /// `delim/repeated_while.rs` runs it under a delimiter's closer, so a delimited `while` list is
+  /// this loop *under a delimiter* rather than a second copy of it
+  /// ([#259](https://github.com/al8n/tokora/issues/259)).
+  ///
+  /// # Why the boundary is a parameter and not a second loop
+  ///
+  /// The delimited form must classify the close position **before** each decision, not after it:
+  /// a closer reached from the top of a cycle ends the construct on a real pre-trip token, which
+  /// is the one exit `many::close_after_element` gates and neither scanner witness may touch. Run
+  /// the caller's condition first instead and that same input reaches a *stop*, whose gate is
+  /// `many::absence_after_element` and reads every witness — a different verdict on the same
+  /// bytes. So the probe's **position in the cycle** is load-bearing, and the only way to share
+  /// the cycle is to let the boundary sit in it. `boundary` is a monomorphic `FnMut`: the plain
+  /// driver's answers `Open(())` and touches nothing, and its `Closed` type is uninhabited, so
+  /// that arm is an empty match rather than an unreachable one.
+  ///
+  /// # What the caller owes, and what it gets back
+  ///
+  /// The two per-collection baselines stay with the caller — the delimited driver takes them
+  /// after its opener, and both are read only at exits this function does not own. The
+  /// per-element descent baseline is this loop's, taken inside it once per element, and it comes
+  /// back attached to whichever exit ended the loop. `many::absence_after_element` says why it
+  /// has to be carried out rather than re-read once the loop has ended.
+  pub(super) fn drive_elements<Container, EC, B, P, C>(
+    &mut self,
+    inp: &mut InputRef<'inp, 'c, L, Ctx, Lang>,
+    container: &mut Container,
+    counts: &EC,
+    anchor: &Cursor<'inp, 'c, L>,
+    nums: &mut usize,
+    mut boundary: B,
+  ) -> Result<WhileExit<'c, P, C>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+  where
+    L: Lexer<'inp>,
+    F: ParseInput<'inp, L, O, Ctx, Lang>,
+    Condition: Decision<'inp, L, Ctx::Emitter, W, Lang>,
+    W: Window,
+    Ctx::Emitter: FullContainerEmitter<'inp, L, Lang>,
+    Ctx: ParseContext<'inp, L, Lang>,
+    // The decision-window gate surfaces a mid-window terminal scanner stop as this end-of-input
+    // error.
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
+    Container: crate::container::Container<O>,
+    EC: ElementCountHandler<'inp, 'c, L, Ctx, Lang>,
+    B: FnMut(
+      &mut InputRef<'inp, 'c, L, Ctx, Lang>,
+      &mut Container,
+      ResourceTripBaseline<'c>,
+    ) -> Result<Probed<P, C>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>,
+  {
+    let mut full = false;
+    let mut committed = inp.span().end();
+
+    loop {
+      // The descent witness's baseline, taken once per CYCLE — which is once per element, since a
+      // cycle runs at most one. It sits at the top of the body rather than beside the element
+      // attempt so that every exit of this cycle can read the same value; that widens the measured
+      // window by the boundary probe, the decision peek and `decide`, none of which can descend, so
+      // the reading is the one the element attempt would have given. See
+      // `many::absence_after_element` for why it is per element and not per collection, and why the
+      // `Action::Stop` exit — reached before this cycle's element runs — is a constant `false` here
+      // by construction: the element that could have caught a trip is then the PREVIOUS cycle's
+      // *accepting* one, which the module docs exempt.
+      let trips = inp.trip_snapshot();
+      let probe = match boundary(inp, container, trips)? {
+        Probed::Closed(closed) => return Ok(WhileExit::Closed(closed)),
+        Probed::Open(probe) => probe,
+      };
+      // A short decision window can be a genuine end of input, but one truncated by a terminal
+      // scanner stop is not: surface the committed end-of-input error before anything else. `decide`
+      // is fallible and emitting, and a zero-width element makes no progress that would re-lex the
+      // frontier, so neither may run first — no call may preempt the terminal stop. `end` is the
+      // committed watermark, captured before the peek (the fill never advances it).
+      let end = inp.span().end();
+      let (peeked, terminal, emitter) = inp.peek_with_emitter_terminal::<W>()?;
+      if terminal {
+        return Err(UnexpectedEot::eot_of(end).into_terminal().into());
+      }
+
+      match self.condition.decide(peeked, emitter)? {
+        // A stop concludes *absence*: "no more elements". The gate for that conclusion is the
+        // driver's, because what the conclusion means depends on what sits at the boundary — see
+        // `many::absence_after_element` for the undelimited reading and the delimited driver's
+        // close-miss arms for the other.
+        Action::Stop => return Ok(WhileExit::Stopped(trips, probe)),
+        Action::Continue => {
+          // The admission runs only once the element has actually, successfully parsed —
+          // matching the try-driven `Repeated::drive_elements`, which never sees `Ok(Accept(item))`
+          // for an element that failed. Checking `nums == max` ahead of `parse_input` fired the
+          // maximum hook for an element that was merely *about to be attempted*: a `Continue`
+          // decision at the boundary paired with a failing parse then reported `TooMany` (or masked
+          // the real error under a fail-fast emitter) for an element that was never parsed,
+          // contradicting the parsed-element accounting convention `admit_element` establishes.
+          let item = self.f.parse_input(inp)?;
+          admit_element(counts, nums, &mut full, container, item, inp, anchor)?;
+        }
+      }
+
+      // A `Continue` cycle that consumed nothing re-sees the same lookahead and would decide
+      // `Continue` forever. The progress metric is committed consumption (`span().end()`), never the
+      // cache-front cursor — a lookahead fill moves that across skipped trivia without consuming,
+      // reading a zero-width element as false progress. `<=`, not `==`: the watermark cannot regress
+      // within a cycle, so anything not strictly ahead is a stall. The stall concludes *absence* on
+      // the strength of the element attempt this cycle just ran: that attempt can hit either
+      // never-recoverable stop and still return `Ok` — a terminal scanner stop its own lookahead
+      // latched (which the decision gate above cannot see, because the latch happens after it), or a
+      // descent budget trip it caught itself and answered with a value it consumed nothing for.
+      let new_committed = inp.span().end();
+      if new_committed <= committed {
+        return Ok(WhileExit::Stalled(trips));
+      }
+      committed = new_committed;
+    }
+  }
+
   fn parse<Container, RH>(
     &mut self,
     inp: &mut InputRef<'inp, 'c, L, Ctx, Lang>,
@@ -301,87 +453,40 @@ impl<'inp, 'c, L, F, Condition, O, Ctx, Lang: ?Sized, W>
   {
     trace_event!(inp, "repeated_while");
     let anchor = inp.cursor().clone();
-    let mut committed = inp.span().end();
-    // The terminal-latch baseline for the absence exits below: comparing the live latch against it
+    // The terminal-latch baseline for the absence exit below: comparing the live latch against it
     // keeps that witness attempt-relative. One offset clone per collection.
     let latch = inp.latch_snapshot();
-    // The scanner-trip baseline for the gates below — PER COLLECTION, taken beside the latch
+    // The scanner-trip baseline for the gate below — PER COLLECTION, taken beside the latch
     // and deliberately unlike the per-element descent one. It answers the latch's question
     // through a monotone session counter that no rollback reaches, which is what an element
     // catching a stop inside an `attempt` of its own leaves behind. See
     // `many::absence_after_element` for why the two granularities differ.
     let scans = inp.scanner_trip_snapshot();
     let mut nums = 0;
-    let mut full = false;
 
-    loop {
-      // The descent witness's baseline, taken once per CYCLE — which is once per element, since a
-      // cycle runs at most one. It sits at the top of the body rather than beside the element
-      // attempt so that BOTH of this cycle's absence exits can read the same value; that widens the
-      // measured window by the decision peek and `decide`, neither of which can descend, so the
-      // reading is the one the element attempt would have given. See `many::absence_after_element`
-      // for why it is per element and not per collection, and why the `Action::Stop` exit — reached
-      // before this cycle's element runs — is a constant `false` here by construction: the element
-      // that could have caught a trip is then the PREVIOUS cycle's *accepting* one, which the
-      // module docs exempt.
-      let trips = inp.trip_snapshot();
-      // A short decision window can be a genuine end of input, but one truncated by a terminal
-      // scanner stop is not: surface the committed end-of-input error before anything else. `decide`
-      // is fallible and emitting, and a zero-width element makes no progress that would re-lex the
-      // frontier, so neither may run first — no call may preempt the terminal stop. `end` is the
-      // committed watermark, captured before the peek (the fill never advances it).
-      let end = inp.span().end();
-      let (peeked, terminal, emitter) = inp.peek_with_emitter_terminal::<W>()?;
-      if terminal {
-        return Err(UnexpectedEot::eot_of(end).into_terminal().into());
-      }
+    // No boundary: an undelimited collection has no close position, so nothing is probed and
+    // nothing can conclude the construct but the condition and the stall test. `Infallible` as the
+    // closed type is what makes that a claim the compiler checks rather than a comment — the
+    // `Closed` arm below is an EMPTY match, not an unreachable one.
+    let elem_trips =
+      match self.drive_elements(inp, container, rh, &anchor, &mut nums, |_, _, _| {
+        Ok(Probed::<(), core::convert::Infallible>::Open(()))
+      })? {
+        WhileExit::Closed(closed) => match closed {},
+        // Both ways out — the condition stopping, and a cycle that committed nothing — conclude
+        // *absence*: "no more elements", on the strength of what the last element attempt did. The
+        // element's own lookahead can latch a terminal scanner stop and still return `Ok` with a short
+        // window, leaving the pre-trip tokens cached — the next window is then served whole from that
+        // cache, so it carries no terminal flag for the loop's gate to see and the condition reads a
+        // truncated view as the end of the construct. Both never-recoverable witnesses are the
+        // chokepoint's; the scanner half is attempt-relative against the entry snapshot, so an
+        // inherited boundary is not mis-charged here.
+        WhileExit::Stopped(trips, ()) | WhileExit::Stalled(trips) => trips,
+      };
+    absence_after_element(inp, &latch, scans, elem_trips)?;
 
-      match self.condition.decide(peeked, emitter)? {
-        Action::Stop => {
-          // A stop concludes *absence*: "no more elements". The element's own lookahead can latch a
-          // terminal scanner stop and still return `Ok` with a short window, leaving the pre-trip
-          // tokens cached — this window is then served whole from that cache, so it carries no
-          // terminal flag for the gate above to see and the condition reads a truncated view as the
-          // end of the construct. Both never-recoverable witnesses are the chokepoint's, not this
-          // loop's; the scanner half is attempt-relative against the entry snapshot, so an inherited
-          // boundary is not mis-charged here.
-          absence_after_element(inp, &latch, scans, trips)?;
-          let span = inp.span_since(&anchor);
-          rh.on_stop(nums, inp, &anchor)?;
-          return Ok(span);
-        }
-        Action::Continue => {
-          // The admission runs only once the element has actually, successfully parsed —
-          // matching the try-driven `Repeated::parse`, which never sees `Ok(Accept(item))` for an
-          // element that failed. Checking `nums == max` ahead of `parse_input` fired the maximum
-          // hook for an element that was merely *about to be attempted*: a `Continue` decision at
-          // the boundary paired with a failing parse then reported `TooMany` (or masked the real
-          // error under a fail-fast emitter) for an element that was never parsed, contradicting
-          // the parsed-element accounting convention `admit_element` establishes.
-          let item = self.f.parse_input(inp)?;
-          admit_element(rh, &mut nums, &mut full, container, item, inp, &anchor)?;
-        }
-      }
-
-      // A `Continue` cycle that consumed nothing re-sees the same lookahead and would decide
-      // `Continue` forever. The progress metric is committed consumption (`span().end()`), never the
-      // cache-front cursor — a lookahead fill moves that across skipped trivia without consuming,
-      // reading a zero-width element as false progress. `<=`, not `==`: the watermark cannot regress
-      // within a cycle, so anything not strictly ahead is a stall.
-      let new_committed = inp.span().end();
-      if new_committed <= committed {
-        // A stall concludes *absence*: "no more elements", on the strength of the element attempt
-        // this cycle just ran. That attempt can hit either never-recoverable stop and still return
-        // `Ok` — a terminal scanner stop its own lookahead latched (which the decision gate above
-        // cannot see, because the latch happens after it), or a descent budget trip it caught
-        // itself and answered with a value it consumed nothing for. Both are the chokepoint's; this
-        // is the exit the measurement in `many`'s docs found spending the second of them.
-        absence_after_element(inp, &latch, scans, trips)?;
-        let span = inp.span_since(&anchor);
-        rh.on_stop(nums, inp, &anchor)?;
-        return Ok(span);
-      }
-      committed = new_committed;
-    }
+    let span = inp.span_since(&anchor);
+    rh.on_stop(nums, inp, &anchor)?;
+    Ok(span)
   }
 }

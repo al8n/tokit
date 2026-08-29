@@ -1,7 +1,6 @@
 use crate::{
   container::Container as ContainerT,
   emitter::{TooFewEmitter, TooManyEmitter},
-  error::syntax::TooFew,
 };
 
 use super::*;
@@ -45,28 +44,17 @@ where
     Ctx: ParseContext<'inp, L, Lang>,
   {
     let limits = self.parser.parser.to_with();
-    let min = self.parser.parser.minimum().get();
 
     self
       .attempt(|c| {
         let Collect {
           parser, container, ..
         } = c;
-        DelimitedBy::<_, Delim>::new(parser.parser.parser_mut()).parse_repeated(
-          inp,
-          container,
-          &limits,
-          // The minimum is end-detected and stays here; the maximum is settled at the element that
-          // broke it, from inside `many::admit_element`. See this file's `at_most` sibling.
-          |nums, inp, span| {
-            if min > nums {
-              inp
-                .emitter()
-                .emit_too_few(TooFew::of(span.clone(), nums, min))?;
-            }
-            Ok(())
-          },
-        )
+        // The minimum is end-detected, by `With<Minimum, Maximum>`'s own `on_stop`; the maximum
+        // is settled at the element that broke it, from inside `many::admit_element`. See this
+        // file's `at_most` sibling.
+        DelimitedBy::<_, Delim>::new(parser.parser.parser_mut())
+          .parse_repeated(inp, container, &limits)
       })
       .map(|(_, collected)| collected)
   }
@@ -75,7 +63,10 @@ where
 /// The **spanned owning** destination: the container and the construct's span together.
 ///
 /// One of the two contracts this family did not implement until
-/// [#259](https://github.com/al8n/tokora/issues/259)'s stage 3.
+/// [#259](https://github.com/al8n/tokora/issues/259)'s stage 3. Nothing about being delimited
+/// stopped it — `sep/delim` and `sep_while/delim` are delimited and implement all four — and the
+/// reason it was missing was that this driver was spelled as a loop of its own rather than as the
+/// plain one under a delimiter. Driving the shared loop is what made the contracts follow.
 impl<
   'inp,
   L,
@@ -115,27 +106,13 @@ where
     Ctx: ParseContext<'inp, L, Lang>,
   {
     let limits = self.parser.parser.to_with();
-    let min = self.parser.parser.minimum().get();
-
     self
       .attempt(|c| {
         let Collect {
           parser, container, ..
         } = c;
-        DelimitedBy::<_, Delim>::new(parser.parser.parser_mut()).parse_repeated(
-          inp,
-          container,
-          &limits,
-          |nums, inp, span| {
-            if min > nums {
-              inp
-                .emitter()
-                .emit_too_few(TooFew::of(span.clone(), nums, min))?;
-            }
-
-            Ok(())
-          },
-        )
+        DelimitedBy::<_, Delim>::new(parser.parser.parser_mut())
+          .parse_repeated(inp, container, &limits)
       })
       .map(|(span, collected)| Spanned::new(span, collected))
   }
@@ -145,7 +122,9 @@ where
 /// admitted on the **failure** arm too, which the owning form cannot expose.
 ///
 /// The second contract this family did not implement until
-/// [#259](https://github.com/al8n/tokora/issues/259)'s stage 3.
+/// [#259](https://github.com/al8n/tokora/issues/259)'s stage 3, and the one
+/// `tokora/tests/repetition_behavioural_matrix.rs`'s layer B8 is about — with it, the matrix's
+/// borrowed table covers all eight drivers instead of six.
 impl<
   'inp,
   'c,
@@ -186,21 +165,10 @@ where
     Ctx: ParseContext<'inp, L, Lang>,
   {
     let limits = self.parser.parser.to_with();
-    let min = self.parser.parser.minimum().get();
-
     DelimitedBy::<_, Delim>::new(self.parser.parser.parser_mut()).parse_repeated(
       inp,
       &mut self.container,
       &limits,
-      |nums, inp, span| {
-        if min > nums {
-          inp
-            .emitter()
-            .emit_too_few(TooFew::of(span.clone(), nums, min))?;
-        }
-
-        Ok(())
-      },
     )
   }
 }

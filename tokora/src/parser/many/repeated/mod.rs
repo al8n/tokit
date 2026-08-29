@@ -236,52 +236,66 @@ impl<F, O, L, Ctx, Lang: ?Sized, Cmpl> Apply<Bounded<Repeated<F, O, L, Ctx, Lang
 }
 
 impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cmpl> {
-  pub(super) fn parse<Container, RH>(
+  /// The element loop itself — one attempt per cycle, one admission, one failure gate and one
+  /// stall test — and **no conclusion of its own**.
+  ///
+  /// Two drivers run it. [`parse`](Self::parse) runs it bare and concludes at the absence
+  /// chokepoint; `delim/repeated.rs` runs it between an opener and a close probe, so a delimited
+  /// plain list is this loop *under a delimiter* rather than a second copy of it
+  /// ([#259](https://github.com/al8n/tokora/issues/259)). What the delimiter adds is the
+  /// delimited driver's alone, and it is the one thing this function deliberately does not hold:
+  /// a delimited list's element boundary is also a **close** position, which the plain loop has
+  /// no concept of, so `many::close_after_element` is reached from that driver's exits and from
+  /// nowhere here.
+  ///
+  /// # What the caller owes, and what it gets back
+  ///
+  /// The two per-collection baselines stay with the caller: `scans` comes in and the latch never
+  /// arrives at all, because the delimited driver takes both **after** its opener so the opener's
+  /// own scan is not charged to the element loop, and because the latch is read only at exits
+  /// this function does not own. The per-element descent baseline is this loop's, taken inside it
+  /// once per element, and the value **returned** is the one belonging to the attempt that
+  /// concluded absence — a decline, or a cycle that committed nothing. Every exit either driver
+  /// then builds on that conclusion reads it: the plain driver's absence chokepoint, and the
+  /// delimited driver's close-miss and real-closer exits. `many::absence_after_element` says why
+  /// it has to be carried out rather than re-read once the loop has ended.
+  pub(super) fn drive_elements<Container, EC>(
     &mut self,
     inp: &mut InputRef<'inp, 'c, L, Ctx, Lang, Cmpl>,
     container: &mut Container,
-    rh: &RH,
-  ) -> Result<L::Span, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+    counts: &EC,
+    anchor: &Cursor<'inp, 'c, L>,
+    scans: ScannerTripBaseline<'c>,
+    nums: &mut usize,
+  ) -> Result<ResourceTripBaseline<'c>, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
     L: Lexer<'inp>,
     F: TryParseInput<'inp, L, O, Ctx, Lang, Cmpl>,
     Ctx::Emitter: Emitter<'inp, L, Lang> + FullContainerEmitter<'inp, L, Lang>,
     Ctx: ParseContext<'inp, L, Lang>,
     Cmpl: crate::input::SurfaceIncomplete<'inp, L, Ctx, Lang>,
-    // The absence-exit gate surfaces a terminal scanner stop as this end-of-input error.
+    // The failure chokepoint re-raises a frontier `Incomplete` through this bound.
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
     Container: crate::container::Container<O>,
-    RH: RepeatedHandler<'inp, 'c, O, L, Ctx, Lang, Cmpl>,
+    EC: ElementCountHandler<'inp, 'c, L, Ctx, Lang, Cmpl>,
   {
-    trace_event!(inp, "repeated");
-    let mut num = 0;
     let mut full = false;
-    let anchor = inp.cursor().clone();
-    let mut cursor = anchor.clone();
+    let mut cursor = inp.cursor().clone();
     let mut committed = inp.span().end();
-    // The terminal-latch baseline for the absence exit below: comparing the live latch against it
-    // keeps that witness attempt-relative. One offset clone per collection, off the per-element path.
-    let latch = inp.latch_snapshot();
-    // The scanner-trip baseline for the gates below — PER COLLECTION, taken beside the latch
-    // and deliberately unlike the per-element descent one. It answers the latch's question
-    // through a monotone session counter that no rollback reaches, which is what an element
-    // catching a stop inside an `attempt` of its own leaves behind. See
-    // `many::absence_after_element` for why the two granularities differ.
-    let scans = inp.scanner_trip_snapshot();
 
     // The trip baseline of the LAST element attempt, carried out by whichever break concluded
-    // absence — see `many::absence_after_element` for what the gate below does with it, and why the
-    // value has to be carried rather than re-read after the loop.
-    let elem_trips = loop {
+    // absence — see `many::absence_after_element` for what each driver's gate does with it, and
+    // why the value has to be carried rather than re-read after the loop.
+    Ok(loop {
       // The descent witness's baseline, taken once per ELEMENT — the attempt the chokepoint below
-      // judges, and the one the absence gate after the loop judges too.
-      // `many::file_element_failure` says why it belongs here and not out beside `latch`.
+      // judges, and the one every absence exit reading this function's return value judges too.
+      // `many::file_element_failure` says why it belongs here and not out beside the latch.
       let trips = inp.trip_snapshot();
       match self.f.try_parse_input(inp) {
         // One admission, and it settles this element's count bound before the destination is
         // offered the element — see `many::admit_element` for why that order is the function's
         // rather than this loop's.
-        Ok(Accept(item)) => admit_element(rh, &mut num, &mut full, container, item, inp, &anchor)?,
+        Ok(Accept(item)) => admit_element(counts, nums, &mut full, container, item, inp, anchor)?,
         Ok(Decline) => break trips,
         // File the failure as a diagnostic and keep looping — unless it is one of the three the
         // never-recoverable law forbids spending, in which case re-raise it untouched. The gate is
@@ -304,11 +318,44 @@ impl<'inp, 'c, L, F, O, Ctx, Lang: ?Sized, Cmpl> Repeated<F, O, L, Ctx, Lang, Cm
       }
       committed = new_committed;
       cursor = inp.cursor().clone();
-    };
+    })
+  }
+
+  pub(super) fn parse<Container, RH>(
+    &mut self,
+    inp: &mut InputRef<'inp, 'c, L, Ctx, Lang, Cmpl>,
+    container: &mut Container,
+    rh: &RH,
+  ) -> Result<L::Span, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
+  where
+    L: Lexer<'inp>,
+    F: TryParseInput<'inp, L, O, Ctx, Lang, Cmpl>,
+    Ctx::Emitter: Emitter<'inp, L, Lang> + FullContainerEmitter<'inp, L, Lang>,
+    Ctx: ParseContext<'inp, L, Lang>,
+    Cmpl: crate::input::SurfaceIncomplete<'inp, L, Ctx, Lang>,
+    // The absence-exit gate surfaces a terminal scanner stop as this end-of-input error.
+    <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
+    Container: crate::container::Container<O>,
+    RH: RepeatedHandler<'inp, 'c, O, L, Ctx, Lang, Cmpl>,
+  {
+    trace_event!(inp, "repeated");
+    let mut num = 0;
+    let anchor = inp.cursor().clone();
+    // The terminal-latch baseline for the absence exit below: comparing the live latch against it
+    // keeps that witness attempt-relative. One offset clone per collection, off the per-element path.
+    let latch = inp.latch_snapshot();
+    // The scanner-trip baseline for the gates below — PER COLLECTION, taken beside the latch
+    // and deliberately unlike the per-element descent one. It answers the latch's question
+    // through a monotone session counter that no rollback reaches, which is what an element
+    // catching a stop inside an `attempt` of its own leaves behind. See
+    // `many::absence_after_element` for why the two granularities differ.
+    let scans = inp.scanner_trip_snapshot();
+
+    let elem_trips = self.drive_elements(inp, container, rh, &anchor, scans, &mut num)?;
 
     // Both ways out of the loop above — the element declining, and a cycle that committed nothing —
     // conclude *absence*: "no more elements", on the strength of what the last element attempt did.
-    // The chokepoint above never sees either, because neither produced an `Err`, so the same two
+    // The chokepoint inside it never sees either, because neither produced an `Err`, so the same two
     // never-recoverable facts have to be witnessed here. `absence_after_element` holds both and says
     // why each baseline is the granularity it is. The end-of-input anchors on the committed end,
     // matching the decision-window and consume gates.

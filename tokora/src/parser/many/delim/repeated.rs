@@ -1,10 +1,6 @@
 use crate::{
-  TryParseInput,
-  container::Container as ContainerT,
-  delimiter::Delimiter,
-  emitter::{FullContainerEmitter, UnclosedEmitter},
-  error::Unclosed,
-  try_parse_input::{Accept, Decline},
+  TryParseInput, container::Container as ContainerT, delimiter::Delimiter,
+  emitter::UnclosedEmitter, error::Unclosed,
 };
 
 use super::*;
@@ -17,35 +13,38 @@ mod unbounded;
 impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
   DelimitedBy<&mut Repeated<P, O, L, Ctx, Lang, Cmpl>, Delim>
 {
-  fn parse_repeated<'c, Container, EC>(
+  /// `Repeated`'s element loop, run **under a delimiter**.
+  ///
+  /// This driver contributes an opener, a close position and nothing else. The elements are
+  /// `Repeated::drive_elements`'s — one stall test, one `many::admit_element`, one
+  /// `many::file_element_failure`, all of them the plain driver's — and the count and stop hooks
+  /// are the plain driver's [`RepeatedHandler`] rather than a shape of this file's own. What is
+  /// left here is what the delimiter genuinely adds
+  /// ([#259](https://github.com/al8n/tokora/issues/259)'s stage-2 verdict, and the one difference
+  /// it found essential): a delimited list's element boundary is also a **close** position, so
+  /// every exit below classifies that position and a real closer passes through
+  /// `many::close_after_element`, which appears in no undelimited driver.
+  fn parse_repeated<'c, Container, RH>(
     &mut self,
     inp: &mut InputRef<'inp, 'c, L, Ctx, Lang, Cmpl>,
     container: &mut Container,
-    // The element's count verdict. This engine has no mid-loop hook of its own — the maximum used
-    // to be read from `on_stop` below, one whole construct after the element that broke it — so
-    // the cardinality wrapper hands it down here and `many::admit_element` runs it in front of the
-    // push. See that function for why the order is a property of the admission and not of a
-    // convention this file could keep on its own.
-    counts: &EC,
-    on_stop: impl FnOnce(
-      usize,
-      &mut InputRef<'inp, '_, L, Ctx, Lang, Cmpl>,
-      &L::Span,
-    ) -> Result<(), <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>,
+    // The count verdict and the end-of-construct pass, as ONE handler — the same `RepeatedHandler`
+    // the undelimited driver takes. It used to be two arguments here, a count hook and a bare
+    // `FnOnce` stop closure, which made this family the third spelling of one end-of-construct
+    // pass; the handler already carries both, and `many::admit_element` runs the count half in
+    // front of the push for the same reason it does under `Repeated::parse`.
+    rh: &RH,
   ) -> Result<L::Span, <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error>
   where
     L: Lexer<'inp>,
     Ctx: ParseContext<'inp, L, Lang>,
     Cmpl: crate::input::SurfaceIncomplete<'inp, L, Ctx, Lang>,
     Delim: Delimiter<'inp, L, Lang>,
-    L: Lexer<'inp>,
     P: TryParseInput<'inp, L, O, Ctx, Lang, Cmpl>,
-    Ctx: ParseContext<'inp, L, Lang>,
-    Cmpl: crate::input::SurfaceIncomplete<'inp, L, Ctx, Lang>,
     Ctx::Emitter: FullContainerEmitter<'inp, L, Lang> + UnclosedEmitter<'inp, L, Lang>,
     <Ctx::Emitter as Emitter<'inp, L, Lang>>::Error: From<UnexpectedEot<L::Offset, Lang>>,
     Container: ContainerT<O> + DelimiterHandler<'inp, L>,
-    EC: ElementCountHandler<'inp, 'c, L, Ctx, Lang, Cmpl>,
+    RH: RepeatedHandler<'inp, 'c, O, L, Ctx, Lang, Cmpl>,
   {
     // Sync the input to the next token boundary, any lexer errors will be emitted during this process.
     let anchor = inp.cursor().clone();
@@ -114,9 +113,6 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     };
 
     let mut nums = 0;
-    let mut full = false;
-    let mut elem_cur = inp.cursor().clone();
-    let mut committed = inp.span().end();
     // The terminal-latch baseline for the absence exits below, taken AFTER the opener so the
     // opener's own scan is not charged to the element loop. One offset clone per collection.
     let latch = inp.latch_snapshot();
@@ -127,137 +123,56 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
     // `many::absence_after_element` for why the two granularities differ.
     let scans = inp.scanner_trip_snapshot();
 
-    // The trip baseline of the LAST element attempt, carried out by the stall break below for the
-    // epilogue's absence exits — the decline arm's own exits are inside the loop and read it
-    // directly. See `many::absence_after_element`.
-    let elem_trips = loop {
-      // The descent witness's baseline, taken once per ELEMENT — the attempt the chokepoint below
-      // judges, and the one this cycle's absence exits judge too. See `many::file_element_failure`
-      // for why it is per element and not per collection.
-      let trips = inp.trip_snapshot();
-      match self.parser.f.try_parse_input(inp) {
-        // File the failure as a diagnostic and keep looping — unless it is one of the three the
-        // never-recoverable law forbids spending, in which case re-raise it untouched. The gate is
-        // the chokepoint's, not this loop's: see `many::file_element_failure` for the three
-        // witnesses and for why `trips` is taken per ELEMENT rather than per collection.
-        Err(err) => file_element_failure(inp, err, &elem_cur, scans, trips)?,
-        // TODO(al8n): tracing dropped element
-        Ok(Accept(nxt)) => {
-          admit_element(counts, &mut nums, &mut full, container, nxt, inp, &anchor)?
-        }
-        // no more elemnts.
-        Ok(Decline) => {
-          // Classify the close position with the four-way probe so a terminal scanner
-          // stop is not misread as EOF and grown into a spurious `Unclosed`.
-          match inp.probe_close(|t| Delim::is_close(&t.data.kind()))? {
-            // The closer is at hand: commit the carried token by value — no re-scan,
-            // and cache-independent (a blackhole `()` would drop a pushed-back closer).
-            //
-            // The probe is cache-first, so this verdict rests on a REAL pre-trip token — and that
-            // token settles the POSITION question, not the COUNTER one. The construct closed ahead
-            // of any boundary the element's lookahead went on to latch, so the scanner witness is
-            // genuinely not about this exit and gating on it would fail a parse a wider window
-            // completes identically. A descent trip is the other kind of fact: it happened *inside*
-            // the attempt that just declined, and a valid closer arriving after it does not unmake
-            // it — without the gate this is a closed collection that silently spent a resource-limit
-            // stop. Descent only, therefore; see `many::close_after_element`.
-            CloseStatus::Close(ct) => {
-              close_after_element(inp, trips)?;
-              container.on_close_delimiter(inp.commit_probed(ct))
-            }
-            // A wrong token where the closer belongs: unexpected-token, expected-close.
-            CloseStatus::WrongToken(tok) => {
-              // No closer: the decline plus this verdict conclude *absence* from what this element
-              // attempt did, so surface a terminal stop it hit ahead of the close-miss diagnostic
-              // rather than reporting a close that never happened.
-              absence_after_element(inp, &latch, scans, trips)?;
-              // One junk token, one report: emit unless the emitter already holds a live report
-              // naming this very front token. See FRONT_REPORTED at the top of this body.
-              if !inp.front_report_live(tok.span_ref().end_ref()) {
-                inp
-                  .emitter()
-                  .emit_unexpected_token(Delim::unexpected_close_token(tok))?
-              }
-            }
-            // EOI — no close delimiter found: the opener was never closed.
-            CloseStatus::Eof => {
-              // Same absence conclusion as the wrong-token arm above, so the same gate. No legitimate
-              // `Unclosed` is lost: a scan that reaches a live boundary stops there and reports the
-              // stop, so an `Eof` verdict cannot coexist with one.
-              absence_after_element(inp, &latch, scans, trips)?;
-              if let Some(open_span) = open_span.clone() {
-                inp
-                  .emitter()
-                  .emit_unclosed(Unclosed::<Delim, L::Span, Lang>::of(
-                    open_span,
-                    Delim::KIND,
-                    Delim::name(),
-                  ))?;
-              }
-            }
-            // A terminal scanner stop: its own diagnostic already explains the halt —
-            // propagate it and add no `Unclosed`.
-            CloseStatus::Tripped => {
-              return Err(
-                UnexpectedEot::eot_of(inp.cursor().as_inner().clone())
-                  .into_terminal()
-                  .into(),
-              );
-            }
-          }
+    // The elements themselves, and the trip baseline of the attempt that ended them — a decline,
+    // or a cycle that committed nothing. Both conclude *absence* on the strength of that one
+    // attempt, and this driver's exits below are the only place either conclusion is acted on, so
+    // the baseline travels out of the loop with it. The two used to be separate code paths here,
+    // the decline arm carrying an inline copy of the epilogue below; one loop with one exit means
+    // one copy of it.
+    let elem_trips = self
+      .parser
+      .drive_elements(inp, container, rh, &anchor, scans, &mut nums)?;
 
-          let span = inp.span_since(&anchor);
-          on_stop(nums, inp, &span)?;
-          return Ok(span);
-        }
-      }
-
-      // A cycle that consumed nothing re-sees the same input and would retry forever. The progress
-      // metric is committed consumption (`span().end()`), never the cache-front cursor — a lookahead
-      // fill (a `probe_close` or `try_expect` decline pushing a token back) moves that across skipped
-      // trivia without consuming, reading a zero-width element as false progress. `<=`, not `==`: the
-      // watermark cannot regress within a cycle, so anything not strictly ahead is a stall.
-      // `elem_cur` stays the error-span anchor.
-      let new_committed = inp.span().end();
-      if new_committed <= committed {
-        break trips;
-      }
-      committed = new_committed;
-      elem_cur = inp.cursor().clone();
-    };
-
-    // No progress was made — treat as end of elements. Classify the close position
-    // with the four-way probe so a terminal scanner stop is not misread as EOF.
+    // The element boundary is also the close position — this driver's whole contribution.
+    // Classify it with the four-way probe so a terminal scanner stop is not misread as EOF and
+    // grown into a spurious `Unclosed`.
     match inp.probe_close(|t| Delim::is_close(&t.data.kind()))? {
-      // The closer is at hand: commit the carried token by value — no re-scan. A cache-first
-      // verdict on a real pre-trip token, so the construct genuinely closed *at that position* and
-      // the scanner witness stays off this exit — a boundary latched past the closer is not about a
-      // construct that ended before it. The counter is the other fact, and the closer settles
-      // nothing about it: the stalling attempt may have caught a budget trip, which no later token
-      // unmakes. Descent only — see `many::close_after_element`.
+      // The closer is at hand: commit the carried token by value — no re-scan, and
+      // cache-independent (a blackhole `()` would drop a pushed-back closer).
+      //
+      // The probe is cache-first, so this verdict rests on a REAL pre-trip token — and that token
+      // settles the POSITION question, not the COUNTER one. The construct closed ahead of any
+      // boundary the element's lookahead went on to latch, so the scanner witness is genuinely not
+      // about this exit and gating on it would fail a parse a wider window completes identically. A
+      // descent trip is the other kind of fact: it happened *inside* the attempt that just
+      // concluded, and a valid closer arriving after it does not unmake it — without the gate this
+      // is a closed collection that silently spent a resource-limit stop. Descent only, therefore;
+      // see `many::close_after_element`.
       CloseStatus::Close(ct) => {
         close_after_element(inp, elem_trips)?;
         container.on_close_delimiter(inp.commit_probed(ct))
       }
+      // A wrong token where the closer belongs: unexpected-token, expected-close.
       CloseStatus::WrongToken(tok) => {
-        // No closer: the stall plus this verdict conclude *absence* from what the last element
-        // attempt did, so surface a terminal stop it hit ahead of the close-miss diagnostic.
+        // No closer: the loop's absence exit plus this verdict conclude *absence* from what the
+        // last element attempt did, so surface a terminal stop it hit ahead of the close-miss
+        // diagnostic rather than reporting a close that never happened.
         absence_after_element(inp, &latch, scans, elem_trips)?;
-        // One junk token, one report: emit unless the emitter already holds a live report naming
-        // this very front token. See FRONT_REPORTED at the top of this body.
+        // One junk token, one report: emit unless the emitter already holds a live report
+        // naming this very front token. See FRONT_REPORTED at the top of this body.
         if !inp.front_report_live(tok.span_ref().end_ref()) {
           inp
             .emitter()
             .emit_unexpected_token(Delim::unexpected_close_token(tok))?
         }
       }
+      // EOI — no close delimiter found: the opener was never closed.
       CloseStatus::Eof => {
         // Same absence conclusion as the wrong-token arm above, so the same gate. No legitimate
-        // `Unclosed` is lost: a scan that reaches a live boundary stops there and reports the stop,
-        // so an `Eof` verdict cannot coexist with one.
+        // `Unclosed` is lost: a scan that reaches a live boundary stops there and reports the
+        // stop, so an `Eof` verdict cannot coexist with one.
         absence_after_element(inp, &latch, scans, elem_trips)?;
-        // EOI — no tokens left, no close delimiter: the opener was never closed.
-        if let Some(open_span) = open_span.clone() {
+        if let Some(open_span) = open_span {
           inp
             .emitter()
             .emit_unclosed(Unclosed::<Delim, L::Span, Lang>::of(
@@ -267,6 +182,8 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
             ))?;
         }
       }
+      // A terminal scanner stop: its own diagnostic already explains the halt —
+      // propagate it and add no `Unclosed`.
       CloseStatus::Tripped => {
         return Err(
           UnexpectedEot::eot_of(inp.cursor().as_inner().clone())
@@ -276,8 +193,10 @@ impl<'inp, L, P, O, Ctx, Delim, Lang: ?Sized, Cmpl>
       }
     }
 
-    let span = inp.span_since(&anchor);
-    on_stop(nums, inp, &span)?;
-    Ok(span)
+    // The end-of-construct pass, and the construct's span with it: opener through closer, measured
+    // after the closer commits. It is `RepeatedHandler::on_stop`'s own return value here, the way
+    // it is under `Repeated::parse` — the delimited families used to rebuild the identical span
+    // themselves and throw the handler's away.
+    rh.on_stop(nums, inp, &anchor)
   }
 }

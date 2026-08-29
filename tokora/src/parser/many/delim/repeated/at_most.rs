@@ -46,17 +46,13 @@ where
         let Collect {
           parser, container, ..
         } = c;
-        DelimitedBy::<_, Delim>::new(parser.parser.parser_mut()).parse_repeated(
-          inp,
-          container,
-          &maximum,
-          // The maximum is NOT re-checked here. It is settled at the element that broke it, from
-          // inside `many::admit_element` — a construct exceeds `max` iff some element saw the
-          // pre-element count equal to it, so this end callback would only report a second time.
-          // Reading it here was also what put the destination's refusal ahead of the count bound
-          // in this family and left `Fatal`'s public error depending on the builder (#277).
-          |_, _, _| Ok(()),
-        )
+        // The maximum is settled at the element that broke it, from inside
+        // `many::admit_element` — a construct exceeds `max` iff some element saw the pre-element
+        // count equal to it — so `Maximum::on_stop` re-checks nothing. Reading it from an end
+        // callback was what put the destination's refusal ahead of the count bound in this family
+        // and left `Fatal`'s public error depending on the builder (#277).
+        DelimitedBy::<_, Delim>::new(parser.parser.parser_mut())
+          .parse_repeated(inp, container, &maximum)
       })
       .map(|(_, collected)| collected)
   }
@@ -65,7 +61,10 @@ where
 /// The **spanned owning** destination: the container and the construct's span together.
 ///
 /// One of the two contracts this family did not implement until
-/// [#259](https://github.com/al8n/tokora/issues/259)'s stage 3.
+/// [#259](https://github.com/al8n/tokora/issues/259)'s stage 3. Nothing about being delimited
+/// stopped it — `sep/delim` and `sep_while/delim` are delimited and implement all four — and the
+/// reason it was missing was that this driver was spelled as a loop of its own rather than as the
+/// plain one under a delimiter. Driving the shared loop is what made the contracts follow.
 impl<
   'inp,
   L,
@@ -104,18 +103,13 @@ where
     Ctx: ParseContext<'inp, L, Lang>,
   {
     let maximum = self.parser.parser.maximum();
-
     self
       .attempt(|c| {
         let Collect {
           parser, container, ..
         } = c;
-        DelimitedBy::<_, Delim>::new(parser.parser.parser_mut()).parse_repeated(
-          inp,
-          container,
-          &maximum,
-          |_, _, _| Ok(()),
-        )
+        DelimitedBy::<_, Delim>::new(parser.parser.parser_mut())
+          .parse_repeated(inp, container, &maximum)
       })
       .map(|(span, collected)| Spanned::new(span, collected))
   }
@@ -125,7 +119,9 @@ where
 /// admitted on the **failure** arm too, which the owning form cannot expose.
 ///
 /// The second contract this family did not implement until
-/// [#259](https://github.com/al8n/tokora/issues/259)'s stage 3.
+/// [#259](https://github.com/al8n/tokora/issues/259)'s stage 3, and the one
+/// `tokora/tests/repetition_behavioural_matrix.rs`'s layer B8 is about — with it, the matrix's
+/// borrowed table covers all eight drivers instead of six.
 impl<
   'inp,
   'c,
@@ -165,12 +161,10 @@ where
     Ctx: ParseContext<'inp, L, Lang>,
   {
     let maximum = self.parser.parser.maximum();
-
     DelimitedBy::<_, Delim>::new(self.parser.parser.parser_mut()).parse_repeated(
       inp,
       &mut self.container,
       &maximum,
-      |_, _, _| Ok(()),
     )
   }
 }

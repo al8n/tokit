@@ -1,4 +1,4 @@
-use crate::{container::Container as ContainerT, emitter::TooFewEmitter, error::syntax::TooFew};
+use crate::{container::Container as ContainerT, emitter::TooFewEmitter};
 
 use super::*;
 
@@ -40,30 +40,19 @@ where
     Ctx: ParseContext<'inp, L, Lang>,
   {
     let minimum = self.parser.parser.minimum();
-    let min = minimum.get();
 
     self
       .attempt(|c| {
         let Collect {
           parser, container, ..
         } = c;
-        DelimitedBy::<_, Delim>::new(parser.parser.parser_mut()).parse_repeated(
-          inp,
-          container,
-          // A minimum is an end-of-construct fact, so this hook is a no-op and the check below
-          // carries it. The handler is threaded anyway: `many::admit_element` takes the
-          // cardinality this collection actually has, not a stand-in for it.
-          &minimum,
-          |nums, inp, span| {
-            if min > nums {
-              inp
-                .emitter()
-                .emit_too_few(TooFew::of(span.clone(), nums, min))?;
-            }
-
-            Ok(())
-          },
-        )
+        // One handler, for both halves of the cardinality: `many::admit_element` runs its
+        // element hook (a no-op for a minimum, which no element in the middle of a construct can
+        // settle) and the driver's end pass runs its `on_stop`, which emits the `TooFew` over the
+        // whole delimited span. The hand-written closure this replaced emitted the identical
+        // diagnostic from the identical span.
+        DelimitedBy::<_, Delim>::new(parser.parser.parser_mut())
+          .parse_repeated(inp, container, &minimum)
       })
       .map(|(_, collected)| collected)
   }
@@ -72,7 +61,10 @@ where
 /// The **spanned owning** destination: the container and the construct's span together.
 ///
 /// One of the two contracts this family did not implement until
-/// [#259](https://github.com/al8n/tokora/issues/259)'s stage 3.
+/// [#259](https://github.com/al8n/tokora/issues/259)'s stage 3. Nothing about being delimited
+/// stopped it — `sep/delim` and `sep_while/delim` are delimited and implement all four — and the
+/// reason it was missing was that this driver was spelled as a loop of its own rather than as the
+/// plain one under a delimiter. Driving the shared loop is what made the contracts follow.
 impl<
   'inp,
   L,
@@ -111,27 +103,13 @@ where
     Ctx: ParseContext<'inp, L, Lang>,
   {
     let minimum = self.parser.parser.minimum();
-    let min = minimum.get();
-
     self
       .attempt(|c| {
         let Collect {
           parser, container, ..
         } = c;
-        DelimitedBy::<_, Delim>::new(parser.parser.parser_mut()).parse_repeated(
-          inp,
-          container,
-          &minimum,
-          |nums, inp, span| {
-            if min > nums {
-              inp
-                .emitter()
-                .emit_too_few(TooFew::of(span.clone(), nums, min))?;
-            }
-
-            Ok(())
-          },
-        )
+        DelimitedBy::<_, Delim>::new(parser.parser.parser_mut())
+          .parse_repeated(inp, container, &minimum)
       })
       .map(|(span, collected)| Spanned::new(span, collected))
   }
@@ -141,7 +119,9 @@ where
 /// admitted on the **failure** arm too, which the owning form cannot expose.
 ///
 /// The second contract this family did not implement until
-/// [#259](https://github.com/al8n/tokora/issues/259)'s stage 3.
+/// [#259](https://github.com/al8n/tokora/issues/259)'s stage 3, and the one
+/// `tokora/tests/repetition_behavioural_matrix.rs`'s layer B8 is about — with it, the matrix's
+/// borrowed table covers all eight drivers instead of six.
 impl<
   'inp,
   'c,
@@ -181,21 +161,10 @@ where
     Ctx: ParseContext<'inp, L, Lang>,
   {
     let minimum = self.parser.parser.minimum();
-    let min = minimum.get();
-
     DelimitedBy::<_, Delim>::new(self.parser.parser.parser_mut()).parse_repeated(
       inp,
       &mut self.container,
       &minimum,
-      |nums, inp, span| {
-        if min > nums {
-          inp
-            .emitter()
-            .emit_too_few(TooFew::of(span.clone(), nums, min))?;
-        }
-
-        Ok(())
-      },
     )
   }
 }
