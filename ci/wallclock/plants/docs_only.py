@@ -2,9 +2,16 @@
 """Plant a change the wall-clock gate must NOT catch: prose, and nothing else.
 
 Applied by `ci/wallclock/run.sh --plant docs_only` to the HEAD side of the extracted work tree
-only. This is the population a badly built performance gate fails: it recompiles the crate, it
-moves every byte offset in the file, it changes what the doc build emits — and it changes not one
-instruction the CPU executes.
+only. This is the population a badly built performance gate fails: it recompiles the crate and it
+changes what the doc build emits, while changing not one instruction the CPU executes.
+
+It is a slightly harder test than "nothing changed", and deliberately so. Adding lines shifts
+every `line!()` and every panic `Location` below them, and those are constants baked into the
+binary — same width, different values, so the two sides are not byte-identical objects even
+though they are instruction-identical programs. What this plant asks is not that the gate report
+zero. A clock never reports zero. It asks that whatever it reports sits inside the floor the
+self-comparison established, which is the only sense in which a wall-clock gate can be said not
+to fire.
 
 The instruction-count gate ran the same population and reported +0.000% on all thirteen of its
 workloads. This one cannot report zero, because a clock never does; what it must report is a

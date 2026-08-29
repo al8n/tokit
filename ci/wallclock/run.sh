@@ -99,12 +99,51 @@
 
 set -euo pipefail
 
-# ── The threshold ───────────────────────────────────────────────────────────────────────────
+# ── The threshold, and the measurement it came from ─────────────────────────────────────────
 #
-# DERIVED FROM THE RUNNER, and re-derivable by dispatching this workflow on `main`, which makes
-# HEAD its own merge-base and runs the self-comparison. See `.github/workflows/ci.yml`'s `wall
-# clock` job for the measured floor this number sits above and the date it was taken.
-: "${WALL_THRESHOLD:=10.0}"
+# DERIVED, on the runner, in this configuration. Re-derive it by dispatching this workflow: a
+# dispatch runs `--self`, and so does any pull request whose `tokora/` tree is the merge-base's.
+#
+# **The self-comparison, 2026-08-29, `ubuntu-latest`, run 33225301618.** Same commit both sides,
+# 46 ids, 5 interleaved rounds a side, 200 ms warm-up + 500 ms measurement x 10 samples an id.
+#
+#   | quantity                                        | value   |
+#   |-------------------------------------------------|---------|
+#   | median id's difference between the two sides     | 0.36%   |
+#   | 90th percentile                                  | 1.35%   |
+#   | ids over 2%                                      | 2 of 46 |
+#   | ids over 5%                                      | 1 of 46 |
+#   | **largest**                                      | **16.22%** |
+#   | median id's round-to-round spread, same build     | 1.39%   |
+#   | worst id's round-to-round spread, same build      | 21.87%  |
+#
+# Two things in that table matter more than the number this file sets.
+#
+# **The measurement is far better than the benches' reputation.** Criterion's own run-to-run
+# spread on these targets is 4.3-4.8% on a dedicated machine; interleaved min-of-5 on a SHARED
+# runner puts the median id at 0.36% and the 90th percentile at 1.35%, while the per-round spread
+# it is built from reaches 21.87%. That gap is the estimator working: the minimum is immune to
+# the noise the mean would have integrated.
+#
+# **And the floor is not the measurement.** `input/backtrack/stacked_savepoint_cycle` came back
+# **+16.22%** with the two sides' five rounds each stable to under 1% and their two clusters
+# COMPLETELY DISJOINT — base 672-677 us across all five rounds, head 781-788 us across all five.
+# That is not noise. Noise overlaps; this does not. It is a stable property of the two sides,
+# which were compiled from byte-identical source, so it is code or data placement — the class
+# every practitioner of this measurement eventually meets, and the reason a wall-clock A/B of two
+# BUILDS has a floor that no number of rounds lowers. Eight further ids showed the same signature
+# at a much smaller size (disjoint clusters at 0.5-1.4%).
+#
+# So the resolution of this gate is set by build-to-build placement, not by the runner's noise,
+# and the honest threshold has to clear it. **25%** is about 1.5x the single outlier that was
+# observed. It is deliberately NOT the mechanical 2x-the-floor rule, which would give 32.4%: the
+# floor here is not one distribution but a body at ~1% plus one placement outlier, and with n=1
+# on that outlier the right response is to write down what would move the number — see the
+# `wall clock` job's promotion criteria — rather than to inflate it until nothing could reach it.
+#
+# A consequence worth stating plainly: this gate cannot support a claim about a single id moving
+# 20%, because placement alone produced 16% on a single id with nothing changed.
+: "${WALL_THRESHOLD:=25.0}"
 
 # Five rounds a side. The minimum needs at least one clean round per side to land on, and
 # counterbalancing needs an even split of orders; five gives three of one order and two of the
@@ -272,6 +311,22 @@ if ! cmp -s <(cut -f1 "$WALL_WORK/head.bins.tsv") <(cut -f1 "$WALL_WORK/base.bin
 fi
 targets="$(cut -f1 "$WALL_WORK/head.bins.tsv" | tr '\n' ' ')"
 echo "wallclock: $(wc -l < "$WALL_WORK/head.bins.tsv" | tr -d ' ') bench targets a side: $targets"
+
+# ── Are the two sides the same object? ──────────────────────────────────────────────────────
+#
+# Printed because it changes what a delta CAN mean, and because the first self-comparison this
+# gate ran needed the answer and did not have it. A row came back +16.22% with each side's five
+# rounds stable to under 1% and the two clusters disjoint — a difference between the two sides
+# and not between two measurements. If the two binaries are byte-identical, no such row can be
+# codegen and the cause is per-process placement: the addresses the loader and the allocator
+# happen to hand out. If they differ, it can be either. On a real merge-base comparison they
+# always differ and this line says nothing; on a self-comparison it is the whole diagnosis.
+for target in $targets; do
+  hb="$(awk -F'\t' -v t="$target" '$1 == t { print $2 }' "$WALL_WORK/head.bins.tsv")"
+  bb="$(awk -F'\t' -v t="$target" '$1 == t { print $2 }' "$WALL_WORK/base.bins.tsv")"
+  if cmp -s "$hb" "$bb"; then verdict="byte-identical"; else verdict="DIFFER"; fi
+  echo "wallclock:   $target: the two sides' binaries are $verdict"
+done
 
 readings="$WALL_WORK/readings.jsonl"
 : > "$readings"

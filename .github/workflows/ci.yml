@@ -1159,24 +1159,40 @@ jobs:
   # and it is the ONLY half it is: a coarse layer, over the five criterion benches, measured with
   # a clock.
   #
-  # ── WHAT IT CAN ACTUALLY SEE ───────────────────────────────────────────────────────────────
+  # ── WHAT IT CAN ACTUALLY SEE, MEASURED ─────────────────────────────────────────────────────
   #
-  # Not the ±2% the benches are held to locally, and not the 1% the `icount` job resolves. Three
-  # measured facts from this repository set the ceiling:
+  # Not the ±2% the benches are held to locally, and not the 1% the `icount` job resolves. The
+  # number is 25%, and it was measured here rather than reasoned about — the reasoning had it at
+  # 9-10% and the reasoning was wrong about WHY.
   #
-  #   * `tokora-benches` under criterion showed a run-to-run spread of 4.3-4.8% ON A DEDICATED
-  #     MACHINE, and one full-suite run moved all nine benches in lockstep by +82% on code that
-  #     had not changed.
-  #   * The repetition engine is a third to a half of each bench's work, so a regression IN the
-  #     engine reads here at roughly half its own amplitude.
-  #   * A GitHub-hosted runner is a shared VM on an unstated CPU model. It is worse than the
-  #     dedicated machine those numbers came from, and `ci/wallclock/run.sh --self` is what says
-  #     by how much on the host of the day.
+  # **The self-comparison, 2026-08-29, `ubuntu-latest`, run 33225301618.** Same commit on both
+  # sides through the whole pipeline, 46 ids, 5 interleaved rounds a side. Job wall time **9m27s**,
+  # of which 6m30s was measurement and the rest two cold builds; peak disk about 700 MB.
   #
-  # So the claim is deliberately modest: this job sees a cache cliff, an allocation added per
-  # element, or a data-movement change large enough to be worth reverting. It does not see a lost
-  # inline. When the two perf jobs disagree, `icount` is the tighter statement about what the
-  # compiler did and this one is the statement about what a user would feel.
+  #   * median id's difference between the two sides: **0.36%**; 90th percentile **1.35%**;
+  #     44 of 46 ids under 2%.
+  #   * the same build's round-to-round spread: median **1.39%**, worst **21.87%**.
+  #   * and one id, `input/backtrack/stacked_savepoint_cycle`, at **+16.22%**.
+  #
+  # The first two lines are better than expected. Criterion's own spread on these targets is
+  # 4.3-4.8% ON A DEDICATED MACHINE; interleaved min-of-5 on a shared runner beats that by more
+  # than an order of magnitude on the median id, out of per-round readings that themselves range
+  # over 21%. The estimator is doing exactly what it was chosen to do.
+  #
+  # The third line is the one that sets the threshold, and it is not noise. That id's five rounds
+  # were stable to 0.81% on each side and the two clusters were COMPLETELY DISJOINT — base
+  # 672-677 us in every round, head 781-788 us in every round — from source that was byte-identical.
+  # Noise overlaps; this does not. It is placement: which addresses the code and the data ended up
+  # at. Eight more ids showed the same signature two orders of magnitude smaller (disjoint clusters
+  # at 0.5-1.4%). No number of rounds removes it, because it is a difference between the two sides
+  # and not between two measurements of one.
+  #
+  # So the claim is deliberately modest, and modest for a reason that is now named: this job sees
+  # an allocation added per element, or a data-movement or cache change of that size. It does not
+  # see a lost inline, and it cannot support a claim about ONE id moving 20%, because placement
+  # alone moved one id 16% with nothing changed. When the two perf jobs disagree, `icount` is the
+  # tighter statement about what the compiler did — and it is immune to placement, which is
+  # precisely why it never had to discover any of this.
   #
   # ── SAME-RUN A/B, NO COMMITTED BASELINE ────────────────────────────────────────────────────
   #
@@ -1205,19 +1221,28 @@ jobs:
   # that reds during a bad week on GitHub's fleet and gets deleted in the pull request that was
   # trying to ship something else.
   #
-  # What would justify promoting it, in order:
+  # What would justify promoting it, in order, and the first item is now a specific question
+  # rather than a general one:
   #
-  #   1. A false-positive count. Thirty consecutive pull requests whose `wall clock` verdict
-  #      agrees with `icount` and with review — no row over the threshold that a human then had
-  #      to wave through — is evidence; two good weeks is not.
-  #   2. A self-comparison re-run on several days, showing the floor is a property of the
-  #      configuration and not of the afternoon it was first measured. Dispatch this workflow on
-  #      `main`: that runs `--self`, which builds one commit twice and reports the spread.
-  #   3. A threshold that still has room after (2). If the floor's own variation eats the margin,
-  #      the answer is a wider threshold or fewer ids, not a promotion.
+  #   1. **More self-comparisons, to characterise the placement outlier.** One run produced one id
+  #      at 16.22% and 45 under 4%. Nobody knows yet whether that is one unlucky benchmark, one
+  #      unlucky pair of builds, or the top of a distribution with more in it. Dispatch this
+  #      workflow — a dispatch is a `--self` run — on several days and tabulate the largest id
+  #      each time. If the outlier is always the same id, the answer may be to read that id
+  #      differently; if it moves around, 25% is a floor and not a ceiling.
+  #   2. **A false-positive count.** Thirty consecutive pull requests whose verdict agrees with
+  #      `icount` and with review — no row over the threshold that a human then had to wave
+  #      through. Two good weeks is not evidence.
+  #   3. **A rule that survives (1).** The obvious tightening is to require corroboration — two
+  #      ids over the threshold rather than one — because placement hit ONE id and the planted
+  #      allocation hit twenty-six. That would let the threshold drop a long way. It is not
+  #      shipped, because a decision rule invented from a single run is a rule written against the
+  #      last defect, and this one would have to be measured against false NEGATIVES before it
+  #      could be trusted: a regression confined to one bench is exactly what it would stop
+  #      seeing.
   #
-  # Until all three, a red here is a prompt to look, and `Perf-accept:` is how a deliberate trade
-  # is recorded — the same trailer, with the same one-shot lifetime, that the `icount` job reads.
+  # Until then, a red here is a prompt to look, and `Perf-accept:` is how a deliberate trade is
+  # recorded — the same trailer, with the same one-shot lifetime, that the `icount` job reads.
   #
   # ── THE SELF-TEST RUNS FIRST, AND MATTERS MORE HERE ────────────────────────────────────────
   #
