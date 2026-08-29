@@ -30,7 +30,10 @@ where
 
 impl<'inp, L, F, Condition, O, Container, Ctx, Lang: ?Sized, W>
   ParseInput<'inp, L, Spanned<Container, L::Span>, Ctx, Lang>
-  for Collect<RepeatedWhile<F, Condition, O, W, L, Ctx, Lang>, Container, Ctx, Lang>
+  for With<
+    Collect<RepeatedWhile<F, Condition, O, W, L, Ctx, Lang>, Container, Ctx, Lang>,
+    PhantomSpan,
+  >
 where
   L: Lexer<'inp>,
   F: ParseInput<'inp, L, O, Ctx, Lang>,
@@ -51,6 +54,7 @@ where
     Ctx: ParseContext<'inp, L, Lang>,
   {
     self
+      .primary_mut()
       .attempt(|mut c| c.parse_input(inp))
       .map(|(span, collected)| Spanned::new(span, collected))
   }

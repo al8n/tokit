@@ -19,8 +19,10 @@ use tokora::{
     token::{UnexpectedToken, UnexpectedTokenOf},
   },
   input::Cursor,
+  parser::With,
   span::Spanned,
   try_parse_input::ParseAttempt,
+  utils::marker::PhantomSpan,
 };
 
 use common::{TestLexer, Token};
@@ -606,11 +608,11 @@ where
     + TooFewEmitter<'inp, TestLexer<'inp>>
     + TooManyEmitter<'inp, TestLexer<'inp>>,
 {
-  try_num_rp
-    .repeated()
-    .bounded(1, 3)
-    .collect()
-    .parse_input(inp)
+  With::new(
+    try_num_rp.repeated().bounded(1, 3).collect(),
+    PhantomSpan::PHANTOM,
+  )
+  .parse_input(inp)
 }
 
 #[test]
@@ -631,7 +633,11 @@ where
     + FullContainerEmitter<'inp, TestLexer<'inp>>
     + TooFewEmitter<'inp, TestLexer<'inp>>,
 {
-  try_num_rp.repeated().at_least(1).collect().parse_input(inp)
+  With::new(
+    try_num_rp.repeated().at_least(1).collect(),
+    PhantomSpan::PHANTOM,
+  )
+  .parse_input(inp)
 }
 
 #[test]
@@ -652,7 +658,11 @@ where
     + FullContainerEmitter<'inp, TestLexer<'inp>>
     + TooManyEmitter<'inp, TestLexer<'inp>>,
 {
-  try_num_rp.repeated().at_most(3).collect().parse_input(inp)
+  With::new(
+    try_num_rp.repeated().at_most(3).collect(),
+    PhantomSpan::PHANTOM,
+  )
+  .parse_input(inp)
 }
 
 #[test]
@@ -672,7 +682,7 @@ where
   Ctx::Emitter:
     Emitter<'inp, TestLexer<'inp>, Error = RPError> + FullContainerEmitter<'inp, TestLexer<'inp>>,
 {
-  try_num_rp.repeated().collect().parse_input(inp)
+  With::new(try_num_rp.repeated().collect(), PhantomSpan::PHANTOM).parse_input(inp)
 }
 
 #[test]

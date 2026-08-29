@@ -1139,6 +1139,30 @@ and will red until they do.
 
 ### Changed (breaking)
 
+- **The spanned owning destination moves from `Collect<..>` to `With<Collect<..>, PhantomSpan>` on
+  all twelve repetition drivers** (#334). It was already spelled that way on the eight separated
+  families; the four plain ones — `repeated`, `repeated_while`, and the delimited form of each —
+  wrote it as a second `ParseInput` impl on the *same* `Self` as the owning destination, differing
+  only in the trait's output parameter.
+
+  **Nothing selects between two such impls when the output is inferred.** A destination is chosen
+  by that parameter, so a caller who leaves it open gets `error[E0283]: type annotations needed`
+  and no annotation at the call site helps — the ambiguity is in selecting the method, not in
+  typing its result. Every `.spanned()`-shaped extension method leaves it open, because the output
+  is a parameter of such a trait and never appears in the method's return type; `smear-parser`'s
+  `.token_spanned()` is one, and it took 34 of them across two dialects.
+
+  This crate could not see it. An uninstantiated generic instantiates no ambiguity, and the tests
+  that exercise these destinations pin the output through an annotated return type, which resolves
+  the choice before it is made. Only a downstream caller that leaves it open reaches it.
+
+  Migration is to wrap the collector: `parser.repeated().collect()` parsed to
+  `Spanned<Container, L::Span>` becomes
+  `With::new(parser.repeated().collect(), PhantomSpan::PHANTOM)`. The owning
+  (`Collect<P, Container>` → `Container`) and borrowed (`Collect<&mut P, &mut Container>` →
+  `L::Span`) destinations are untouched, and each of the three now has exactly one output on its
+  own `Self` type. `Collect`'s documentation carries the rule.
+
 - **`conformance::Harness::run` requires `L::Token: PartialEq` and `<L::Token as Token>::Error:
   PartialEq`** (#269). It required nothing beyond `Lexer` before, and that is what the defect was:
   check 1 is documented as identity of the *item*, and with no equality to call the kit

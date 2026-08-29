@@ -10,11 +10,32 @@ use crate::input::Complete;
 /// span, or — when the caller owns the storage — for the span alone:
 ///
 /// * `Collect<P, Container>` parsing to `Container`, the owning form;
-/// * `Collect<P, Container>` parsing to [`Spanned<Container, L::Span>`](crate::span::Spanned),
-///   the same transfer with the span beside it;
+/// * [`With<Collect<P, Container>, PhantomSpan>`](crate::parser::With) parsing to
+///   [`Spanned<Container, L::Span>`](crate::span::Spanned), the same transfer with the span
+///   beside it;
 /// * `Collect<&mut P, &mut Container>` parsing to `L::Span`, the **borrowed** form. It is the only
 ///   one that leaves the caller holding the container on the **failure** arm, so it is how a
 ///   partially-parsed collection is inspected after an error.
+///
+/// # Why the spanned destination wears a wrapper
+///
+/// A destination is selected by the **output** parameter of
+/// [`ParseInput`](crate::ParseInput), so two destinations written onto one `Self` type are two
+/// impls that differ in nothing a caller can point at. A caller who leaves that parameter to
+/// inference — which every `.spanned()`-shaped extension method does, because the output is a
+/// parameter of such a trait and never appears in the method's return type — then gets
+/// `error[E0283]: type annotations needed` instead of a parser, and no annotation at the call
+/// site can help, since the ambiguity is in selecting the method rather than in typing its
+/// result. Only a downstream caller sees it: an uninstantiated generic instantiates no
+/// ambiguity, and a test that pins the output through an annotated return type has resolved the
+/// choice before it is made.
+///
+/// So `Collect<P, Container>` carries exactly **one** output, `Collect<&mut P, &mut Container>`
+/// exactly one, and the spanned destination lives on
+/// [`With<.., PhantomSpan>`](crate::parser::With) — a distinct `Self`, chosen syntactically. This
+/// holds on all twelve repetition drivers.
+/// [`PhantomSpan`](crate::utils::marker::PhantomSpan) carries no data; it is the type that names
+/// the destination.
 ///
 /// All three are available on every repetition driver — plain and separated, `while` and not,
 /// delimited and not. The separated families add a fourth arrangement for their separator
