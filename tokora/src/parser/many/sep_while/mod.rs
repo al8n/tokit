@@ -10,11 +10,13 @@ mod parse;
 
 mod delim;
 
-/// A parser that parses a sequence of elements separated by a delimiter.
+/// A parser that parses a sequence of elements separated by a separator token, under a
+/// caller-supplied stopping condition.
 ///
-/// This combinator parses repeated occurrences of an element parser, expecting each
-/// element to be separated by a delimiter (e.g., comma, semicolon). It provides
-/// fine-grained control over:
+/// This combinator parses repeated occurrences of an element parser, expecting each element to be
+/// separated by a separator (e.g., comma, semicolon), and asks `condition` at each element
+/// position whether to take another one. It provides fine-grained control over:
+/// - **When to stop**: User-defined lookahead-based decision function
 /// - **Leading separators**: Allow/deny/require separators before the first element
 /// - **Trailing separators**: Allow/deny/require separators after the last element
 /// - **Repetition bounds**: Minimum and maximum number of elements
@@ -22,102 +24,633 @@ mod delim;
 /// # Type Parameters
 ///
 /// - `F`: The element parser
-/// - `Sep`: Separator checker (e.g., comma punctuator, custom classifier)
+/// - `Sep`: The separator [`Punctuator`](crate::punct::Punctuator) (e.g. [`Comma`](crate::punct::Comma))
 /// - `Condition`: Decision function that determines when to stop parsing
 /// - `O`: Output type of the element parser
 /// - `Window`: Lookahead window size for the condition
 /// - `L`: Lexer type
 /// - `Ctx`: Parse context
-/// - `Config`: Configuration options (trailing/leading/min/max)
 /// - `Lang`: Language marker type (default `()`)
+/// - `Cmpl`: Completeness mode (default [`Complete`](crate::Complete))
 ///
 /// # Examples
 ///
 /// ## Basic Comma-Separated List
 ///
-/// ```ignore
-/// use tokora::parser::{SeparatedWhile, ParseInput};
-/// use generic_arraydeque::typenum::U1;
+/// The condition is a [`Decision`](crate::Decision) over the **element** position — the separator
+/// is already consumed by the time it is asked — so it classifies the token that starts the next
+/// element, not the comma.
+///
+/// ```rust
+/// # use core::{convert::Infallible, fmt};
+/// # use tokora::{
+/// #   FatalContext, InputRef, Lexer, SimpleSpan, Token,
+/// #   error::{Unclosed, UnexpectedEot, syntax::{FullContainer, MissingSyntax, TooFew, TooMany}, token::{MissingToken, SeparatedError, UnexpectedToken}},
+/// #   punct::{CloseBrace, CloseBracket, CloseParen, OpenBrace, OpenBracket, OpenParen, Semicolon},
+/// #   span::Span as _,
+/// #   token::PunctuatorToken,
+/// # };
+/// # #[derive(Debug)]
+/// # struct Error;
+/// # impl From<Infallible> for Error { fn from(e: Infallible) -> Self { match e {} } }
+/// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
+/// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
+/// # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
+/// # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
+/// # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
+/// # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
+/// # impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
+/// # #[derive(Debug, Clone, PartialEq)]
+/// # enum Tok { Num(i64), Word, Comma, Semi, LBracket, RBracket, LBrace, RBrace, LParen, RParen }
+/// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// # enum Kind { Num, Word, Comma, Semi, LBracket, RBracket, LBrace, RBrace, LParen, RParen }
+/// # impl fmt::Display for Kind { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{self:?}") } }
+/// # impl Token<'_> for Tok {
+/// #   type Kind = Kind;
+/// #   type Error = Infallible;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
+/// #   fn kind(&self) -> Kind { match self {
+/// #     Tok::Num(_) => Kind::Num, Tok::Word => Kind::Word,
+/// #     Tok::Comma => Kind::Comma, Tok::Semi => Kind::Semi,
+/// #     Tok::LBracket => Kind::LBracket, Tok::RBracket => Kind::RBracket,
+/// #     Tok::LBrace => Kind::LBrace, Tok::RBrace => Kind::RBrace,
+/// #     Tok::LParen => Kind::LParen, Tok::RParen => Kind::RParen } }
+/// #   fn is_trivia(&self) -> bool { false }
+/// # }
+/// # impl PunctuatorToken<'_> for Tok {
+/// #   fn open_bracket() -> Option<Kind> { Some(Kind::LBracket) }
+/// #   fn close_bracket() -> Option<Kind> { Some(Kind::RBracket) }
+/// #   fn open_brace() -> Option<Kind> { Some(Kind::LBrace) }
+/// #   fn close_brace() -> Option<Kind> { Some(Kind::RBrace) }
+/// #   fn open_paren() -> Option<Kind> { Some(Kind::LParen) }
+/// #   fn close_paren() -> Option<Kind> { Some(Kind::RParen) }
+/// #   fn comma() -> Option<Kind> { Some(Kind::Comma) }
+/// #   fn semicolon() -> Option<Kind> { Some(Kind::Semi) }
+/// # }
+/// # impl From<tokora::punct::Comma<(), (), ()>> for Kind { fn from(_: tokora::punct::Comma<(), (), ()>) -> Self { Kind::Comma } }
+/// # impl From<Semicolon<(), (), ()>> for Kind { fn from(_: Semicolon<(), (), ()>) -> Self { Kind::Semi } }
+/// # impl From<OpenBracket<(), (), ()>> for Kind { fn from(_: OpenBracket<(), (), ()>) -> Self { Kind::LBracket } }
+/// # impl From<CloseBracket<(), (), ()>> for Kind { fn from(_: CloseBracket<(), (), ()>) -> Self { Kind::RBracket } }
+/// # impl From<OpenBrace<(), (), ()>> for Kind { fn from(_: OpenBrace<(), (), ()>) -> Self { Kind::LBrace } }
+/// # impl From<CloseBrace<(), (), ()>> for Kind { fn from(_: CloseBrace<(), (), ()>) -> Self { Kind::RBrace } }
+/// # impl From<OpenParen<(), (), ()>> for Kind { fn from(_: OpenParen<(), (), ()>) -> Self { Kind::LParen } }
+/// # impl From<CloseParen<(), (), ()>> for Kind { fn from(_: CloseParen<(), (), ()>) -> Self { Kind::RParen } }
+/// # struct CharLexer<'a> { src: &'a str, pos: usize, tok: SimpleSpan, state: () }
+/// # impl<'a> Lexer<'a> for CharLexer<'a> {
+/// #   type State = (); type Source = str; type Token = Tok; type Span = SimpleSpan; type Offset = usize;
+/// #   fn new(src: &'a str) -> Self { Self { src, pos: 0, tok: SimpleSpan::new(0, 0), state: () } }
+/// #   fn with_state(src: &'a str, _: ()) -> Self { Self::new(src) }
+/// #   fn check(&self) -> Result<(), Infallible> { Ok(()) }
+/// #   fn state(&self) -> &() { &self.state }
+/// #   fn state_mut(&mut self) -> &mut () { &mut self.state }
+/// #   fn into_state(self) -> Self::State {}
+/// #   fn source(&self) -> &'a str { self.src }
+/// #   fn span(&self) -> SimpleSpan { self.tok }
+/// #   fn slice(&self) -> &'a str { &self.src[self.tok.start()..self.tok.end()] }
+/// #   fn lex(&mut self) -> Option<Result<Tok, Infallible>> {
+/// #     let bytes = self.src.as_bytes();
+/// #     while self.pos < bytes.len() && bytes[self.pos] == b' ' { self.pos += 1; }
+/// #     if self.pos >= bytes.len() { return None; }
+/// #     let start = self.pos;
+/// #     let tok = if bytes[self.pos].is_ascii_digit() {
+/// #       while self.pos < bytes.len() && bytes[self.pos].is_ascii_digit() { self.pos += 1; }
+/// #       Tok::Num(self.src[start..self.pos].parse().unwrap())
+/// #     } else {
+/// #       self.pos += 1;
+/// #       match bytes[start] {
+/// #         b',' => Tok::Comma, b';' => Tok::Semi,
+/// #         b'[' => Tok::LBracket, b']' => Tok::RBracket,
+/// #         b'{' => Tok::LBrace, b'}' => Tok::RBrace,
+/// #         b'(' => Tok::LParen, b')' => Tok::RParen,
+/// #         _ => Tok::Word,
+/// #       }
+/// #     };
+/// #     self.tok = SimpleSpan::new(start, self.pos);
+/// #     Some(Ok(tok))
+/// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
+/// #   fn bump(&mut self, n: &usize) { self.pos += n; }
+/// # }
+/// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
+/// # fn num<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<i64, Error> {
+/// #   match inp.try_expect(|t| matches!(t.data, Tok::Num(_)))? {
+/// #     Some(sp) => match sp.data { Tok::Num(n) => Ok(n), _ => unreachable!() },
+/// #     None => Err(Error),
+/// #   }
+/// # }
+/// use tokora::{
+///   Accumulator, EmitterView, Parse, ParseInput, Parser,
+///   cache::{Peeked, PeekedTokenExt as _},
+///   emitter::Fatal,
+///   parser::Action,
+///   punct::Comma,
+///   utils::typenum::U1,
+/// };
 ///
 /// // Parse: element, element, element
-/// let parser = SeparatedWhile::comma::<MyLexer, U1, Ctx>(
-///     element_parser(),
-///     |peeked, _| match peeked.front() {
-///         None => Ok(Action::Stop),
-///         Some(Token::Comma) => Ok(Action::Continue),
-///         _ => Ok(Action::Stop),
-///     }
-/// ).collect::<Vec<_>>();
+/// fn while_num<'a>(
+///   mut peeked: Peeked<'_, 'a, CharLexer<'a>, U1>,
+///   _: EmitterView<'_, 'a, CharLexer<'a>, Fatal<Error>>,
+/// ) -> Result<Action, Error> {
+///   Ok(match peeked.pop_front() {
+///     Some(t) if matches!(t.token(), Tok::Num(_)) => Action::Continue,
+///     _ => Action::Stop,
+///   })
+/// }
 ///
-/// // Input: "1, 2, 3"
-/// // Output: Ok(vec![1, 2, 3])
+/// fn numbers<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<Vec<i64>, Error> {
+///   num.separated_while::<Comma, _, U1>(while_num).collect().parse_input(inp)
+/// }
+///
+/// let got = Parser::with_parser(numbers).parse_str("1, 2, 3").unwrap();
+/// assert_eq!(got, vec![1, 2, 3]);
 /// ```
 ///
 /// ## With Trailing Separator
 ///
-/// ```ignore
-/// // Parse: element, element, element,  (trailing comma allowed)
-/// let parser = SeparatedWhile::comma::<MyLexer, U1, Ctx>(
-///     element_parser(),
-///     stop_condition
-/// )
-/// .allow_trailing()   // Allow trailing comma
-/// .collect::<Vec<_>>();
+/// [`while_kind`](crate::while_kind) is the width-1 adapter that continues while the head token's
+/// kind matches, so the window parameter infers and the turbofish disappears.
 ///
-/// // Input: "1, 2, 3,"
-/// // Output: Ok(vec![1, 2, 3])
+/// ```rust
+/// # use core::{convert::Infallible, fmt};
+/// # use tokora::{
+/// #   FatalContext, InputRef, Lexer, SimpleSpan, Token,
+/// #   error::{Unclosed, UnexpectedEot, syntax::{FullContainer, MissingSyntax, TooFew, TooMany}, token::{MissingToken, SeparatedError, UnexpectedToken}},
+/// #   punct::{CloseBrace, CloseBracket, CloseParen, OpenBrace, OpenBracket, OpenParen, Semicolon},
+/// #   span::Span as _,
+/// #   token::PunctuatorToken,
+/// # };
+/// # #[derive(Debug)]
+/// # struct Error;
+/// # impl From<Infallible> for Error { fn from(e: Infallible) -> Self { match e {} } }
+/// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
+/// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
+/// # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
+/// # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
+/// # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
+/// # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
+/// # impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
+/// # #[derive(Debug, Clone, PartialEq)]
+/// # enum Tok { Num(i64), Word, Comma, Semi, LBracket, RBracket, LBrace, RBrace, LParen, RParen }
+/// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// # enum Kind { Num, Word, Comma, Semi, LBracket, RBracket, LBrace, RBrace, LParen, RParen }
+/// # impl fmt::Display for Kind { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{self:?}") } }
+/// # impl Token<'_> for Tok {
+/// #   type Kind = Kind;
+/// #   type Error = Infallible;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
+/// #   fn kind(&self) -> Kind { match self {
+/// #     Tok::Num(_) => Kind::Num, Tok::Word => Kind::Word,
+/// #     Tok::Comma => Kind::Comma, Tok::Semi => Kind::Semi,
+/// #     Tok::LBracket => Kind::LBracket, Tok::RBracket => Kind::RBracket,
+/// #     Tok::LBrace => Kind::LBrace, Tok::RBrace => Kind::RBrace,
+/// #     Tok::LParen => Kind::LParen, Tok::RParen => Kind::RParen } }
+/// #   fn is_trivia(&self) -> bool { false }
+/// # }
+/// # impl PunctuatorToken<'_> for Tok {
+/// #   fn open_bracket() -> Option<Kind> { Some(Kind::LBracket) }
+/// #   fn close_bracket() -> Option<Kind> { Some(Kind::RBracket) }
+/// #   fn open_brace() -> Option<Kind> { Some(Kind::LBrace) }
+/// #   fn close_brace() -> Option<Kind> { Some(Kind::RBrace) }
+/// #   fn open_paren() -> Option<Kind> { Some(Kind::LParen) }
+/// #   fn close_paren() -> Option<Kind> { Some(Kind::RParen) }
+/// #   fn comma() -> Option<Kind> { Some(Kind::Comma) }
+/// #   fn semicolon() -> Option<Kind> { Some(Kind::Semi) }
+/// # }
+/// # impl From<tokora::punct::Comma<(), (), ()>> for Kind { fn from(_: tokora::punct::Comma<(), (), ()>) -> Self { Kind::Comma } }
+/// # impl From<Semicolon<(), (), ()>> for Kind { fn from(_: Semicolon<(), (), ()>) -> Self { Kind::Semi } }
+/// # impl From<OpenBracket<(), (), ()>> for Kind { fn from(_: OpenBracket<(), (), ()>) -> Self { Kind::LBracket } }
+/// # impl From<CloseBracket<(), (), ()>> for Kind { fn from(_: CloseBracket<(), (), ()>) -> Self { Kind::RBracket } }
+/// # impl From<OpenBrace<(), (), ()>> for Kind { fn from(_: OpenBrace<(), (), ()>) -> Self { Kind::LBrace } }
+/// # impl From<CloseBrace<(), (), ()>> for Kind { fn from(_: CloseBrace<(), (), ()>) -> Self { Kind::RBrace } }
+/// # impl From<OpenParen<(), (), ()>> for Kind { fn from(_: OpenParen<(), (), ()>) -> Self { Kind::LParen } }
+/// # impl From<CloseParen<(), (), ()>> for Kind { fn from(_: CloseParen<(), (), ()>) -> Self { Kind::RParen } }
+/// # struct CharLexer<'a> { src: &'a str, pos: usize, tok: SimpleSpan, state: () }
+/// # impl<'a> Lexer<'a> for CharLexer<'a> {
+/// #   type State = (); type Source = str; type Token = Tok; type Span = SimpleSpan; type Offset = usize;
+/// #   fn new(src: &'a str) -> Self { Self { src, pos: 0, tok: SimpleSpan::new(0, 0), state: () } }
+/// #   fn with_state(src: &'a str, _: ()) -> Self { Self::new(src) }
+/// #   fn check(&self) -> Result<(), Infallible> { Ok(()) }
+/// #   fn state(&self) -> &() { &self.state }
+/// #   fn state_mut(&mut self) -> &mut () { &mut self.state }
+/// #   fn into_state(self) -> Self::State {}
+/// #   fn source(&self) -> &'a str { self.src }
+/// #   fn span(&self) -> SimpleSpan { self.tok }
+/// #   fn slice(&self) -> &'a str { &self.src[self.tok.start()..self.tok.end()] }
+/// #   fn lex(&mut self) -> Option<Result<Tok, Infallible>> {
+/// #     let bytes = self.src.as_bytes();
+/// #     while self.pos < bytes.len() && bytes[self.pos] == b' ' { self.pos += 1; }
+/// #     if self.pos >= bytes.len() { return None; }
+/// #     let start = self.pos;
+/// #     let tok = if bytes[self.pos].is_ascii_digit() {
+/// #       while self.pos < bytes.len() && bytes[self.pos].is_ascii_digit() { self.pos += 1; }
+/// #       Tok::Num(self.src[start..self.pos].parse().unwrap())
+/// #     } else {
+/// #       self.pos += 1;
+/// #       match bytes[start] {
+/// #         b',' => Tok::Comma, b';' => Tok::Semi,
+/// #         b'[' => Tok::LBracket, b']' => Tok::RBracket,
+/// #         b'{' => Tok::LBrace, b'}' => Tok::RBrace,
+/// #         b'(' => Tok::LParen, b')' => Tok::RParen,
+/// #         _ => Tok::Word,
+/// #       }
+/// #     };
+/// #     self.tok = SimpleSpan::new(start, self.pos);
+/// #     Some(Ok(tok))
+/// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
+/// #   fn bump(&mut self, n: &usize) { self.pos += n; }
+/// # }
+/// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
+/// # fn num<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<i64, Error> {
+/// #   match inp.try_expect(|t| matches!(t.data, Tok::Num(_)))? {
+/// #     Some(sp) => match sp.data { Tok::Num(n) => Ok(n), _ => unreachable!() },
+/// #     None => Err(Error),
+/// #   }
+/// # }
+/// use tokora::{Accumulator, Parse, ParseInput, Parser, while_kind};
+///
+/// // Parse: element, element, element,  (trailing comma allowed)
+/// fn numbers<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<Vec<i64>, Error> {
+///   num
+///     .separated_by_comma_while(while_kind(Kind::Num))
+///     .allow_trailing()
+///     .collect()
+///     .parse_input(inp)
+/// }
+///
+/// let got = Parser::with_parser(numbers).parse_str("1, 2, 3,").unwrap();
+/// assert_eq!(got, vec![1, 2, 3]);
 /// ```
 ///
 /// ## With Leading Separator
 ///
-/// ```ignore
-/// // Parse: , element, element  (leading comma allowed)
-/// let parser = SeparatedWhile::comma::<MyLexer, U1, Ctx>(
-///     element_parser(),
-///     stop_condition
-/// )
-/// .allow_leading()    // Allow leading comma
-/// .collect::<Vec<_>>();
+/// ```rust
+/// # use core::{convert::Infallible, fmt};
+/// # use tokora::{
+/// #   FatalContext, InputRef, Lexer, SimpleSpan, Token,
+/// #   error::{Unclosed, UnexpectedEot, syntax::{FullContainer, MissingSyntax, TooFew, TooMany}, token::{MissingToken, SeparatedError, UnexpectedToken}},
+/// #   punct::{CloseBrace, CloseBracket, CloseParen, OpenBrace, OpenBracket, OpenParen, Semicolon},
+/// #   span::Span as _,
+/// #   token::PunctuatorToken,
+/// # };
+/// # #[derive(Debug)]
+/// # struct Error;
+/// # impl From<Infallible> for Error { fn from(e: Infallible) -> Self { match e {} } }
+/// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
+/// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
+/// # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
+/// # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
+/// # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
+/// # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
+/// # impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
+/// # #[derive(Debug, Clone, PartialEq)]
+/// # enum Tok { Num(i64), Word, Comma, Semi, LBracket, RBracket, LBrace, RBrace, LParen, RParen }
+/// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// # enum Kind { Num, Word, Comma, Semi, LBracket, RBracket, LBrace, RBrace, LParen, RParen }
+/// # impl fmt::Display for Kind { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{self:?}") } }
+/// # impl Token<'_> for Tok {
+/// #   type Kind = Kind;
+/// #   type Error = Infallible;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
+/// #   fn kind(&self) -> Kind { match self {
+/// #     Tok::Num(_) => Kind::Num, Tok::Word => Kind::Word,
+/// #     Tok::Comma => Kind::Comma, Tok::Semi => Kind::Semi,
+/// #     Tok::LBracket => Kind::LBracket, Tok::RBracket => Kind::RBracket,
+/// #     Tok::LBrace => Kind::LBrace, Tok::RBrace => Kind::RBrace,
+/// #     Tok::LParen => Kind::LParen, Tok::RParen => Kind::RParen } }
+/// #   fn is_trivia(&self) -> bool { false }
+/// # }
+/// # impl PunctuatorToken<'_> for Tok {
+/// #   fn open_bracket() -> Option<Kind> { Some(Kind::LBracket) }
+/// #   fn close_bracket() -> Option<Kind> { Some(Kind::RBracket) }
+/// #   fn open_brace() -> Option<Kind> { Some(Kind::LBrace) }
+/// #   fn close_brace() -> Option<Kind> { Some(Kind::RBrace) }
+/// #   fn open_paren() -> Option<Kind> { Some(Kind::LParen) }
+/// #   fn close_paren() -> Option<Kind> { Some(Kind::RParen) }
+/// #   fn comma() -> Option<Kind> { Some(Kind::Comma) }
+/// #   fn semicolon() -> Option<Kind> { Some(Kind::Semi) }
+/// # }
+/// # impl From<tokora::punct::Comma<(), (), ()>> for Kind { fn from(_: tokora::punct::Comma<(), (), ()>) -> Self { Kind::Comma } }
+/// # impl From<Semicolon<(), (), ()>> for Kind { fn from(_: Semicolon<(), (), ()>) -> Self { Kind::Semi } }
+/// # impl From<OpenBracket<(), (), ()>> for Kind { fn from(_: OpenBracket<(), (), ()>) -> Self { Kind::LBracket } }
+/// # impl From<CloseBracket<(), (), ()>> for Kind { fn from(_: CloseBracket<(), (), ()>) -> Self { Kind::RBracket } }
+/// # impl From<OpenBrace<(), (), ()>> for Kind { fn from(_: OpenBrace<(), (), ()>) -> Self { Kind::LBrace } }
+/// # impl From<CloseBrace<(), (), ()>> for Kind { fn from(_: CloseBrace<(), (), ()>) -> Self { Kind::RBrace } }
+/// # impl From<OpenParen<(), (), ()>> for Kind { fn from(_: OpenParen<(), (), ()>) -> Self { Kind::LParen } }
+/// # impl From<CloseParen<(), (), ()>> for Kind { fn from(_: CloseParen<(), (), ()>) -> Self { Kind::RParen } }
+/// # struct CharLexer<'a> { src: &'a str, pos: usize, tok: SimpleSpan, state: () }
+/// # impl<'a> Lexer<'a> for CharLexer<'a> {
+/// #   type State = (); type Source = str; type Token = Tok; type Span = SimpleSpan; type Offset = usize;
+/// #   fn new(src: &'a str) -> Self { Self { src, pos: 0, tok: SimpleSpan::new(0, 0), state: () } }
+/// #   fn with_state(src: &'a str, _: ()) -> Self { Self::new(src) }
+/// #   fn check(&self) -> Result<(), Infallible> { Ok(()) }
+/// #   fn state(&self) -> &() { &self.state }
+/// #   fn state_mut(&mut self) -> &mut () { &mut self.state }
+/// #   fn into_state(self) -> Self::State {}
+/// #   fn source(&self) -> &'a str { self.src }
+/// #   fn span(&self) -> SimpleSpan { self.tok }
+/// #   fn slice(&self) -> &'a str { &self.src[self.tok.start()..self.tok.end()] }
+/// #   fn lex(&mut self) -> Option<Result<Tok, Infallible>> {
+/// #     let bytes = self.src.as_bytes();
+/// #     while self.pos < bytes.len() && bytes[self.pos] == b' ' { self.pos += 1; }
+/// #     if self.pos >= bytes.len() { return None; }
+/// #     let start = self.pos;
+/// #     let tok = if bytes[self.pos].is_ascii_digit() {
+/// #       while self.pos < bytes.len() && bytes[self.pos].is_ascii_digit() { self.pos += 1; }
+/// #       Tok::Num(self.src[start..self.pos].parse().unwrap())
+/// #     } else {
+/// #       self.pos += 1;
+/// #       match bytes[start] {
+/// #         b',' => Tok::Comma, b';' => Tok::Semi,
+/// #         b'[' => Tok::LBracket, b']' => Tok::RBracket,
+/// #         b'{' => Tok::LBrace, b'}' => Tok::RBrace,
+/// #         b'(' => Tok::LParen, b')' => Tok::RParen,
+/// #         _ => Tok::Word,
+/// #       }
+/// #     };
+/// #     self.tok = SimpleSpan::new(start, self.pos);
+/// #     Some(Ok(tok))
+/// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
+/// #   fn bump(&mut self, n: &usize) { self.pos += n; }
+/// # }
+/// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
+/// # fn num<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<i64, Error> {
+/// #   match inp.try_expect(|t| matches!(t.data, Tok::Num(_)))? {
+/// #     Some(sp) => match sp.data { Tok::Num(n) => Ok(n), _ => unreachable!() },
+/// #     None => Err(Error),
+/// #   }
+/// # }
+/// use tokora::{Accumulator, Parse, ParseInput, Parser, while_kind};
 ///
-/// // Input: ", 1, 2"
-/// // Output: Ok(vec![1, 2])
+/// // Parse: , element, element  (leading comma allowed)
+/// fn numbers<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<Vec<i64>, Error> {
+///   num
+///     .separated_by_comma_while(while_kind(Kind::Num))
+///     .allow_leading()
+///     .collect()
+///     .parse_input(inp)
+/// }
+///
+/// let got = Parser::with_parser(numbers).parse_str(", 1, 2").unwrap();
+/// assert_eq!(got, vec![1, 2]);
 /// ```
 ///
 /// ## With Bounds
 ///
-/// ```ignore
-/// // Parse at least 1, at most 5 elements
-/// let parser = SeparatedWhile::comma::<MyLexer, U1, Ctx>(
-///     element_parser(),
-///     stop_condition
-/// )
-/// .at_least(Minimum::new(1))
-/// .at_most(Maximum::new(5))
-/// .collect::<Vec<_>>();
+/// `SeparatedWhile` sets both bounds in one call. (`at_least` and `at_most` each exist on their
+/// own, but unlike [`Repeated`] and [`RepeatedWhile`] they do not chain into a `Bounded`.)
+///
+/// ```rust
+/// # use core::{convert::Infallible, fmt};
+/// # use tokora::{
+/// #   FatalContext, InputRef, Lexer, SimpleSpan, Token,
+/// #   error::{Unclosed, UnexpectedEot, syntax::{FullContainer, MissingSyntax, TooFew, TooMany}, token::{MissingToken, SeparatedError, UnexpectedToken}},
+/// #   punct::{CloseBrace, CloseBracket, CloseParen, OpenBrace, OpenBracket, OpenParen, Semicolon},
+/// #   span::Span as _,
+/// #   token::PunctuatorToken,
+/// # };
+/// # #[derive(Debug)]
+/// # struct Error;
+/// # impl From<Infallible> for Error { fn from(e: Infallible) -> Self { match e {} } }
+/// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
+/// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
+/// # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
+/// # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
+/// # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
+/// # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
+/// # impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
+/// # #[derive(Debug, Clone, PartialEq)]
+/// # enum Tok { Num(i64), Word, Comma, Semi, LBracket, RBracket, LBrace, RBrace, LParen, RParen }
+/// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// # enum Kind { Num, Word, Comma, Semi, LBracket, RBracket, LBrace, RBrace, LParen, RParen }
+/// # impl fmt::Display for Kind { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{self:?}") } }
+/// # impl Token<'_> for Tok {
+/// #   type Kind = Kind;
+/// #   type Error = Infallible;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
+/// #   fn kind(&self) -> Kind { match self {
+/// #     Tok::Num(_) => Kind::Num, Tok::Word => Kind::Word,
+/// #     Tok::Comma => Kind::Comma, Tok::Semi => Kind::Semi,
+/// #     Tok::LBracket => Kind::LBracket, Tok::RBracket => Kind::RBracket,
+/// #     Tok::LBrace => Kind::LBrace, Tok::RBrace => Kind::RBrace,
+/// #     Tok::LParen => Kind::LParen, Tok::RParen => Kind::RParen } }
+/// #   fn is_trivia(&self) -> bool { false }
+/// # }
+/// # impl PunctuatorToken<'_> for Tok {
+/// #   fn open_bracket() -> Option<Kind> { Some(Kind::LBracket) }
+/// #   fn close_bracket() -> Option<Kind> { Some(Kind::RBracket) }
+/// #   fn open_brace() -> Option<Kind> { Some(Kind::LBrace) }
+/// #   fn close_brace() -> Option<Kind> { Some(Kind::RBrace) }
+/// #   fn open_paren() -> Option<Kind> { Some(Kind::LParen) }
+/// #   fn close_paren() -> Option<Kind> { Some(Kind::RParen) }
+/// #   fn comma() -> Option<Kind> { Some(Kind::Comma) }
+/// #   fn semicolon() -> Option<Kind> { Some(Kind::Semi) }
+/// # }
+/// # impl From<tokora::punct::Comma<(), (), ()>> for Kind { fn from(_: tokora::punct::Comma<(), (), ()>) -> Self { Kind::Comma } }
+/// # impl From<Semicolon<(), (), ()>> for Kind { fn from(_: Semicolon<(), (), ()>) -> Self { Kind::Semi } }
+/// # impl From<OpenBracket<(), (), ()>> for Kind { fn from(_: OpenBracket<(), (), ()>) -> Self { Kind::LBracket } }
+/// # impl From<CloseBracket<(), (), ()>> for Kind { fn from(_: CloseBracket<(), (), ()>) -> Self { Kind::RBracket } }
+/// # impl From<OpenBrace<(), (), ()>> for Kind { fn from(_: OpenBrace<(), (), ()>) -> Self { Kind::LBrace } }
+/// # impl From<CloseBrace<(), (), ()>> for Kind { fn from(_: CloseBrace<(), (), ()>) -> Self { Kind::RBrace } }
+/// # impl From<OpenParen<(), (), ()>> for Kind { fn from(_: OpenParen<(), (), ()>) -> Self { Kind::LParen } }
+/// # impl From<CloseParen<(), (), ()>> for Kind { fn from(_: CloseParen<(), (), ()>) -> Self { Kind::RParen } }
+/// # struct CharLexer<'a> { src: &'a str, pos: usize, tok: SimpleSpan, state: () }
+/// # impl<'a> Lexer<'a> for CharLexer<'a> {
+/// #   type State = (); type Source = str; type Token = Tok; type Span = SimpleSpan; type Offset = usize;
+/// #   fn new(src: &'a str) -> Self { Self { src, pos: 0, tok: SimpleSpan::new(0, 0), state: () } }
+/// #   fn with_state(src: &'a str, _: ()) -> Self { Self::new(src) }
+/// #   fn check(&self) -> Result<(), Infallible> { Ok(()) }
+/// #   fn state(&self) -> &() { &self.state }
+/// #   fn state_mut(&mut self) -> &mut () { &mut self.state }
+/// #   fn into_state(self) -> Self::State {}
+/// #   fn source(&self) -> &'a str { self.src }
+/// #   fn span(&self) -> SimpleSpan { self.tok }
+/// #   fn slice(&self) -> &'a str { &self.src[self.tok.start()..self.tok.end()] }
+/// #   fn lex(&mut self) -> Option<Result<Tok, Infallible>> {
+/// #     let bytes = self.src.as_bytes();
+/// #     while self.pos < bytes.len() && bytes[self.pos] == b' ' { self.pos += 1; }
+/// #     if self.pos >= bytes.len() { return None; }
+/// #     let start = self.pos;
+/// #     let tok = if bytes[self.pos].is_ascii_digit() {
+/// #       while self.pos < bytes.len() && bytes[self.pos].is_ascii_digit() { self.pos += 1; }
+/// #       Tok::Num(self.src[start..self.pos].parse().unwrap())
+/// #     } else {
+/// #       self.pos += 1;
+/// #       match bytes[start] {
+/// #         b',' => Tok::Comma, b';' => Tok::Semi,
+/// #         b'[' => Tok::LBracket, b']' => Tok::RBracket,
+/// #         b'{' => Tok::LBrace, b'}' => Tok::RBrace,
+/// #         b'(' => Tok::LParen, b')' => Tok::RParen,
+/// #         _ => Tok::Word,
+/// #       }
+/// #     };
+/// #     self.tok = SimpleSpan::new(start, self.pos);
+/// #     Some(Ok(tok))
+/// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
+/// #   fn bump(&mut self, n: &usize) { self.pos += n; }
+/// # }
+/// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
+/// # fn num<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<i64, Error> {
+/// #   match inp.try_expect(|t| matches!(t.data, Tok::Num(_)))? {
+/// #     Some(sp) => match sp.data { Tok::Num(n) => Ok(n), _ => unreachable!() },
+/// #     None => Err(Error),
+/// #   }
+/// # }
+/// use tokora::{Accumulator, Parse, ParseInput, Parser, while_kind};
+///
+/// // Parse at least 1, at most 5 elements.
+/// fn numbers<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<Vec<i64>, Error> {
+///   num
+///     .separated_by_comma_while(while_kind(Kind::Num))
+///     .bounded(1, 5)
+///     .collect()
+///     .parse_input(inp)
+/// }
+///
+/// let got = Parser::with_parser(numbers).parse_str("1, 2, 3").unwrap();
+/// assert_eq!(got, vec![1, 2, 3]);
 /// ```
 ///
 /// ## Custom Separator
 ///
-/// ```ignore
-/// // Parse elements separated by semicolons
-/// let parser = SeparatedWhile::semicolon::<MyLexer, U1, Ctx>(
-///     element_parser(),
-///     stop_condition
-/// ).collect::<Vec<_>>();
+/// ```rust
+/// # use core::{convert::Infallible, fmt};
+/// # use tokora::{
+/// #   FatalContext, InputRef, Lexer, SimpleSpan, Token,
+/// #   error::{Unclosed, UnexpectedEot, syntax::{FullContainer, MissingSyntax, TooFew, TooMany}, token::{MissingToken, SeparatedError, UnexpectedToken}},
+/// #   punct::{CloseBrace, CloseBracket, CloseParen, OpenBrace, OpenBracket, OpenParen, Semicolon},
+/// #   span::Span as _,
+/// #   token::PunctuatorToken,
+/// # };
+/// # #[derive(Debug)]
+/// # struct Error;
+/// # impl From<Infallible> for Error { fn from(e: Infallible) -> Self { match e {} } }
+/// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
+/// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<SeparatedError<'a, T, K, S, Lang>> for Error { fn from(_: SeparatedError<'a, T, K, S, Lang>) -> Self { Error } }
+/// # impl<'a, K: Clone, O, Lang: ?Sized> From<MissingToken<'a, K, O, Lang>> for Error { fn from(_: MissingToken<'a, K, O, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized, Set: Clone + 'static> From<UnexpectedEot<O, Lang, Set>> for Error { fn from(_: UnexpectedEot<O, Lang, Set>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized> From<MissingSyntax<O, Lang>> for Error { fn from(_: MissingSyntax<O, Lang>) -> Self { Error } }
+/// # impl<S, Lang: ?Sized> From<FullContainer<S, Lang>> for Error { fn from(_: FullContainer<S, Lang>) -> Self { Error } }
+/// # impl<S, Lang: ?Sized> From<TooFew<S, Lang>> for Error { fn from(_: TooFew<S, Lang>) -> Self { Error } }
+/// # impl<S, Lang: ?Sized> From<TooMany<S, Lang>> for Error { fn from(_: TooMany<S, Lang>) -> Self { Error } }
+/// # impl<'a, L: Lexer<'a>, Lang: ?Sized> tokora::emitter::FromUnclosed<'a, L, Lang> for Error { fn from_unclosed<D>(_: Unclosed<D, L::Span, Lang>) -> Self { Error } }
+/// # #[derive(Debug, Clone, PartialEq)]
+/// # enum Tok { Num(i64), Word, Comma, Semi, LBracket, RBracket, LBrace, RBrace, LParen, RParen }
+/// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// # enum Kind { Num, Word, Comma, Semi, LBracket, RBracket, LBrace, RBrace, LParen, RParen }
+/// # impl fmt::Display for Kind { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{self:?}") } }
+/// # impl Token<'_> for Tok {
+/// #   type Kind = Kind;
+/// #   type Error = Infallible;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
+/// #   fn kind(&self) -> Kind { match self {
+/// #     Tok::Num(_) => Kind::Num, Tok::Word => Kind::Word,
+/// #     Tok::Comma => Kind::Comma, Tok::Semi => Kind::Semi,
+/// #     Tok::LBracket => Kind::LBracket, Tok::RBracket => Kind::RBracket,
+/// #     Tok::LBrace => Kind::LBrace, Tok::RBrace => Kind::RBrace,
+/// #     Tok::LParen => Kind::LParen, Tok::RParen => Kind::RParen } }
+/// #   fn is_trivia(&self) -> bool { false }
+/// # }
+/// # impl PunctuatorToken<'_> for Tok {
+/// #   fn open_bracket() -> Option<Kind> { Some(Kind::LBracket) }
+/// #   fn close_bracket() -> Option<Kind> { Some(Kind::RBracket) }
+/// #   fn open_brace() -> Option<Kind> { Some(Kind::LBrace) }
+/// #   fn close_brace() -> Option<Kind> { Some(Kind::RBrace) }
+/// #   fn open_paren() -> Option<Kind> { Some(Kind::LParen) }
+/// #   fn close_paren() -> Option<Kind> { Some(Kind::RParen) }
+/// #   fn comma() -> Option<Kind> { Some(Kind::Comma) }
+/// #   fn semicolon() -> Option<Kind> { Some(Kind::Semi) }
+/// # }
+/// # impl From<tokora::punct::Comma<(), (), ()>> for Kind { fn from(_: tokora::punct::Comma<(), (), ()>) -> Self { Kind::Comma } }
+/// # impl From<Semicolon<(), (), ()>> for Kind { fn from(_: Semicolon<(), (), ()>) -> Self { Kind::Semi } }
+/// # impl From<OpenBracket<(), (), ()>> for Kind { fn from(_: OpenBracket<(), (), ()>) -> Self { Kind::LBracket } }
+/// # impl From<CloseBracket<(), (), ()>> for Kind { fn from(_: CloseBracket<(), (), ()>) -> Self { Kind::RBracket } }
+/// # impl From<OpenBrace<(), (), ()>> for Kind { fn from(_: OpenBrace<(), (), ()>) -> Self { Kind::LBrace } }
+/// # impl From<CloseBrace<(), (), ()>> for Kind { fn from(_: CloseBrace<(), (), ()>) -> Self { Kind::RBrace } }
+/// # impl From<OpenParen<(), (), ()>> for Kind { fn from(_: OpenParen<(), (), ()>) -> Self { Kind::LParen } }
+/// # impl From<CloseParen<(), (), ()>> for Kind { fn from(_: CloseParen<(), (), ()>) -> Self { Kind::RParen } }
+/// # struct CharLexer<'a> { src: &'a str, pos: usize, tok: SimpleSpan, state: () }
+/// # impl<'a> Lexer<'a> for CharLexer<'a> {
+/// #   type State = (); type Source = str; type Token = Tok; type Span = SimpleSpan; type Offset = usize;
+/// #   fn new(src: &'a str) -> Self { Self { src, pos: 0, tok: SimpleSpan::new(0, 0), state: () } }
+/// #   fn with_state(src: &'a str, _: ()) -> Self { Self::new(src) }
+/// #   fn check(&self) -> Result<(), Infallible> { Ok(()) }
+/// #   fn state(&self) -> &() { &self.state }
+/// #   fn state_mut(&mut self) -> &mut () { &mut self.state }
+/// #   fn into_state(self) -> Self::State {}
+/// #   fn source(&self) -> &'a str { self.src }
+/// #   fn span(&self) -> SimpleSpan { self.tok }
+/// #   fn slice(&self) -> &'a str { &self.src[self.tok.start()..self.tok.end()] }
+/// #   fn lex(&mut self) -> Option<Result<Tok, Infallible>> {
+/// #     let bytes = self.src.as_bytes();
+/// #     while self.pos < bytes.len() && bytes[self.pos] == b' ' { self.pos += 1; }
+/// #     if self.pos >= bytes.len() { return None; }
+/// #     let start = self.pos;
+/// #     let tok = if bytes[self.pos].is_ascii_digit() {
+/// #       while self.pos < bytes.len() && bytes[self.pos].is_ascii_digit() { self.pos += 1; }
+/// #       Tok::Num(self.src[start..self.pos].parse().unwrap())
+/// #     } else {
+/// #       self.pos += 1;
+/// #       match bytes[start] {
+/// #         b',' => Tok::Comma, b';' => Tok::Semi,
+/// #         b'[' => Tok::LBracket, b']' => Tok::RBracket,
+/// #         b'{' => Tok::LBrace, b'}' => Tok::RBrace,
+/// #         b'(' => Tok::LParen, b')' => Tok::RParen,
+/// #         _ => Tok::Word,
+/// #       }
+/// #     };
+/// #     self.tok = SimpleSpan::new(start, self.pos);
+/// #     Some(Ok(tok))
+/// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
+/// #   fn bump(&mut self, n: &usize) { self.pos += n; }
+/// # }
+/// # type Ctx<'a> = FatalContext<'a, CharLexer<'a>, Error>;
+/// # fn num<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<i64, Error> {
+/// #   match inp.try_expect(|t| matches!(t.data, Tok::Num(_)))? {
+/// #     Some(sp) => match sp.data { Tok::Num(n) => Ok(n), _ => unreachable!() },
+/// #     None => Err(Error),
+/// #   }
+/// # }
+/// use tokora::{Accumulator, Parse, ParseInput, Parser, while_kind};
 ///
-/// // Input: "a;b;c"
-/// // Output: Ok(vec![a, b, c])
+/// // Parse elements separated by semicolons.
+/// fn numbers<'a>(inp: &mut InputRef<'a, '_, CharLexer<'a>, Ctx<'a>>) -> Result<Vec<i64>, Error> {
+///   num
+///     .separated_by_semicolon_while(while_kind(Kind::Num))
+///     .collect()
+///     .parse_input(inp)
+/// }
+///
+/// let got = Parser::with_parser(numbers).parse_str("1;2;3").unwrap();
+/// assert_eq!(got, vec![1, 2, 3]);
 /// ```
 ///
 /// # How It Works
 ///
-/// 1. **Parse first element** (unless leading separator is required)
+/// 1. **Parse first element** (unless a leading separator is required)
 /// 2. **Loop**:
-///    - Call `condition` to check if we should continue
-///    - If `Action::Continue`: parse separator, then element
+///    - Take a separator if one is at the front
+///    - Otherwise call `condition` with a `W`-token window over the *element* position
+///    - If `Action::Continue`: parse the next element
 ///    - If `Action::Stop`: break
-/// 3. **Validate** trailing separator rules
+/// 3. **Validate** leading/trailing separator rules and min/max bounds
 /// 4. **Collect** parsed elements into container
+///
+/// The window the condition sees sits at the **element** position, not the separator one: the
+/// separator is consumed before the decision is asked for. A condition that continues on the
+/// separator token therefore stops immediately, on the very first element.
 ///
 /// # Error Handling
 ///
@@ -137,7 +670,8 @@ mod delim;
 /// # See Also
 ///
 /// - [`delimited`](SeparatedWhile::delimited) - Wrap in delimiters (e.g., `[...]` or `{...}`)
-/// - [`repeated`](RepeatedWhile) - Repeat without separators
+/// - [`RepeatedWhile`] - Repeat without separators
+/// - [`Separated`] - Separate until the element itself declines
 /// - [`Collect`](crate::parser::Collect) - Wrapper for collecting elements into a container
 ///
 /// # Completeness (0.3.0): Complete-only
