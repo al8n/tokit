@@ -14,9 +14,26 @@ produces when a value that used to be borrowed starts being owned.
 
 Measured on this machine, one `Vec::<u64>::with_capacity(n)` and its drop costs 18 ns at n = 8 and
 27-30 ns at n = 64 or 512, against a 1 ns control. The default `RATE` of 3 therefore adds roughly
-7 ns per token, against the 15 ns a token costs in `input/scan/next_drain` — about +50% on the ids
-that reach `next` once a token, and proportionally less on the ids that reach their tokens through
-the scan family instead. The rate is a knob, `WALLGATE_PLANT_RATE`, because one plant size proves
+7 ns per call.
+
+# What it measured, and the half of the reading that is not the magnitude
+
+A DATED RECORD of one run, on a developer machine under load ~36 — its absolute times are
+worthless and its ratios are not, because both sides met the same machine within seconds of each
+other. Two rounds a side, 100 ms warm-up and 200 ms measurement an id.
+
+**26 of the 46 ids failed, from +12.17% to +82.81%.** `input/scan/next_drain` went 674 878 ->
+1 232 724 ns, and the arithmetic closes: its 128 KiB fixture of `var1 = 2 + val3 ;` lines is about
+22 bytes a line, six tokens plus six runs of trivia, so ~71 000 `next` calls a parse; 557 846 ns
+over 71 000 is 7.8 ns a call, against the 7 ns predicted from the allocator microbenchmark and the
+rate.
+
+**The other twenty ids did not move at all**, between -3.4% and +2.9%, and which twenty is the
+interesting part. `cst/*` never parses — it builds a tree from pre-made events — and every one of
+the `parser/*` combinator drivers, along with `input/dispatch/fused_*`, reaches its tokens through
+`try_expect` and the scan family rather than through `next`. So the gate did not merely fire: it
+said WHERE, and the split falls exactly along whether an id enters the function the plant is in. A
+plant that moved every row equally would be measuring the harness. The rate is a knob, `WALLGATE_PLANT_RATE`, because one plant size proves
 the plant and not the property: raise it until the gate loses the regression and you have measured
 what the threshold means instead of asserting it.
 
