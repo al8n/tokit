@@ -70,13 +70,20 @@ where
 ///
 /// One of the two contracts this family did not implement until
 /// [#259](https://github.com/al8n/tokora/issues/259)'s stage 3.
+///
+/// Spelled on `With<Collect<..>, PhantomSpan>`, uniformly with every other repetition driver.
+/// [`Collect`]'s "Why the spanned destination wears a wrapper" is why it cannot be written onto
+/// `Collect<..>` itself.
 impl<'inp, L, P, O, Condition, Container, Ctx, Delim, W, Lang: ?Sized>
   ParseInput<'inp, L, Spanned<Container, L::Span>, Ctx, Lang>
-  for Collect<
-    DelimitedBy<AtLeast<RepeatedWhile<P, Condition, O, W, L, Ctx, Lang>>, Delim>,
-    Container,
-    Ctx,
-    Lang,
+  for With<
+    Collect<
+      DelimitedBy<AtLeast<RepeatedWhile<P, Condition, O, W, L, Ctx, Lang>>, Delim>,
+      Container,
+      Ctx,
+      Lang,
+    >,
+    PhantomSpan,
   >
 where
   Delim: Delimiter<'inp, L, Lang>,
@@ -100,10 +107,11 @@ where
     L: Lexer<'inp>,
     Ctx: ParseContext<'inp, L, Lang>,
   {
-    let minimum = self.parser.parser.minimum();
+    let minimum = self.primary().parser.parser.minimum();
     let min = minimum.get();
 
     self
+      .primary_mut()
       .attempt(|c| {
         let Collect {
           parser, container, ..

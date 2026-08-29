@@ -32,10 +32,10 @@ use tokora::{
     token::{MissingTokenOf, SeparatedError, UnexpectedToken, UnexpectedTokenOf},
   },
   input::Cursor,
-  parser::Action,
+  parser::{Action, With},
   punct::Bracket,
   span::Spanned,
-  utils::CowStr,
+  utils::{CowStr, marker::PhantomSpan},
 };
 
 use common::{TestLexer, Token};
@@ -842,11 +842,14 @@ where
     + TooFewEmitter<'inp, TestLexer<'inp>>
     + TooManyEmitter<'inp, TestLexer<'inp>>,
 {
-  parse_num_rw
-    .repeated_while::<_, U1>(decide_num_rw::<Ctx>)
-    .bounded(1, 3)
-    .collect()
-    .parse_input(inp)
+  With::new(
+    parse_num_rw
+      .repeated_while::<_, U1>(decide_num_rw::<Ctx>)
+      .bounded(1, 3)
+      .collect(),
+    PhantomSpan::PHANTOM,
+  )
+  .parse_input(inp)
 }
 
 #[test]
@@ -865,11 +868,14 @@ where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
   Ctx::Emitter: RWEmitterBound<'inp> + TooFewEmitter<'inp, TestLexer<'inp>>,
 {
-  parse_num_rw
-    .repeated_while::<_, U1>(decide_num_rw::<Ctx>)
-    .at_least(1)
-    .collect()
-    .parse_input(inp)
+  With::new(
+    parse_num_rw
+      .repeated_while::<_, U1>(decide_num_rw::<Ctx>)
+      .at_least(1)
+      .collect(),
+    PhantomSpan::PHANTOM,
+  )
+  .parse_input(inp)
 }
 
 #[test]
@@ -888,11 +894,14 @@ where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
   Ctx::Emitter: RWEmitterBound<'inp> + TooManyEmitter<'inp, TestLexer<'inp>>,
 {
-  parse_num_rw
-    .repeated_while::<_, U1>(decide_num_rw::<Ctx>)
-    .at_most(3)
-    .collect()
-    .parse_input(inp)
+  With::new(
+    parse_num_rw
+      .repeated_while::<_, U1>(decide_num_rw::<Ctx>)
+      .at_most(3)
+      .collect(),
+    PhantomSpan::PHANTOM,
+  )
+  .parse_input(inp)
 }
 
 #[test]
@@ -911,10 +920,13 @@ where
   Ctx: ParseContext<'inp, TestLexer<'inp>>,
   Ctx::Emitter: RWEmitterBound<'inp>,
 {
-  parse_num_rw
-    .repeated_while::<_, U1>(decide_num_rw::<Ctx>)
-    .collect()
-    .parse_input(inp)
+  With::new(
+    parse_num_rw
+      .repeated_while::<_, U1>(decide_num_rw::<Ctx>)
+      .collect(),
+    PhantomSpan::PHANTOM,
+  )
+  .parse_input(inp)
 }
 
 #[test]

@@ -3,11 +3,13 @@
 //! The **spanned owning** destination on the two plain delimited families, `delim/repeated` and
 //! `delim/repeated_while`, over all four count variants.
 //!
-//! Spelled the way the *plain* families spell it — `Collect<..>` parsed straight to
-//! `Spanned<Container, L::Span>`, no `With<.., PhantomSpan>` wrapper, which is the separated
-//! families' shape and is what `sep_delim_extra.rs` and `sep_while_delim_extra.rs` exercise. A
-//! delimited plain list is the plain loop under a delimiter, so it inherits the plain loop's
-//! destination shape and not its delimited neighbour's.
+//! Spelled `With<Collect<..>, PhantomSpan>`, the way every separated family spells it and the way
+//! `sep_delim_extra.rs` and `sep_while_delim_extra.rs` exercise it. The wrapper is what makes the
+//! destination a **choice of type** rather than a choice of `ParseInput` output parameter: written
+//! straight onto `Collect<..>`, the spanned contract is a second impl on the same `Self` as the
+//! owning one, and a caller who leaves that output parameter to inference — as any generic
+//! `.spanned()`-shaped extension method does — gets `E0283` instead of a parser. `Collect<..>`
+//! therefore carries exactly one output across all twelve delimited and undelimited families.
 //!
 //! These two families had no file here because they had no spanned impl to exercise: they
 //! implemented the owning destination alone until #259 stage 3. The borrowed destination's
@@ -33,10 +35,11 @@ use tokora::{
   emitter::{
     Fatal, FullContainerEmitter, SeparatedEmitter, TooFewEmitter, TooManyEmitter, UnclosedEmitter,
   },
-  parser::Action,
+  parser::{Action, With},
   punct::Bracket,
   span::Spanned,
   try_parse_input::ParseAttempt,
+  utils::marker::PhantomSpan,
 };
 
 use common::{TestLexer, Token};
@@ -119,12 +122,15 @@ macro_rules! drep_spanned {
           + TooFewEmitter<'inp, TestLexer<'inp>>
           + TooManyEmitter<'inp, TestLexer<'inp>>,
       {
-        try_num
-          .repeated()
-          $($bound)*
-          .delimited::<Bracket<(), (), ()>>()
-          .collect()
-          .parse_input(inp)
+        With::new(
+          try_num
+            .repeated()
+            $($bound)*
+            .delimited::<Bracket<(), (), ()>>()
+            .collect(),
+          PhantomSpan::PHANTOM,
+        )
+        .parse_input(inp)
       }
 
       #[test]
@@ -156,12 +162,15 @@ macro_rules! drepw_spanned {
           + TooFewEmitter<'inp, TestLexer<'inp>>
           + TooManyEmitter<'inp, TestLexer<'inp>>,
       {
-        parse_num
-          .repeated_while::<_, U1>(decide_num::<Ctx>)
-          $($bound)*
-          .delimited::<Bracket<(), (), ()>>()
-          .collect()
-          .parse_input(inp)
+        With::new(
+          parse_num
+            .repeated_while::<_, U1>(decide_num::<Ctx>)
+            $($bound)*
+            .delimited::<Bracket<(), (), ()>>()
+            .collect(),
+          PhantomSpan::PHANTOM,
+        )
+        .parse_input(inp)
       }
 
       #[test]

@@ -170,7 +170,10 @@ fn spanned_repeated() {
   fn go<'inp>(
     inp: &mut InputRef<'inp, '_, TestLexer<'inp>, Ctx<'inp>>,
   ) -> Result<Spanned<Vec<i64>, tokora::span::SimpleSpan>, E> {
-    let mut c = try_num.repeated().at_most(1).collect();
+    let mut c = With::new(
+      try_num.repeated().at_most(1).collect(),
+      PhantomSpan::PHANTOM,
+    );
     let first: Result<Spanned<Vec<i64>, _>, E> = c.parse_input(inp);
     assert!(first.is_err());
     c.parse_input(inp)

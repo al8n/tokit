@@ -48,7 +48,10 @@ impl<
   Lang: ?Sized,
   Cmpl: crate::input::SurfaceIncomplete<'inp, L, Ctx, Lang>,
 > ParseInput<'inp, L, Spanned<Container, L::Span>, Ctx, Lang, Cmpl>
-  for Collect<Bounded<Repeated<F, O, L, Ctx, Lang, Cmpl>>, Container, Ctx, Lang, Cmpl>
+  for With<
+    Collect<Bounded<Repeated<F, O, L, Ctx, Lang, Cmpl>>, Container, Ctx, Lang, Cmpl>,
+    PhantomSpan,
+  >
 where
   L: Lexer<'inp>,
   F: TryParseInput<'inp, L, O, Ctx, Lang, Cmpl>,
@@ -69,6 +72,7 @@ where
     Ctx: ParseContext<'inp, L, Lang>,
   {
     self
+      .primary_mut()
       .attempt(|mut c| c.parse_input(inp))
       .map(|(span, collected)| Spanned::new(span, collected))
   }
