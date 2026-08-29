@@ -41,6 +41,11 @@
 //! cargo bench -p tokora-benches --bench cst
 //! ```
 
+/// The wall-clock regression gate's measurement window, shared by all five bench binaries.
+/// A no-op unless `ci/wallclock/run.sh` set its environment; see the module for what it
+/// overrides and why it is not the criterion command line.
+mod support;
+
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use tokora::{
   InputRef, Lexer, SimpleSpan, Token,
@@ -264,6 +269,7 @@ fn bench(c: &mut Criterion) {
   let wrap_src = "a".repeat(M);
 
   let mut group = c.benchmark_group("cst");
+  support::gate_overrides(&mut group);
 
   group.throughput(Throughput::Elements(2 * N as u64));
   group.bench_function("finish_error_dense", |b| {

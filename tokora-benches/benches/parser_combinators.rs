@@ -32,6 +32,11 @@
 //! Every source is generated from a counter — no randomness, no clock — so the fixtures
 //! are byte-identical between runs and between machines.
 
+/// The wall-clock regression gate's measurement window, shared by all five bench binaries.
+/// A no-op unless `ci/wallclock/run.sh` set its environment; see the module for what it
+/// overrides and why it is not the criterion command line.
+mod support;
+
 use core::{fmt::Write as _, time::Duration};
 use std::hint::black_box;
 
@@ -998,6 +1003,7 @@ fn parser_bench(c: &mut Criterion) {
   let mut group = c.benchmark_group("parser");
   group.measurement_time(Duration::from_secs(3));
   group.warm_up_time(Duration::from_secs(1));
+  support::gate_overrides(&mut group);
 
   bench_parser!(group, "repeated_collect", ints.as_str(), repeated_collect);
   bench_parser!(

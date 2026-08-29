@@ -39,6 +39,11 @@
 //! `input_scan.rs`): the source is well-formed, so it is never invoked; the
 //! measurement is pure backtracking machinery.
 
+/// The wall-clock regression gate's measurement window, shared by all five bench binaries.
+/// A no-op unless `ci/wallclock/run.sh` set its environment; see the module for what it
+/// overrides and why it is not the criterion command line.
+mod support;
+
 use core::{fmt::Write as _, time::Duration};
 use std::hint::black_box;
 
@@ -469,6 +474,7 @@ fn bench(c: &mut Criterion) {
   let mut group = c.benchmark_group("input/backtrack");
   group.measurement_time(Duration::from_secs(3));
   group.warm_up_time(Duration::from_secs(1));
+  support::gate_overrides(&mut group);
 
   // Per-token benches: one element == one real token of progress, so criterion's
   // per-element throughput is directly the per-op cost.
