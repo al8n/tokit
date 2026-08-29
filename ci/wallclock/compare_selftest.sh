@@ -288,7 +288,9 @@ check "and the spike is reported as the row's own noise" 0 "40.00%" -- \
 # same way, and a mutation there is just as silent. `harvest` is called directly over a synthetic
 # criterion output tree — which also pins the decision to read the id out of `benchmark.json`
 # rather than rebuild it from a path, since the group id below contains a slash.
-if python3 - "$here" "$tmp/crit" <<'PY'
+# `PYTHONDONTWRITEBYTECODE`: importing `measure.py` by path would otherwise leave a
+# `__pycache__/` beside it, in a directory this repository does not ignore.
+if PYTHONDONTWRITEBYTECODE=1 python3 - "$here" "$tmp/crit" <<'PY'
 import importlib.util, json, os, sys
 
 here, home = sys.argv[1], sys.argv[2]

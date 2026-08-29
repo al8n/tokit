@@ -78,6 +78,10 @@
 #
 #     ci/wallclock/run.sh <base-ref>            # compare HEAD against its merge-base
 #     ci/wallclock/run.sh --self                # compare HEAD against ITSELF: the noise floor
+#
+# The first form BECOMES the second on its own when the branch's `tokora/` tree is the
+# merge-base's, because then the two sides are identical source and the run is a floor
+# measurement whatever it was asked to be. See where `self` is re-derived below.
 #     ci/wallclock/run.sh --self --plant NAME   # ... with `ci/wallclock/plants/NAME.py` applied
 #                                               #     to the head side only
 #
@@ -160,6 +164,28 @@ else
 fi
 
 head_sha="$(git rev-parse HEAD)"
+
+# ── A branch that did not touch `tokora/` is a SELF-COMPARISON, and is told so ──────────────
+#
+# `tokora-benches` comes from HEAD on both sides — that is the whole instrument-is-the-constant
+# trick — so the only source a delta can come from is `tokora/`. When the two sides' `tokora/`
+# trees are the same OBJECT, the two builds are byte-identical source and every number below is
+# noise by construction: there is no regression available for the gate to find.
+#
+# Saying so is not a convenience. Most pull requests in this repository touch documentation, CI
+# or tests and nothing under `tokora/`, and for every one of them an unlabelled table of
+# percentages reads like a verdict while being a measurement of the runner. Worse, an advisory
+# job that reds on such a change teaches its readers that its reds mean nothing — which is how a
+# gate dies. So the run is relabelled, and what it reports is the floor.
+#
+# A PLANT is the exception and is excluded: it changes the head side in the work tree, where git
+# cannot see it, so the trees agree and the sources do not.
+if [ "$self" = 0 ] && [ -z "$plant" ] \
+   && [ "$(git rev-parse "$base:tokora")" = "$(git rev-parse "$head_sha:tokora")" ]; then
+  self=1
+  mode="self-comparison: this branch's \`tokora/\` IS the merge-base's"
+fi
+
 echo "wallclock: head $head_sha"
 echo "wallclock: base $base ($mode)"
 echo "wallclock: $WALL_ROUNDS rounds a side, ${WALL_WARMUP_MS}ms warm-up + ${WALL_MEASURE_MS}ms"
