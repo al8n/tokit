@@ -300,7 +300,9 @@ cargo fmt --all --check
 cargo test -p tokora --all-features
 cargo test -p tokora --no-default-features --features std,logos,combinators --examples
 RUSTDOCFLAGS="-D warnings" cargo test -p tokora --all-features --doc
+python3 tokora/tools/validate_docs.py --source
 (cd tokora && mdbook build)
+python3 tokora/tools/validate_docs.py --book target/book
 ```
 
 The guide is validated both as rustdoc and as an mdBook so API links, local links, chapter order,

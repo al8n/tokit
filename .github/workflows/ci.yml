@@ -15,6 +15,9 @@ name: CI
 #     RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
 #     RUSTDOCFLAGS="-D warnings" cargo doc -p tokora --no-deps --no-default-features
 #     RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc --all-features --no-deps
+#     python3 tokora/tools/validate_docs.py --source
+#     (cd tokora && mdbook build)
+#     python3 tokora/tools/validate_docs.py --book target/book
 #     bash ci/changelog_structure.sh CHANGELOG.md
 #     bash ci/feature_cfg_coverage_selftest.sh
 #     python3 ci/feature_cfg_coverage.py
@@ -22,6 +25,15 @@ name: CI
 #       | while read -r leg; do cargo check -p tokora $leg || break; done
 #     bash ci/name_collision/run.sh <merge-base> <inventory.json>   # see that job for the
 #                                                                  # inventory it requires
+#
+# The three guide lines belong to a DIFFERENT workflow — `pages.yml`, not the jobs below — and a
+# red there is a red `main` just the same. `mdbook build` is the only command anywhere that runs
+# the guide's link preprocessor, so no other line in this set can see a guide link that tool
+# refuses; the rustdoc legs above cannot, because rustdoc resolves an intra-doc link the
+# preprocessor has never been taught. `validate_docs.py` is what `pages.yml` runs either side of
+# the build — `--source` over the chapter markdown, `--book` over what the build just wrote, which
+# is why that leg means nothing before it. The build wants the mdbook `pages.yml` pins in
+# `MDBOOK_VERSION` and asserts on the runner; another local mdbook is not the one rendering `main`.
 #
 # And one line that is LINUX-ONLY, so it is not in the set above and is not expected to have been
 # run before a push from a mac:
