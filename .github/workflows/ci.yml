@@ -9,12 +9,18 @@ name: CI
 #     cargo +stable clippy --workspace --all-features --all-targets --no-deps -- -D warnings
 #     cargo test --all-features
 #     cargo test --release --all-features
+#     cargo test -p tokora --features logos,std
 #     cargo +nightly check -p tokora --all-targets --all-features
 #     cargo check -p tokora --no-default-features
 #     cargo bench -p tokora-benches --no-run
 #     RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
 #     RUSTDOCFLAGS="-D warnings" cargo doc -p tokora --no-deps --no-default-features
 #     RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc --all-features --no-deps
+#     RUSTDOCFLAGS="-D warnings" cargo doc -p tokora --no-deps \
+#       --features std,logos,trace,rowan,combinators
+#     python3 tokora/tools/validate_docs.py --source
+#     (cd tokora && mdbook build)                    # at pages.yml's pinned MDBOOK_VERSION
+#     python3 tokora/tools/validate_docs.py --book target/book
 #     bash ci/changelog_structure.sh CHANGELOG.md
 #     bash ci/feature_cfg_coverage_selftest.sh
 #     python3 ci/feature_cfg_coverage.py
@@ -22,6 +28,22 @@ name: CI
 #       | while read -r leg; do cargo check -p tokora $leg || break; done
 #     bash ci/name_collision/run.sh <merge-base> <inventory.json>   # see that job for the
 #                                                                  # inventory it requires
+#
+# The three guide lines belong to a DIFFERENT workflow — `pages.yml`, not the jobs below — and a
+# red there is a red `main` just the same. `mdbook build` is the only command anywhere that runs
+# the guide's link preprocessor, so no other line in this set can see a guide link that tool
+# refuses; the rustdoc legs above cannot, because rustdoc resolves an intra-doc link the
+# preprocessor has never been taught. `validate_docs.py` is what `pages.yml` runs either side of
+# the build — `--source` over the chapter markdown, `--book` over what the build just wrote, which
+# is why that leg means nothing before it.
+#
+# Run `mdbook build` at the version `pages.yml` pins in `MDBOOK_VERSION` — that job asserts it on
+# the runner before it builds anything, so a mismatch here is a mismatch with what renders `main`.
+# The two are not interchangeable for this book: the guide's own preprocessor branches across the
+# 0.4/0.5 boundary, reading the book's top-level list as `sections` from one and `items` from the
+# other, and the renderer's slugs and link rewriting are its own. If your mdbook is not the pinned
+# one, say so rather than reporting a pass: a green local build is weaker evidence than the
+# `pages` job, and that job is the verdict either way.
 #
 # And one line that is LINUX-ONLY, so it is not in the set above and is not expected to have been
 # run before a push from a mac:
@@ -62,7 +84,7 @@ name: CI
 # `tokora` dependency, which is also why its bench targets no longer carry `required-features`
 # and so can no longer be silently skipped.
 #
-# Four of the remaining lines look redundant beside a broader command and are not — each catches
+# Six of the remaining lines look redundant beside a broader command and are not — each catches
 # a class no other line in the set can:
 #
 #   * the bare-config rustdoc build is the only leg that sees bare-config intra-doc breakage:
@@ -82,6 +104,20 @@ name: CI
 #   * the name-collision probe needs a two-sided, GENERATED inventory rather than a fixed
 #     command line — which is why it went missing from this list, and why a branch that minted
 #     new item owners first heard about it from CI.
+#   * `cargo test -p tokora --features logos,std` is the only invocation anywhere that compiles
+#     the guide with `stacker` OFF. Both `--all-features` test lines carry that feature, so a
+#     guide doctest naming a `stacker`-gated item compiles there and nowhere else reads it.
+#     #340 put `assert_eq!(RecursionLimiter::SEGMENTED_PRATT_DEPTH, 1024)` in a guide fence and
+#     this leg is the one that went red — E0599, `909 passed; 1 failed`. A doctest is its own
+#     crate, so no `cfg` inside the fence could have saved it: the leg is the only witness.
+#   * the `std,logos,trace,rowan,combinators` rustdoc build — the `name-collision` job's own
+#     feature point — is the only leg that documents a `rowan`-gated chapter while `stacker` is
+#     off, and it refines the bare-config bullet above rather than repeating it. Bare config
+#     cannot see this class: `guide::ch16_lossless_cst` is itself `#[cfg(feature = "rowan")]`,
+#     so a link INSIDE it is never compiled there at all, while `--all-features` resolves it.
+#     #340's intra-doc link to `SEGMENTED_PRATT_DEPTH` was invisible to every other line here
+#     and reached `main` as `error: could not document tokora`, `#![deny(warnings)]` at
+#     `lib.rs:6` turning the unresolved link into a build failure.
 #
 # Features work the same way: only the `--all-features` / `--features rowan` legs compile the
 # `rowan`-gated lossless path, so a configuration no line above names is a configuration

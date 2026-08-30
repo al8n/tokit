@@ -6,6 +6,7 @@ written as rustdoc intra-doc links (`[`InputRef`](crate::InputRef)`). rustdoc re
 validates those under `-D warnings`; mdbook would render them as dead links. This rewrites them:
 
   crate::guide::chNN_x, super::chNN_x  ->  chNN_x.md            (sibling chapter, in-book)
+  ... the same with `#heading-anchor`  ->  chNN_x.md#heading-anchor
   everything else                      ->  a docs.rs URL
 
 Every other target must appear in DOCS_RS_MAP below. An unmapped `crate::` target FAILS THE BUILD
@@ -208,8 +209,10 @@ DOCS_RS_MAP = {
   "crate::cst::FinishError": "cst/enum.FinishError.html",
   "crate::cst::FinishError::MismatchedFinish": "cst/enum.FinishError.html#variant.MismatchedFinish",
   "crate::cst::FinishError::StaleDemote": "cst/enum.FinishError.html#variant.StaleDemote",
+  "crate::cst::FinishError::TooDeep": "cst/enum.FinishError.html#variant.TooDeep",
   "crate::cst::FinishError::UncoveredGap": "cst/enum.FinishError.html#variant.UncoveredGap",
   "crate::cst::FinishError::UnpairedSettle": "cst/enum.FinishError.html#variant.UnpairedSettle",
+  "crate::cst::MAX_TREE_DEPTH": "cst/constant.MAX_TREE_DEPTH.html",
   "crate::cst::Node": "cst/trait.Node.html",
   "crate::cst::Node::try_cast_node": "cst/trait.Node.html#tymethod.try_cast_node",
   "crate::cst::NodeChildren": "cst/struct.NodeChildren.html",
@@ -425,6 +428,8 @@ DOCS_RS_MAP = {
   "crate::span::Spanned": "span/struct.Spanned.html",
   "crate::state::recursion_tracker::RecursionLimiter": "state/recursion_tracker/struct.RecursionLimiter.html",
   "crate::state::recursion_tracker::RecursionLimiter#default-limit": "state/recursion_tracker/struct.RecursionLimiter.html#default-limit",
+  "crate::state::recursion_tracker::RecursionLimiter::PARSE_DEFAULT_DEPTH": "state/recursion_tracker/struct.RecursionLimiter.html#associatedconstant.PARSE_DEFAULT_DEPTH",
+  "crate::state::recursion_tracker::RecursionLimiter::SEGMENTED_PRATT_DEPTH": "state/recursion_tracker/struct.RecursionLimiter.html#associatedconstant.SEGMENTED_PRATT_DEPTH",
   "crate::state::recursion_tracker::RecursionLimiter::unlimited": "state/recursion_tracker/struct.RecursionLimiter.html#method.unlimited",
   "crate::syntax": "syntax/index.html",
   "crate::syntax::AstNode": "syntax/trait.AstNode.html",
@@ -498,8 +503,16 @@ DOCS_RS_MAP = {
 
 # `[text](crate::path)` / `[text](super::path)` -- the two intra-doc link spellings the guide uses.
 LINK = re.compile(r"\[([^\]]*)\]\((crate::[^)\s]+|super::[^)\s]+)\)")
-# A guide chapter, addressed either absolutely or from a sibling chapter's own module scope.
-CHAPTER = re.compile(r"^(?:crate::guide::|super::)((?:ch\d{2}|arch|ref|recipe)_\w+)$")
+# A guide chapter, addressed either absolutely or from a sibling chapter's own module scope, and
+# optionally a heading inside it (`super::ref_pratt#recursion-limits`). The anchor belongs to the
+# chapter link, not to some separate target: without the trailing group the whole spelling falls
+# through to DOCS_RS_MAP, and every value there sends the reader OUT to docs.rs -- the wrong
+# destination for a link from one chapter of this book to a heading in another.
+CHAPTER = re.compile(r"^(?:crate::guide::|super::)((?:ch\d{2}|arch|ref|recipe)_\w+)(#[\w-]+)?$")
+# The two prefixes a chapter link is spelled with. No DOCS_RS_MAP key uses either, so a target
+# that starts with one and that CHAPTER still rejects is a malformed chapter link -- a different
+# failure from a `crate::` item missing its map entry, and one no map entry can fix.
+CHAPTER_PREFIX = ("crate::guide::", "super::")
 
 errors = set()
 
@@ -507,7 +520,7 @@ errors = set()
 def rewrite(target: str) -> str:
   chapter = CHAPTER.match(target)
   if chapter:
-    return f"{chapter.group(1)}.md"
+    return f"{chapter.group(1)}.md{chapter.group(2) or ''}"
   page = DOCS_RS_MAP.get(target)
   if page is None:
     errors.add(target)
@@ -546,13 +559,31 @@ def main() -> int:
   walk(items)
 
   if errors:
-    print(
-      "mdbook_docs_links: the guide links to items with no entry in DOCS_RS_MAP, which would "
-      "render as dead links in the book. Add them to tokora/tools/mdbook_docs_links.py:",
-      file=sys.stderr,
-    )
-    for target in sorted(set(errors)):
-      print(f"  {target}", file=sys.stderr)
+    # Two different failures, and the repair for one is wrong for the other: a chapter link added
+    # to DOCS_RS_MAP would resolve, and would send the reader out of the book to docs.rs for a
+    # link that should have landed on a heading two chapters over. Report them apart.
+    chapters = sorted(t for t in errors if t.startswith(CHAPTER_PREFIX))
+    items = sorted(t for t in errors if not t.startswith(CHAPTER_PREFIX))
+    if items:
+      print(
+        "mdbook_docs_links: the guide links to items with no entry in DOCS_RS_MAP, which would "
+        "render as dead links in the book. Add them to tokora/tools/mdbook_docs_links.py:",
+        file=sys.stderr,
+      )
+      for target in items:
+        print(f"  {target}", file=sys.stderr)
+    if chapters:
+      print(
+        "mdbook_docs_links: the guide spells these as links to another guide chapter, and this "
+        "tool could not parse them. Do NOT add them to DOCS_RS_MAP: every entry there points out "
+        "to docs.rs, and a chapter link has to stay inside the book. The accepted spelling is "
+        "`super::<chapter>` or `crate::guide::<chapter>`, where <chapter> is a chNN_/arch_/ref_/"
+        "recipe_ file, optionally followed by `#heading-anchor`. Correct the target, or widen "
+        "CHAPTER in tokora/tools/mdbook_docs_links.py:",
+        file=sys.stderr,
+      )
+      for target in chapters:
+        print(f"  {target}", file=sys.stderr)
     return 1
 
   json.dump(book, sys.stdout)
