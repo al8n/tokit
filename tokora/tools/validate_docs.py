@@ -312,20 +312,79 @@ def validate_examples(errors: list[str]) -> None:
                 add(errors, f"{relative} lacks expected symbol {symbol}")
 
 
-def validate_features(errors: list[str]) -> None:
-    expected = set(tomllib.loads(MANIFEST.read_text(encoding="utf-8"))["features"])
-    readme = README.read_text(encoding="utf-8")
-    section = re.search(r"^## Features\s*$([\s\S]*?)(?=^## |\Z)", readme, re.M)
+def feature_section(label: str, path: Path, heading: str) -> tuple[str, set[str]] | None:
+    """The backticked feature keys named in the first column of `heading`'s tables.
+
+    Every backticked token in the first cell counts, not just a cell that is *only* a
+    backticked token: the guide spells rows as `` `std` *(default)* ``,
+    `` `logos` (`= logos_0_16`) `` and `` `bytes` / `bstr` / ... ``, and a reader takes each
+    of those as a named feature. A cell with no backticks — a header, a rule, the
+    `*(neither)*` tier — names nothing and contributes nothing.
+    """
+    section = re.search(r"^" + re.escape(heading) + r"\s*$([\s\S]*?)(?=^## |\Z)",
+                        path.read_text(encoding="utf-8"), re.M)
     if section is None:
-        add(errors, "README.md must include a Features section")
-        return
-    tick = re.escape(chr(96))
-    rows = set(re.findall(r"^\|\s*" + tick + r"([^" + tick + r"]+)" + tick + r"\s*\|", section.group(1), re.M))
-    missing, extra = sorted(expected - rows), sorted(rows - expected)
-    if missing:
-        add(errors, "README.md feature table is missing: " + ", ".join(missing))
-    if extra:
-        add(errors, "README.md feature table has unknown keys: " + ", ".join(extra))
+        add(errors_sink, f"{label} must include a {heading!r} section")
+        return None
+    tick = chr(96)
+    keys: set[str] = set()
+    for line in section.group(1).splitlines():
+        if not line.startswith("|") or line.count("|") < 2:
+            continue
+        keys.update(re.findall(tick + r"([^" + tick + r"]+)" + tick, line.split("|")[1]))
+    return section.group(1), keys
+
+
+# `validate_features` reports through this rather than threading `errors` into the reader,
+# so a missing section is one message from one place.
+errors_sink: list[str] = []
+
+
+def validate_features(errors: list[str]) -> None:
+    """Check the three feature tables against `Cargo.toml`, each at the strictness it claims.
+
+    * `README.md`'s **## Features** and the vocabulary chapter's **## Feature matrix** are
+      exhaustive — the latter says so in its own prose ("this is the full table, read from
+      `Cargo.toml`") — so both are checked for equality.
+    * `ref_combinators.md`'s **## Feature matrix** is the summary the vocabulary chapter calls
+      it, and making it exhaustive would put a second copy of the backend and tooling rows in
+      the combinator reference. It is checked for *no unknown keys*, plus the gates gating what
+      that chapter documents: `combinators` and the families it covers. Those thirteen are read
+      out of the manifest rather than listed here, so adding a family reds this until the
+      chapter names its gate.
+    """
+    manifest = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))["features"]
+    expected = set(manifest)
+    families = {"combinators", *manifest["combinators"]}
+
+    errors_sink.clear()
+    exhaustive = (
+        ("README.md", README, "## Features"),
+        ("tokora/src/guide/ref_vocabulary_macros_features.md",
+         GUIDE / "ref_vocabulary_macros_features.md", "## Feature matrix"),
+    )
+    for label, path, heading in exhaustive:
+        read = feature_section(label, path, heading)
+        if read is None:
+            continue
+        _text, rows = read
+        missing, extra = sorted(expected - rows), sorted(rows - expected)
+        if missing:
+            add(errors, f"{label} {heading!r} is missing: " + ", ".join(missing))
+        if extra:
+            add(errors, f"{label} {heading!r} has unknown keys: " + ", ".join(extra))
+
+    label = "tokora/src/guide/ref_combinators.md"
+    read = feature_section(label, GUIDE / "ref_combinators.md", "## Feature matrix")
+    if read is not None:
+        _text, rows = read
+        extra, absent = sorted(rows - expected), sorted(families - rows)
+        if extra:
+            add(errors, f"{label} '## Feature matrix' has unknown keys: " + ", ".join(extra))
+        if absent:
+            add(errors, f"{label} '## Feature matrix' is missing the combinator gates it "
+                        "documents: " + ", ".join(absent))
+    errors.extend(errors_sink)
 
 
 class ContentHeadings(HTMLParser):

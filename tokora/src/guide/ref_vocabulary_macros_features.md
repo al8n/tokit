@@ -524,8 +524,9 @@ The `separated_by_comma` / `fold_while` / `dispatch_on_kind` "families" from the
 
 `tokora`'s features fall into compilation tiers, a lexer adapter, source/container backends, and
 tooling. `docs.rs` builds `all-features` with `--cfg docsrs`. (The
-[combinator reference](super::ref_combinators) carries a one-line summary; this is the full table,
-read from `Cargo.toml`.)
+[combinator reference](super::ref_combinators) carries the combinator half on its own; this is the
+full table, read from `Cargo.toml`, and `tools/validate_docs.py` checks it against the manifest
+in both directions.)
 
 The versioned backends use a **two-name convention**: a friendly alias (`bytes`) turns on the
 currently-supported versioned feature (`bytes_1`), which pulls the optional dependency
@@ -538,6 +539,32 @@ currently-supported versioned feature (`bytes_1`), which pulls the optional depe
 | `std` *(default)* | the `std` library and the `default` features of every active dependency | `generic-arraydeque/default`, `thiserror/default`, `mayber/default`, and `<dep>?/default` for each active backend/logos version | requires `std` |
 | `alloc` | `Vec`/`String`-backed containers and drivers without `std` — **not** a dynamic cache: every cache is compile-time bounded and `Window` is sealed at U1–U32, so lookahead past 32 is a transaction's job, not a buffer's | `generic-arraydeque/alloc`, `mayber/alloc`, `tinyvec_1?/alloc` | no_std **+ allocator** |
 | *(neither)* | core-only parsing with bounded (array) caches/containers | — | no_std, **no alloc** |
+| `default` | what a plain dependency line gets | `std`, `combinators` | requires `std` |
+
+### Combinator families
+
+`combinators` is an umbrella over thirteen family gates. Each is independently settable, so a
+`default-features = false` build compiles only the combinators it calls; what the families sit on
+(`Parser`/`Parse`/`parse*`, the `ParseInput` / `TryParseInput` / `ParseChoice` traits, and the
+substrate combinators) is unconditional. The [combinator reference](super::ref_combinators) maps
+each gate to the section that documents it.
+
+| Feature | Enables | Implies | no_std posture |
+|---------|---------|---------|----------------|
+| `combinators` *(default)* | the umbrella over the thirteen below | the thirteen family gates | no_std-clean |
+| `any` | [`Any`](crate::parser::Any) + its `spanned`/`sliced`/`located` shapes | — | no_std-clean |
+| `fail` | `fail` / `fail_with` | — | no_std-clean |
+| `filter` | `filter`, `filter_with`, `filter_map`, `filter_map_with` | — | no_std-clean |
+| `fold` | the fold drivers (`fold_while`, `try_fold*`, `rfold*`) | **`many`** — they reuse its absence-gate error construction | no_std-clean |
+| `ident` | `Ident::parse` / `try_parse` (+ `_except`) | — | no_std-clean |
+| `keyword` | `Keyword::parse` / `try_parse` (+ `_exact`, `_sliced`) | — | no_std-clean |
+| `many` | `repeated*`, `separated*`, `delim*`, the delimiter handlers, the cardinality bounds; the `Vec`-sinking `list`/`separated1` keep their own `alloc` gate | — | no_std-clean |
+| `map` | `map` / `map_with` | — | no_std-clean |
+| `peek` | `peek_then*`, `peek_then_choice`, `peek_kind`, `dispatch_on_kind` + its fused twin | — | no_std-clean |
+| `pratt` | the typed `pratt` driver, `InputRef::pratt*`, `PrattToken`, the `PrattEmitter` channel | — | no_std-clean |
+| `punct` | the punctuator parsers and `delimited`'s `parens`/`braces`/`brackets`/`angles` shapes — *not* the `Punctuator` impls, which are vocabulary and stay unconditional | — | no_std-clean |
+| `then` | `then`, `then_ignore`, `ignore_then`, `then_value`, `and_then`, `and_then_with` | — | no_std-clean |
+| `validate` | `validate` / `validate_with` | — | no_std-clean |
 
 ### Lexer adapter
 
@@ -550,10 +577,10 @@ currently-supported versioned feature (`bytes_1`), which pulls the optional depe
 
 | Feature | Enables | Implies | no_std posture |
 |---------|---------|---------|----------------|
-| `bytes` | `&[u8]` / `Bytes` source | `bytes_1` → `dep:bytes_1` | needs atomic CAS |
-| `bstr` | `BStr` byte-string source | `bstr_1` → `dep:bstr_1` | no_std **+ allocator**, CAS-free |
-| `hipstr` | `HipStr` / `HipByt` source | `hipstr_0_8` → `dep:hipstr_0_8` | needs atomic CAS |
-| `smol_bytes` | the smol-bytes source | `smol_bytes_0_1` → `dep:smol_bytes_0_1` (with the dep's `alloc` feature; smol-bytes ≥ 0.1.2) | needs atomic CAS |
+| `bytes` / `bytes_1` | `&[u8]` / `Bytes` source | `bytes_1` → `dep:bytes_1` | needs atomic CAS |
+| `bstr` / `bstr_1` | `BStr` byte-string source | `bstr_1` → `dep:bstr_1` | no_std **+ allocator**, CAS-free |
+| `hipstr` / `hipstr_0_8` | `HipStr` / `HipByt` source | `hipstr_0_8` → `dep:hipstr_0_8` | needs atomic CAS |
+| `smol_bytes` / `smol_bytes_0_1` | the smol-bytes source | `smol_bytes_0_1` → `dep:smol_bytes_0_1` (with the dep's `alloc` feature; smol-bytes ≥ 0.1.2) | needs atomic CAS |
 
 "Needs atomic CAS" is a property of the dependency, not of tokora: `bytes`, `hipstr` and
 `smol_bytes` all reach a refcounted buffer through `Arc`-shaped sharing whose `fetch_add` /
@@ -571,9 +598,9 @@ CAS-free fallback.
 
 | Feature | Enables | Implies | no_std posture |
 |---------|---------|---------|----------------|
-| `smallvec` | `SmallVec` accumulator | `smallvec_1` → `dep:smallvec_1`, **`alloc`** | requires `alloc` |
-| `heapless` | `heapless::Vec` accumulator (fixed capacity) | `heapless_0_9` → `dep:heapless_0_9` | no_std-clean |
-| `tinyvec` | `TinyVec` / `ArrayVec` accumulator | `tinyvec_1` → `dep:tinyvec_1` (gains `alloc` under `alloc`) | no_std-clean |
+| `smallvec` / `smallvec_1` | `SmallVec` accumulator | `smallvec_1` → `dep:smallvec_1`, **`alloc`** | requires `alloc` |
+| `heapless` / `heapless_0_9` | `heapless::Vec` accumulator (fixed capacity) | `heapless_0_9` → `dep:heapless_0_9` | no_std-clean |
+| `tinyvec` / `tinyvec_1` | `TinyVec` / `ArrayVec` accumulator | `tinyvec_1` → `dep:tinyvec_1` (gains `alloc` under `alloc`) | no_std-clean |
 
 ### CST, backtracking & tooling
 
@@ -584,6 +611,7 @@ CAS-free fallback.
 | `trace` | [`traced`](crate::traced) + combinator instrumentation | **`std`** | requires `std`; zero-cost when off |
 | `conformance` | the `conformance` lexer test kit | **`std`** | requires `std` |
 | `fuzz` | the `fuzz` operation-script harness | **`std`** | requires `std` |
+| `stacker` | runs each **Pratt frame prologue** on a fresh heap stack segment when the native stack is nearly exhausted. It does not raise the recursion budget — see [Recursion limits](super::ref_pratt#recursion-limits) | `dep:stacker`, **`std`**, `pratt` | requires `std` |
 
 ### no_std posture, in brief
 
