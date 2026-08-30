@@ -2,8 +2,11 @@ codecov:
   require_ci_to_pass: false
 
 ignore:
-  - tokora/examples/
-  - tokora/tests/
+  - "**/examples/*"
+  - "**/tests/*"
+  - "**/benches/*"
+  - tokora-benches/
+  - tokora-icount/
 
 coverage:
   status:
