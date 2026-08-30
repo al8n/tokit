@@ -135,7 +135,7 @@ The four programs exercise public behavior from `main` and are also compiled as 
 
 ```sh
 cargo run -p tokora --example calculator --features logos
-cargo test -p tokora --no-default-features --features std,logos --examples
+cargo test -p tokora --no-default-features --features std,logos,rowan,combinators --examples
 ```
 
 Small doctests verify local API contracts; the maintained binaries verify their complete
