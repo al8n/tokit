@@ -144,7 +144,7 @@ by the three a count or separator policy needs — and its
 context-side twin, [`ComposableParseContext`](crate::ComposableParseContext), collapses a whole parse context to one bound in
 the same way — and goes one rung further, riding
 [`FromTokenErrors`](crate::emitter::FromTokenErrors) on the emitter's `Error` so the leaf `From`
-conversions come with it. The four capabilities *outside* the bundle
+conversions come with it. The five capabilities *outside* the bundle
 ([`TooManyEmitter`](crate::emitter::TooManyEmitter), the missing-separator pair,
 [`PrattEmitter`](crate::emitter::PrattEmitter), [`CstEmitter`](crate::emitter::CstEmitter)) are the
 less-common ones, named on demand by the parsers that use them; the pre-built emitters implement all

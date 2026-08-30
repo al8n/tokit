@@ -136,12 +136,14 @@ lexer per operation rather than holding one across the whole parse):
 
 ```rust,ignore
 fn lex(&mut self) -> Option<Result<Self::Token, <Self::Token as Token<'inp>>::Error>>;
-fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
+fn read_frontier(&self) -> ReadFrontier<Self::Offset>;   // required: there is no default
 fn bump(&mut self, n: &Self::Offset);
 ```
 
 `lex` returning `None` is exhaustion; `Some(Ok(tok))` is a token; `Some(Err(e))` is a lexer error
-the engine routes to the emitter. It is called exactly as often as the parse demands and no more —
+the engine routes to the emitter. All three are **required**: `read_frontier` in particular has no
+default, because how far a lexer has safely read is a fact only that lexer knows — see
+[chapter 9](super::ch09_streaming) for what a wrong answer costs a partial drive. It is called exactly as often as the parse demands and no more —
 that "no more" is the whole point.
 
 ## A parser is a function over the handle
