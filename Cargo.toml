@@ -4,34 +4,11 @@ members = [
   "tokora-benches",
   "tokora-icount",
 ]
-
-# ── WHY `default-members` IS NOT THE MEMBER LIST ────────────────────────────────────────────
-#
-# `tokora-benches` exists so that `criterion` — and through it `alloca`, whose cc-rs build
-# script cannot be built for an apple target from a Linux host — is not in tokora's own
-# dependency graph (#216; the reasoning is written out in `tokora-benches/Cargo.toml`). That
-# boundary only holds if the bench package is not SELECTED by the commands that must stay
-# criterion-free. In a virtual workspace the default selection is every member, so without this
-# line `cargo miri test --target x86_64-apple-darwin` at the root would pick `tokora-benches`
-# back up and rebuild exactly the graph the split removed.
-#
-# So the default selection is `tokora` alone, which is what it already was when `tokora` was the
-# only member: every root-level `cargo build` / `test` / `check` in CI keeps the package set it
-# had before this split. The bench package is reached by NAMING it — `-p tokora-benches`, or
-# `--workspace`, which `clippy` uses so the benches stay linted (`cargo fmt --all` and
-# `cargo metadata` read the member list above, not this one, so both already see it).
 default-members = ["tokora"]
 
 resolver = "3"
 
 [workspace.package]
-# MSRV policy: `rust-version` is a floor maintainers set, not necessarily the crate's bare
-# minimum — edition 2024 already requires rustc >= 1.85, and a bump above that may be forced
-# by the dependency tree or taken deliberately ahead of necessity (e.g. to unlock a language
-# feature for later use). The declared value is what CI actually builds and tests against: the
-# `msrv` job reads it out of this file rather than hardcoding a toolchain, so the two cannot
-# drift. Bumps are permitted whenever maintainers choose and are NOT treated as breaking
-# changes.
 rust-version = "1.95"
 edition = "2024"
 license = "MIT OR Apache-2.0"
