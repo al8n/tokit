@@ -254,6 +254,7 @@ parser code, opposite behavior, chosen by the context you hand in.
 
 ### The base trait
 
+<!-- api-digest: Emitter; complete; names-only -->
 ```text
 trait Emitter<'a, L, Lang = ()> {
     type Error;                                                    // your error model
@@ -275,6 +276,10 @@ trait Emitter<'a, L, Lang = ()> {
                                      // parse. Defaults to emit_lexer_error, so a diagnostics-only
                                      // emitter never notices the split.
     fn enter_label / exit_label      // the "while parsing X" stack for `labelled`
+    fn bound_source(..)              // the source this emitter is pinned to, if any. A wrapper
+                                     // that forwards every emission and inherits the `None`
+                                     // default silently disables the mismatched-drive check for
+                                     // whatever it wraps.
 }
 ```
 

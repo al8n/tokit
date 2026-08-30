@@ -50,6 +50,7 @@ must be able to unwind* — is the shape the rest of the trait is bent toward.
 The core [`Emitter`](crate::Emitter) trait is small. Trimmed of its `where L: Lexer<'a>` bounds, its
 shape is:
 
+<!-- api-digest: Emitter; complete -->
 ```rust,ignore
 pub trait Emitter<'a, L, Lang: ?Sized = ()> {
     type Error;

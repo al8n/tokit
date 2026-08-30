@@ -361,6 +361,7 @@ lossless CST would use (a `rowan::Language` implementor gets this for free when 
 feature is on — the blanket impl is not shown here since this chapter does not depend on that
 feature).
 
+<!-- api-digest: Syntax; complete -->
 ```text
 trait Syntax {
     type Lang: Language;

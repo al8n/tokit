@@ -315,6 +315,13 @@ pub mod prelude;
 /// Tentative parsing trait
 pub mod try_parse_input;
 
+/// API_DIGEST_CENSUS — the guide's re-declarations of public items, read against the items.
+///
+/// Gated on `std` rather than on the guide's own `all(std, logos_0_16, combinators)`: the census
+/// walks `src/` with `std::fs` and needs no other feature, so matching the guide's cfg would run
+/// it under `--all-features` alone instead of every leg that has `std`.
+#[cfg(all(test, feature = "std"))]
+mod api_digest_census;
 mod check;
 mod keyword;
 mod located;
