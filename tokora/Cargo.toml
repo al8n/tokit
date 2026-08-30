@@ -22,32 +22,6 @@ std = [
   "hipstr_0_8?/default",
   "bstr_1?/default",
   "smol_bytes_0_1?/default",
-
-  # NOT `tinyvec_1?/default`, which is what this line used to say. **tinyvec's `default` is
-  # empty**, so that entry enabled nothing at all while reading exactly like the ones around it —
-  # and `TinyVec` exists only under tinyvec's `alloc`. `container/mod.rs` and
-  # `parser/many/handler/mod.rs` gate their three `TinyVec` impls on `any(std, alloc)`, so a
-  # `std`-without-`alloc` build type-checked those bodies against a tinyvec that has no `TinyVec`
-  # and failed with E0432. `--all-features` was the only build that ever compiled them until
-  # `ci/feature_cfg_coverage.py` declared the `std,logos,combinators,tinyvec_1` leg, which is what
-  # found this on its first run.
-  #
-  # **`alloc` and not `std`.** This is the identical entry the `alloc` list carries, so the
-  # manifest now says what the `cfg` says: both capabilities need one thing from tinyvec, that
-  # `TinyVec` exist. tinyvec's `std` is `["alloc"]` plus `io::Write for TinyVec<[u8; N]>`,
-  # `Error for TryFromSliceError` and dropping its own `no_std`; tokora names none of the three,
-  # and enabling it would take tinyvec out of `no_std` for every graph that unifies on it.
-  #
-  # Do NOT repair this by narrowing the `cfg` to `alloc`, which compiles just as well: that drops
-  # the impls from every `std` build instead, which is a behaviour change wearing a build fix's
-  # clothes. And do not fold `alloc` into `tinyvec_1` the way `smallvec_1` does — the `ArrayVec`
-  # and `SliceVec` impls in the same two files are ungated, and forcing `alloc` would charge a
-  # no-alloc consumer a heap for the two adapters that do not need one.
-  #
-  # Every other `/default` entry in this list was checked against its own crate's `default` at
-  # the version `Cargo.lock` resolves, on `7979e18`: tinyvec's was the only empty one. Re-check
-  # on a dependency bump — an upstream that empties its `default` turns its entry here into this
-  # same silent no-op.
   "tinyvec_1?/alloc",
 
   "logos_0_16?/default",
@@ -56,58 +30,6 @@ std = [
 
 logos = ["logos_0_16"]
 logos_0_16 = ["dep:logos_0_16"]
-
-# --- Combinator families -------------------------------------------------------------------
-#
-# Every combinator *family* under `src/parser/` is independently gateable, so an embedded or
-# no-alloc consumer compiles only the ones it calls. What is NOT gated is the parser substrate:
-# `Parser`/`Parse`/`parse*`, the `ParseInput`/`TryParseInput` traits themselves, and the
-# top-level `src/parser/*.rs` combinators (`expect`, `delimited`, `recover`, `recovery_gate`,
-# `select`, `opt`, `padded`, `node`, `skip_then_retry`, `ignore`, `labelled`, `empty`, `todo`,
-# `with`, `by_ref`, `collect`, `accepted`, `unwrapped`). Those are shared infrastructure — the
-# families are written against them and the crate's own error/recovery/CST machinery names them
-# — so splitting them out would buy a seam that nothing can actually stand on. The two
-# exceptions are named on their features below: `list`/`separated1` and `ident_list` are
-# `many`'s drivers under another name, so they follow it.
-#
-# `combinators` is the umbrella and is ON by default, so a plain `tokora = "0.9"` sees exactly
-# the 0.8 surface. `default-features = false` consumers opt into the families they use.
-#
-# ── WHAT THE TEST SUITE GATES ON, AND WHY IT IS THE UMBRELLA ────────────────────────────────
-#
-# Measured at `ec337c8`: of 106 integration suites, 82 name `combinators` in their crate-level
-# `#![cfg(...)]` and NOT ONE names a family there. (Two files name one on an INNER item:
-# `tests/common/mod.rs` and `tests/forwarding_discrimination.rs`, both on `pratt`, plus `map`
-# in the latter.) The umbrella at the crate level is deliberate, and the reason is worth
-# writing down because the obvious repair does not do what it looks like it does.
-#
-# What is already covered. CI's `cargo hack -p tokora --each-feature --no-deps --tests` runs
-# clippy over each of the thirteen families ALONE, so the footprint claim above — a consumer
-# naming one family type-checks — is gated on the library, which is the artifact a consumer
-# gets. It stops at metadata and never links, so it is a compile claim and not a link one.
-#
-# What re-gating the 82 would NOT buy. Seventy-nine of them want `std` AND a logos version on
-# top of the umbrella; the other three want `rowan`+`std` (2) or `std` alone (1). No
-# `--each-feature` leg supplies a family together with the rest of what any of those shapes
-# needs — `std` alone has no lexer, `logos` alone has no `std`, `rowan` alone has no family, and
-# `default` has `std` and the families but no lexer. So swapping `combinators` for `pratt` in
-# `tests/parser_pratt.rs` does not make `--features pratt` compile it; the suite would go on
-# cfg-ing itself out, in one more configuration than before. Real per-family test coverage costs
-# thirteen further `std,logos,<family> --tests` legs, and that is the price to weigh — not the
-# file edits.
-#
-# Why the umbrella cannot hide a behaviour difference. `tokora/src/` contains NO
-# `#[cfg(not(feature = "<family>"))]` guarding code: every negative-family occurrence there is a
-# `#[cfg_attr(not(feature = ...), doc = ...)]` — doc text that degrades an intra-doc link to
-# plain prose when the family is off. So a single-family build runs the same code the umbrella
-# build runs, and the gap is compile coverage of the test tree only.
-#
-# THAT IS CHECKED, NOT ASSERTED, and more rides on it than the footprint claim:
-# `ci/feature_cfg_coverage.py` drops a test leg as redundant when a leg with FEWER features
-# compiles the same integration suite, which is sound only while this paragraph holds. It reds on
-# a real one now. The count used to be written here — "the 32 negative-family occurrences" — and
-# the tree said 33 by the time anyone recounted. The gate derives and prints it; do not write it
-# down again.
 combinators = [
   "any",
   "fail",
@@ -164,45 +86,6 @@ then = []
 # `validate` / `validate_with`.
 validate = []
 
-# A **segmented native stack** for the two Pratt frame prologues: each frame asks how much
-# native stack is left and, when it is inside the red zone, runs on a fresh heap-allocated
-# segment (`stacker::maybe_grow`). Composed with the recursion budget, never substituted for it.
-#
-# ── WHAT THIS DOES NOT DO ───────────────────────────────────────────────────────────────────
-#
-# **It does not make depth unlimited, and `InputRef::descend` stays.** A segment is a heap
-# allocation, stacker's allocator is `mmap` + `assert_ne!` rather than a fallible reserve, and a
-# deep enough input therefore still ends the process with nothing on any `Result` channel. What
-# changes is that **the ceiling stops being a hardware constant and becomes a number someone
-# chose** — for the frames this feature actually segments, and for those only. Deleting the
-# limiter because this feature exists restores exactly the abort the limiter was written to
-# delete; `src/native_stack.rs` carries the measurement, including the one taken with this feature
-# ON and the limiter `unlimited`, which still dies.
-#
-# **IT DOES NOT MOVE `RecursionLimiter::PARSE_DEFAULT_DEPTH`, and for one revision it did.** That
-# constant seeds every `InputContext`, and the cell it seeds is read by hand-written public
-# descent (`InputRef::descend` / `descending`) from a consumer's own productions — frames on the
-# ordinary native stack, which this feature does not touch. Raising a shared budget to a figure
-# only the segmented path survives is a number derived over one population and applied to a wider
-# one, which is the defect the 64 -> 16 change in the same release exists to fix. The figure that
-# IS defensible over segmented Pratt frames is published separately and opted into by hand:
-# `RecursionLimiter::SEGMENTED_PRATT_DEPTH`, which this feature adds.
-#
-# **`std`-only**, and not by preference: stacker reads the running thread's stack bounds through
-# pthread or Win32, so a `no_std` build has nothing for it to query. It must stay off in every
-# no-std leg, and the `thumbv6m-none-eabi` matrix never names it.
-#
-# **It implies `pratt`**, because `mod native_stack` is `pratt`-gated and the two Pratt frame
-# prologues are its only callers. Without that implication `--features stacker` resolves the
-# dependency, builds `psm`'s `cc` script, and compiles not one line that can call it — and, before
-# `SEGMENTED_PRATT_DEPTH` was split out, moved a budget in a build that segmented nothing.
-#
-# It also brings a `cc` build script in through `psm`, which is the class of dependency the
-# `[dev-dependencies]` note below refuses `criterion` for. Admissible here and not there for one
-# reason: this is an OPTIONAL NORMAL dependency, so it enters the graph only when a consumer asks
-# for it, whereas a dev-dependency is resolved per PACKAGE and would be built for every `--test`
-# target of this crate — including the Miri cells, which name `logos` and `logos,unstable-raw`
-# and never this.
 stacker = ["dep:stacker", "std", "pratt"]
 
 # Parser tracing. Turns on `traced(name, parser)` — a wrapper that prints an indented
@@ -240,37 +123,6 @@ conformance = ["alloc"]
 # `fuzz` module, which runs as ordinary `#[test]`s on stable Rust.
 fuzz = ["std"]
 
-# The lossless CST tower (`tokora::cst`): the event stream, the recording `Sink`, and the
-# materialization of both into a `rowan` green/red tree. Off by default; enabling it compiles 41
-# `#[cfg]`-gated code sites, in 6 files under `src/`. Counted on `543ce6d`, and the two figures
-# are different questions: `src/` carries 66 mentions of `feature = "rowan"` across 8 files, of
-# which those 41 are the gates whose CODE exists only when the feature is on. The other 25 are 14
-# `doc(cfg(...))` docs.rs labels, 10 doc-text alternations and one `not(...)` arm.
-#
-# ── THIS FEATURE IS NOT INTERPRETED BY MIRI, AND THAT IS DELIBERATE ─────────────────────────
-#
-# The Miri matrices run `--features logos` and `--features logos,unstable-raw`; `rowan` is in
-# neither, and not in `default`, so those 41 sites have never been COMPILED under Miri on any
-# target under either aliasing model. Zero coverage of the path 0.9.0 ships as its lossless
-# story — not reduced coverage.
-#
-# Enabling it there does not close the gap, it reddens the cells. `rowan 0.17.0`, the version
-# `Cargo.lock` resolves, executes undefined behaviour on its ordinary public path, and the two
-# models find it at two DIFFERENT sites, so neither is clean and no one-model half-measure
-# exists: Stacked Borrows at `arc.rs:264` (`<HeaderSlice<H, [T; 0]> as Deref>::deref` forging a
-# whole-slice reference from a header-only retag), reached through `cst::sink::finish::replay`
-# from building any tree; Tree Borrows at `cursor.rs:136` (`rowan::cursor::free`), reached from
-# dropping any red-tree `SyntaxNode`. Both reproduced on `543ce6d` on 2026-08-07 against 0.16.1
-# (then `arc.rs:260` / `cursor.rs:219`), red on the first of `--test parser_node`'s 24 tests
-# under each model, and re-measured unchanged against 0.17.0 when this requirement was bumped.
-#
-# The defect is rowan's: `src/cst` contains no `unsafe` at all. It is unfixed upstream since
-# 2021 (rust-analyzer/rowan#108, #163, #192, all open; the one fix attempt, PR #211, is a draft
-# whose own description says the immutable path still fails), and the `arc.rs` construct is
-# present unchanged in `0.17.0`, the newest release — so RAISING THE REQUIREMENT BELOW IS NOT A
-# FIX. The answer flips when a published rowan is clean at both sites under both models; at that
-# point add `rowan` to the feature sets in `ci/miri_sb.sh` and `ci/miri_tb.sh`, which carry the
-# full account. Recorded for 0.9.0 by al8n/tokit#235.
 rowan = ["dep:rowan", "std"]
 
 bytes = ["bytes_1"]
@@ -311,9 +163,6 @@ derive_more = { version = "2", default-features = false, features = [
 ] }
 generic-arraydeque = { version = "0.2", default-features = false, features = ["unstable"] }
 paste = "1"
-# The `stacker` feature's whole implementation. `default-features = false` is not spelled
-# because stacker declares no features at all — it is unconditionally `std`, which is why the
-# feature above implies `std` rather than merely documenting that it needs one.
 stacker = { version = "0.1", optional = true }
 seq-macro = { version = "0.3", default-features = false }
 thiserror = { version = "2", default-features = false }
@@ -337,39 +186,9 @@ tinyvec_1 = { package = "tinyvec", version = "1", default-features = false, opti
 logos_0_16 = { package = "logos", version = "0.16", default-features = false, optional = true, features = [
   "export_derive",
 ] }
-# This IS `0.17` now, and it did NOT buy a Miri-clean lossless path — measured on 0.17.0, not
-# predicted. Both sites survived the bump and only moved line numbers: Stacked Borrows still reds
-# in `arc.rs` (260 -> 264) and Tree Borrows still reds in `cursor::free` (219 -> 136), even though
-# 0.17 deleted `sll.rs` and rewrote `cursor.rs` from 1592 lines to 1003. The bump was made because
-# `rowan` is in this crate's PUBLIC API and its major is therefore ours — not because it fixes
-# anything. See the `rowan` feature's note above for the two sites, the repro and what a real fix
-# would look like; raising this requirement again is still not that fix.
 rowan = { version = "0.17", optional = true }
 
-# ── NO `criterion` HERE, AND NO `[[bench]]` — BOTH ARE LOAD-BEARING ABSENCES ────────────────
-#
-# The five benches are `tokora-benches`, a sibling workspace member, and criterion is ITS
-# dev-dependency. Cargo resolves dev-dependencies per PACKAGE rather than per target, so a
-# `criterion` entry in this table is built for every `--test` target of this crate — including
-# under `cargo miri test --target x86_64-apple-darwin --test span`, where its transitive
-# `alloca` runs a cc-rs build script that hands the host `cc` an `-arch x86_64
-# -mmacosx-version-min=10.7` no Linux `cc` accepts. That one line is why 16 Miri cells had to
-# ask for a macOS runner (#216). Cargo has no optional dev-dependency, so the package boundary
-# is the mechanism; putting criterion back here would put those cells back on macOS.
 [dev-dependencies]
-# `CACHE_CALL_CENSUS` (`conformance/cache_tests.rs`) parses `conformance/cache.rs` and walks its
-# expression tree, so the census is exact for call SYNTAX rather than for a list of spellings.
-# Three review rounds of #183 each patched a substring matcher and each was followed by a new gap
-# in it — whitespace around `.`, a turbofish read as a function item — which is a property of text
-# scanning, not of any one pattern. `span-locations` is what gives each call a line, so an anchor
-# comment binds to the call it annotates rather than to the comment block above it.
-#
-# These two are subject to the same per-package reach the block above describes, so the reason
-# they are admissible where `criterion` is not has to be stated: both are pure Rust. `syn` 2 has
-# no build script at all, and `proc-macro2`'s only runs `rustc --version` — neither hands a C
-# compiler a target triple it cannot serve, which is the failure that put 16 Miri cells on macOS.
-# `default-features = false` keeps the `proc-macro` bridge out: the census runs in a `#[test]`,
-# not in a proc macro, so the fallback implementation is the one that is wanted anyway.
 proc-macro2 = { version = "1", default-features = false, features = [
   "span-locations",
 ] }
