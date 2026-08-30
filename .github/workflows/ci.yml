@@ -16,7 +16,7 @@ name: CI
 #     RUSTDOCFLAGS="-D warnings" cargo doc -p tokora --no-deps --no-default-features
 #     RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc --all-features --no-deps
 #     python3 tokora/tools/validate_docs.py --source
-#     (cd tokora && mdbook build)
+#     (cd tokora && mdbook build)                    # at pages.yml's pinned MDBOOK_VERSION
 #     python3 tokora/tools/validate_docs.py --book target/book
 #     bash ci/changelog_structure.sh CHANGELOG.md
 #     bash ci/feature_cfg_coverage_selftest.sh
@@ -32,8 +32,15 @@ name: CI
 # refuses; the rustdoc legs above cannot, because rustdoc resolves an intra-doc link the
 # preprocessor has never been taught. `validate_docs.py` is what `pages.yml` runs either side of
 # the build — `--source` over the chapter markdown, `--book` over what the build just wrote, which
-# is why that leg means nothing before it. The build wants the mdbook `pages.yml` pins in
-# `MDBOOK_VERSION` and asserts on the runner; another local mdbook is not the one rendering `main`.
+# is why that leg means nothing before it.
+#
+# Run `mdbook build` at the version `pages.yml` pins in `MDBOOK_VERSION` — that job asserts it on
+# the runner before it builds anything, so a mismatch here is a mismatch with what renders `main`.
+# The two are not interchangeable for this book: the guide's own preprocessor branches across the
+# 0.4/0.5 boundary, reading the book's top-level list as `sections` from one and `items` from the
+# other, and the renderer's slugs and link rewriting are its own. If your mdbook is not the pinned
+# one, say so rather than reporting a pass: a green local build is weaker evidence than the
+# `pages` job, and that job is the verdict either way.
 #
 # And one line that is LINUX-ONLY, so it is not in the set above and is not expected to have been
 # run before a push from a mac:

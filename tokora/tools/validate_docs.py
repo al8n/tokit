@@ -12,6 +12,11 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote
 
+# `mdbook_docs_links.py` owns what a chapter link IS, and it lives beside this file. Import its
+# pattern rather than restating it: a restated one drifts, and the two would then disagree about
+# which links this file is even supposed to check -- silently, and in the safe-looking direction.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from mdbook_docs_links import CHAPTER, CHAPTER_PREFIX  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 GUIDE = ROOT / "tokora" / "src" / "guide"
@@ -268,11 +273,40 @@ def validate_headings(errors: list[str]) -> None:
                 add(errors, f"{path.relative_to(ROOT)} is missing required section: {section}")
 
 
+def validate_chapter_link(errors: list[str], source: Path, target: str) -> None:
+    """Check both halves of `super::ref_pratt#recursion-limits` -- the chapter, and the heading.
+
+    `mdbook_docs_links.py` rewrites a chapter link to `ref_pratt.md#recursion-limits` without
+    checking that either half exists, and mdBook renders a wrong one as a live link to nowhere.
+    Nothing else here covers it: `--book` reads the sidebar and the page list, never an href. So a
+    misspelt chapter or heading would ship as a dead in-book link with every gate green, which is
+    the one failure the link machinery exists to prevent.
+
+    The heading is resolved against the chapter the link NAMES, never against every chapter's
+    headings pooled together -- a fragment that exists somewhere else in the guide is exactly as
+    dead as one that exists nowhere.
+    """
+    chapter = CHAPTER.match(target)
+    if chapter is None:
+        # A chapter link this malformed already fails `mdbook build`, and that message is the one
+        # spelling out the accepted forms. Leave it there: one defect should red in one voice.
+        return
+    destination = GUIDE / f"{chapter.group(1)}.md"
+    fragment = (chapter.group(2) or "")[1:]
+    if not destination.is_file():
+        add(errors, f"{source.relative_to(ROOT)} links to missing guide chapter {target}")
+    elif fragment and fragment not in anchor_set(destination):
+        add(errors, f"{source.relative_to(ROOT)} links to missing chapter heading {target}")
+
+
 def validate_links(errors: list[str]) -> None:
     link = re.compile(r"(?<!\!)\[[^\]]*\]\(([^)\s]+)\)")
     for source in sorted(GUIDE.glob("*.md")):
         for target in link.findall(source.read_text(encoding="utf-8")):
-            if target.startswith(("http://", "https://", "mailto:", "crate::", "super::", "/")):
+            if target.startswith(CHAPTER_PREFIX):
+                validate_chapter_link(errors, source, target)
+                continue
+            if target.startswith(("http://", "https://", "mailto:", "crate::", "/")):
                 continue
             file_part, marker, fragment = target.partition("#")
             if marker and not file_part:
