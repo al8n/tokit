@@ -134,6 +134,7 @@ builds a lexer positioned at the cursor and calls `lex` to produce the next toke
 fast-forwards a freshly built lexer to the offset it should resume from (the engine constructs a
 lexer per operation rather than holding one across the whole parse):
 
+<!-- api-digest: Lexer -->
 ```rust,ignore
 fn lex(&mut self) -> Option<Result<Self::Token, <Self::Token as Token<'inp>>::Error>>;
 fn read_frontier(&self) -> ReadFrontier<Self::Offset>;   // required: there is no default

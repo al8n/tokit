@@ -401,6 +401,7 @@ indentation-based grammar, a lexer that must thread nesting depth through
 [`State`](crate::Lexer#state-faithfulness-and-cheapness), a bespoke source type — implement it
 directly. The surface is small:
 
+<!-- api-digest: Lexer; complete; alias TokenError = <Self::Token as Token<'inp>>::Error; alias SliceOf<'inp, Self> = <Self::Source as Source<Self::Offset>>::Slice<'inp> -->
 ```text
 trait Lexer<'inp> {
     type State: State;                             // resume "mode"; cloned on every checkpoint — keep it cheap
