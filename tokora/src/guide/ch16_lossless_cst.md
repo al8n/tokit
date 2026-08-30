@@ -2163,6 +2163,35 @@ paying Θ(Σ attempt lengths); reach for
 is what you want. The *Abort semantics* note on [`Cst::finish`](crate::cst::Cst::finish)
 states the lifecycle in full.
 
+### Tree depth has its own ceiling
+
+The wall has a depth to it as well as a shape. A node opened past
+[`cst::MAX_TREE_DEPTH`](crate::cst::MAX_TREE_DEPTH) is refused, and `finish` returns
+[`FinishError::TooDeep`](crate::cst::FinishError::TooDeep) rather than building a tree nobody can
+drop — dropping a deep `rowan` green tree is itself a recursive walk, and that walk is compiled
+under *`rowan`'s* profile, which `cfg!(debug_assertions)` in this crate cannot observe. So the
+ceiling is one number for both profiles, derived from the tighter row:
+
+```rust
+use tokora::cst::MAX_TREE_DEPTH;
+
+assert_eq!(MAX_TREE_DEPTH, 1024);
+```
+
+**It is not the recursion budget, and the two can meet.** The budget bounds *tokora's* descent
+(chapter: [Recursion limits](super::ref_pratt#recursion-limits)); this bounds the tree the sink
+hands to `rowan`. Every budget tokora ships or publishes fits under the ceiling with room —
+`PARSE_DEFAULT_DEPTH` is 32 and `OPTIMIZED_PARSE_DEPTH` is 256 — with exactly one exception:
+[`SEGMENTED_PRATT_DEPTH`](crate::state::recursion_tracker::RecursionLimiter::SEGMENTED_PRATT_DEPTH)
+is *also* 1024. A caller who opts into the full segmented-Pratt budget **and** attaches a CST
+hook, and whose grammar opens a node at every one of those levels, lands one past this ceiling
+once the root wrapper is counted.
+
+That is not a collision to engineer away: the two numbers bound different resources — heap stack
+segments there, a 2 MiB thread's drop recursion here — and arrive at the same magnitude by
+coincidence. Where they meet, the answer is a typed refusal instead of an abort, which is the
+trade the ceiling exists to make.
+
 ## Reading the tree back: the cast layer
 
 A finished tree is untyped. Every node is a `SyntaxNode<QueryLang>`, and every question you

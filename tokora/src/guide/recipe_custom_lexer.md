@@ -420,7 +420,7 @@ trait Lexer<'inp> {
     fn span(&self)  -> Self::Span;                 // the current token's span
     fn slice(&self) -> SliceOf<'inp, Self>;        // the current token's text (zero-copy)
     fn lex(&mut self) -> Option<Result<Self::Token, TokenError>>;  // None = end of input (sticky)
-    fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
+    fn read_frontier(&self) -> ReadFrontier<Self::Offset>;   // no default: how far have you safely read?
     fn bump(&mut self, n: &Self::Offset);
 }
 ```

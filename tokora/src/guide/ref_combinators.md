@@ -1883,14 +1883,17 @@ The whole taxonomy and the emitter/context surface are covered in depth in the
 
 ## Feature matrix
 
-Defaults to `std`. `docs.rs` builds `all-features`.
+The default is `std` **and `combinators`** — a plain dependency line sees every family below.
+`docs.rs` builds `all-features`. This is the combinator half of the table; the
+[vocabulary reference](super::ref_vocabulary_macros_features) carries the full one, backends and
+tooling included.
 
 | Feature | Enables | Notes |
 |---------|---------|-------|
-| `std` *(default)* | `std` library, all std-only backends | implies nothing else you must set |
+| `std` *(default)* | `std` library, all std-only backends | with `combinators`, the whole of `default` |
 | `alloc` | `Vec`/`String` drivers without `std` | the no-std + allocator tier |
 | *(neither)* | core-only parsing | bounded containers only |
-| `logos` (`= logos_0_16`) | the [`LogosLexer`](crate::lexer::LogosLexer) adapter | 0.16 is the only supported major |
+| `logos` / `logos_0_16` | the [`LogosLexer`](crate::lexer::LogosLexer) adapter | the alias selects the version; 0.16 is the only supported major |
 | `rowan` | the recording CST sink + typed lossless tree | implies `std`; the lossless-CST chapter |
 | `unstable-raw` | the raw `InputRef::{save, restore, commit}` checkpoint triple | otherwise the transaction guards are the surface |
 | `conformance` | the `conformance` lexer test kit | implies `std` |
@@ -1898,6 +1901,31 @@ Defaults to `std`. `docs.rs` builds `all-features`.
 | `trace` | [`traced`](crate::traced) + combinator instrumentation | implies `std`; zero-cost when off |
 | `bytes` / `bstr` / `hipstr` / `smol_bytes` | extra [`Source`](crate::Source)/[`Slice`](crate::Slice) backends | none implies `std`; each pins one upstream major |
 | `smallvec` / `heapless` / `tinyvec` | extra [`Container`](crate::container::Container) backends | `smallvec` implies `alloc` |
+
+### The combinator gates
+
+`combinators` is an umbrella over thirteen family gates, each independently settable so a
+`default-features = false` build compiles only the combinators it calls. Everything the families
+sit on stays unconditional — `Parser`/`Parse`/`parse*`, the `ParseInput` / `TryParseInput` /
+`ParseChoice` traits, and the substrate combinators (`expect`, `delimited`, `recover`, `select`,
+`opt`, `padded`, `node`, `labelled`, …) — so the gates below turn off *families*, never the spine.
+
+| Feature | Enables | Where in this chapter |
+|---------|---------|-----------------------|
+| `combinators` *(default)* | the umbrella: every family below | all of it |
+| `any` | [`Any`](crate::parser::Any) and its `spanned`/`sliced`/`located` shapes | [Atoms](#atoms-parsers-from-nothing) |
+| `fail` | `fail` / `fail_with` | [Atoms](#atoms-parsers-from-nothing) |
+| `filter` | `filter`, `filter_with`, `filter_map`, `filter_map_with` | [Value transforms](#transforming-output) |
+| `fold` | the fold drivers (`fold_while`, `try_fold*`, `rfold*`); implies `many` | [Repetition & folding](#repetition-folding) |
+| `ident` | `Ident::parse` / `try_parse` and their `_except` twins | [Types & syntax](super::ref_types_syntax) |
+| `keyword` | `Keyword::parse` / `try_parse` and their `_exact` / `_sliced` twins | [Vocabulary](super::ref_vocabulary_macros_features) |
+| `many` | `repeated*`, `separated*`, `delim*`, the delimiter handlers, the cardinality bounds, `list` and `separated1` | [Repetition & folding](#repetition-folding), [Separation](#separation-comma-separated-and-friends), [the `many/` builder](#the-many-builder-surface) |
+| `map` | `map` / `map_with` | [Value transforms](#transforming-output) |
+| `peek` | `peek_then*`, `peek_then_choice`, `peek_kind`, `dispatch_on_kind` and its fused twin | [Lookahead & choice](#optional-choice) |
+| `pratt` | the typed `pratt` driver, `InputRef::pratt*`, `PrattToken`, the `PrattEmitter` channel | [Pratt reference](super::ref_pratt) |
+| `punct` | the punctuator parsers (`Comma::parse`, …) and the `parens`/`braces`/`brackets`/`angles` shapes built on them | [Delimited shapes](#delimited-shapes) |
+| `then` | `then`, `then_ignore`, `ignore_then`, `then_value`, `and_then`, `and_then_with` | [Sequencing](#sequencing) |
+| `validate` | `validate` / `validate_with` | [Value transforms](#transforming-output) |
 
 Where a combinator needs a capability, its `where`-clause names it — e.g. the `many/` builder's
 count checks want [`TooFewEmitter`](crate::emitter::TooFewEmitter) /

@@ -366,8 +366,8 @@ trait Syntax {
     type Lang: Language;
     const KIND: <Self::Lang as Language>::SyntaxKind;
     type Component: Display + Debug + Clone + PartialEq + Eq + Hash;   // usually an enum
-    type COMPONENTS: ArrayLength;   // type-level component count (typenum, via generic-arraydeque)
-    type REQUIRED: ArrayLength;     // type-level count of the required subset
+    type COMPONENTS: ArrayLength + Debug + Eq + Hash;   // type-level count (typenum, via generic-arraydeque)
+    type REQUIRED:   ArrayLength + Debug + Eq + Hash;   // type-level count of the required subset
     fn possible_components() -> &'static GenericArrayDeque<Self::Component, Self::COMPONENTS>;
     fn required_components() -> &'static GenericArrayDeque<Self::Component, Self::REQUIRED>;
 }

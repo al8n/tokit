@@ -88,12 +88,62 @@ recovery parser, while `inplace_recover` continues from the failure position. `s
 non-empty skipped region once alongside other diagnostics. `Incomplete` errors are re-raised
 instead of recovered so unfinished partial input is not discarded.
 
+## Recursion budget
+
+Each `InputRef::descend` a grammar takes, and each frame of tokora's own Pratt engines, draws on
+one shared cell, so an input nested past the ceiling fails the parse with a catchable
+`tokora::error::RecursionLimitReached` instead of exhausting the native stack. The default is
+`RecursionLimiter::PARSE_DEFAULT_DEPTH`, now public rather than `pub(crate)`, and **0.10.0 lowers
+it from 64 to 32** — a parse that relied on the 0.9.1 ceiling without configuring one has to ask
+for the depth it needs.
+
+**32 is also the number in a release build, and that is a decision rather than a missing
+measurement.** A release frame is roughly an order of magnitude cheaper than a debug one, and the
+release rows do support 256; what is missing is any way for this crate to know that the condition
+holds. `debug_assertions` is not `opt-level` — a build with `debug-assertions = false` at
+`opt-level = 0` selects the release arm while paying unoptimised frame prices — and it is per
+crate, while the frames this budget bounds are the caller's own productions. tokora shipped that
+divergence for one revision and it was a process-level abort with nothing on any `Result` channel,
+so both arms are now priced at the debug frame cost and no profile combination can abort.
+
+The release figure is published rather than installed, and taking it is one call:
+
+```rust
+use tokora::state::recursion_tracker::RecursionLimiter;
+
+// The default budget — the same number in every build profile.
+assert_eq!(RecursionLimiter::PARSE_DEFAULT_DEPTH, 32);
+
+// The depth a fully optimised parse supports. Nothing installs it; a caller does.
+assert_eq!(RecursionLimiter::OPTIMIZED_PARSE_DEPTH, 256);
+
+let limiter = RecursionLimiter::with_limitation(RecursionLimiter::OPTIMIZED_PARSE_DEPTH);
+assert_eq!(limiter.limitation(), 256);
+```
+
+Hand that limiter to `ParserContext::with_recursion_limiter`, or to
+`InputContext::with_recursion_limiter` for a driver that builds its own input context — no new API
+is involved. Pass 256 when every frame the budget bounds is compiled at `opt-level = 3`, tokora's
+*and* your own productions; a per-package profile override, or a debug consumer against a release
+tokora, puts the default back in force. `RecursionLimiter::SEGMENTED_PRATT_DEPTH` is a third
+published figure — **1024**, `stacker`-only — for a descent that is entirely Pratt frames, and
+[What `stacker` segments](#what-stacker-segments) is why it needs its own constant.
+
 ## Guide and examples
 
-The [Tokora Guide](https://al8n.github.io/tokora/) has three parts: ten Calc fundamentals, one
-anatomy chapter plus four maintained-example walkthroughs (five applied-parser chapters), and an
-optional Rowan/lossless-CST chapter. The examples below are canonical complete programs; the guide
-links back to them instead of copying whole files into prose.
+The [Tokora Guide](https://al8n.github.io/tokora/) is five parts and 28 chapters. **Part II** is
+the tutorial — ten chapters that build Calc end to end, from tokens and the lexer through
+composition, deterministic choice, Pratt expressions, backtracking, diagnostics, recovery, partial
+input, and testing. **Part III** is the internals, for a reader who wants to know why an API is
+shaped the way it is: the parse-while-lexing engine, checkpoint/rewind and the LIFO contract, the
+atomic emitter, the event-stream CST engine, and `Source`/`Slice` storage backends. **Part IV**
+applies it — an anatomy chapter, a custom-lexer recipe, the four maintained-example walkthroughs,
+and the Rowan lossless-CST chapter. **Part V** is reference: combinators and atoms, errors,
+emitters and context, vocabulary, macros and feature flags, Pratt, and the types and syntax
+building blocks.
+
+The examples below are canonical complete programs; the guide links back to them instead of
+copying whole files into prose.
 
 | Program | Focus | Canonical source | Run |
 | --- | --- | --- | --- |
@@ -133,12 +183,12 @@ is `std` alone, and every combinator is compiled unconditionally.
 | `validate` | `validate` / `validate_with`. |
 | `logos` | Alias for `logos_0_16`, the only supported Logos integration. |
 | `logos_0_16` | Enables the optional `logos@0.16` adapter used by `logos`. |
-| `stacker` | Runs each **Pratt frame prologue** on a fresh heap stack segment when the native stack is nearly exhausted; implies `std` and `pratt`. It segments those two prologues and nothing else — a consumer's own `descend`/`descending` frames are ordinary native frames and are untouched — so it does **not** move `RecursionLimiter::PARSE_DEFAULT_DEPTH`, the budget they share. `RecursionLimiter::SEGMENTED_PRATT_DEPTH` is the larger figure it does justify, for a caller whose whole descent is Pratt frames to opt into. It is not a substitute for the recursion budget: a segment is an `mmap`, so a deep enough input still ends the process with nothing on any `Result` channel. |
+| `stacker` | Runs each **Pratt frame prologue** on a fresh heap stack segment when the native stack is nearly exhausted; implies `std` and `pratt`. It does not raise the recursion budget — see [What `stacker` segments](#what-stacker-segments). |
 | `trace` | Enables parser tracing; implies `std`. |
 | `unstable-raw` | Exposes the unstable raw checkpoint API. |
 | `conformance` | Enables the custom-lexer conformance test kit; implies `std`. |
 | `fuzz` | Enables the deterministic public input/backtracking fuzz harness; implies `std`. |
-| `rowan` | Enables the rewindable event-stream Rowan CST — emitter, recording sink, and `node` combinators; implies `std`. A lossless sink requires a trivia-surfacing lexer (`Lexer::SURFACES_TRIVIA`). Add `rowan = "0.17"` directly when implementing `rowan::Language`. **Safety disclosure: `rowan 0.17.0` executes known undefined behaviour on the ordinary construct-and-drop path** — Stacked Borrows at `arc.rs:264`, reached from building any green tree, and Tree Borrows at `cursor.rs:136`, reached from dropping any red-tree `SyntaxNode`. tokora's own `src/cst` contains no `unsafe`; the defects are upstream and unfixed since 2021 (rust-analyzer/rowan [#108](https://github.com/rust-analyzer/rowan/issues/108), [#163](https://github.com/rust-analyzer/rowan/issues/163), [#192](https://github.com/rust-analyzer/rowan/issues/192)), so raising the requirement is not an exit. Both Miri matrices exclude this feature for that reason, which means the shipped lossless path has **zero** Miri coverage rather than a green result. Tracked at [al8n/tokora#252](https://github.com/al8n/tokora/issues/252). |
+| `rowan` | Enables the rewindable event-stream Rowan CST — emitter, recording sink, and `node` combinators; implies `std`. **Carries a safety disclosure — read [`rowan` and known upstream undefined behaviour](#rowan-and-known-upstream-undefined-behaviour) before enabling it.** |
 | `bytes` | Alias for `bytes_1`. |
 | `bytes_1` | Enables `bytes@1` source support. |
 | `bstr` | Alias for `bstr_1`. |
@@ -166,6 +216,34 @@ optional dependency available. `tokora::logos` and the unversioned `tokora::lexe
 are available with `logos_0_16` and re-export/adapt that version — the only Logos major tokora
 supports. `rowan` does not enable `logos`, and `smallvec_1` is the versioned feature that adds
 `alloc`.
+
+### What `stacker` segments
+
+`stacker` puts a fresh heap stack segment under the frame prologue of tokora's **two Pratt
+engines**, and under nothing else. A consumer's own `descend`/`descending` frames are ordinary
+native frames and are untouched, so the feature does **not** move
+`RecursionLimiter::PARSE_DEFAULT_DEPTH`, the [budget they share](#recursion-budget).
+`RecursionLimiter::SEGMENTED_PRATT_DEPTH` is the larger figure it does justify, for a caller whose
+whole descent is Pratt frames to opt into.
+
+It is not a substitute for the recursion budget: a segment is an `mmap`, so a deep enough input
+still ends the process with nothing on any `Result` channel.
+
+### `rowan` and known upstream undefined behaviour
+
+A lossless sink requires a trivia-surfacing lexer (`Lexer::SURFACES_TRIVIA`). Add
+`rowan = "0.17"` directly when implementing `rowan::Language`.
+
+**Safety disclosure: `rowan 0.17.0` executes known undefined behaviour on the ordinary
+construct-and-drop path** — Stacked Borrows at `arc.rs:264`, reached from building any green tree,
+and Tree Borrows at `cursor.rs:136`, reached from dropping any red-tree `SyntaxNode`. tokora's own
+`src/cst` contains no `unsafe`; the defects are upstream and unfixed since 2021
+(rust-analyzer/rowan [#108](https://github.com/rust-analyzer/rowan/issues/108),
+[#163](https://github.com/rust-analyzer/rowan/issues/163),
+[#192](https://github.com/rust-analyzer/rowan/issues/192)), so raising the requirement is not an
+exit. Both Miri matrices exclude this feature for that reason, which means the shipped lossless
+path has **zero** Miri coverage rather than a green result. Tracked at
+[al8n/tokora#252](https://github.com/al8n/tokora/issues/252).
 
 ## Platform support
 
