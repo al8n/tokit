@@ -5,6 +5,8 @@ ignore:
   - "**/examples/*"
   - "**/tests/*"
   - "**/benches/*"
+  - "**/*test.rs"
+  - "**/*tests.rs"
   - tokora-benches/
   - tokora-icount/
 
