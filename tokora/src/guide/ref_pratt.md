@@ -179,9 +179,12 @@ assert_eq!(RecursionLimiter::PARSE_DEFAULT_DEPTH, 32);
 // a caller taking it takes responsibility for its own frame prices with it.
 assert_eq!(RecursionLimiter::OPTIMIZED_PARSE_DEPTH, 256);
 
-// `stacker` only, and defensible only when EVERY level of the descent is a segmented
-// Pratt frame. Nothing installs it either.
-assert_eq!(RecursionLimiter::SEGMENTED_PRATT_DEPTH, 1024);
+// `SEGMENTED_PRATT_DEPTH` is `stacker` only, defensible only when EVERY level of the
+// descent is a segmented Pratt frame, and nothing installs it either. It is absent from
+// this fence on purpose, not by oversight: a doctest is its own crate, so nothing here can
+// be conditioned on a dependency's feature, and the constant does not exist in a build
+// without `stacker`. Its 1024 is pinned in the crate's own `state::recursion_tracker`
+// tests, which CAN be gated on the feature. Do not re-add it here.
 
 // The trap: the type's own general-purpose constructor is NOT the parse default. It
 // assumes nothing about what one level costs, and tokora's wiring does not inherit it.
