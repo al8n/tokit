@@ -150,21 +150,64 @@ draw on the same budget through
 [`InputRef::descending`](crate::InputRef::descending) — see
 [Bounding your own recursion](#bounding-your-own-recursion).
 
-- **Default 64**, so an unconfigured parse of a deeply nested expression fails cleanly instead of
-  risking a native stack abort. Set your own with
+- **The default is [`RecursionLimiter::PARSE_DEFAULT_DEPTH`](crate::state::recursion_tracker::RecursionLimiter::PARSE_DEFAULT_DEPTH)**,
+  so an unconfigured parse of a deeply nested expression fails cleanly instead of risking a native
+  stack abort. Set your own with
   [`ParserContext::with_recursion_limiter`](crate::ParserContext::with_recursion_limiter) or
   [`InputContext::with_recursion_limiter`](crate::input::InputContext::with_recursion_limiter);
   spell "no limit" as
   [`RecursionLimiter::unlimited()`](crate::state::recursion_tracker::RecursionLimiter::unlimited).
-  The default is sized against the **tightest** of the four measured configurations, on the
-  **2 MiB** stack a spawned thread and a libtest harness thread get: release fits 3871 typed
-  frames and 4247 token frames, debug fits 384 typed and **125 token**. 64 clears that last figure
-  by about 1.9× and every other by 6× or more. It is deliberately conservative, because the two
-  failure modes are not symmetric — too low returns a catchable error telling you to raise it, too
-  high aborts the process with no diagnostic. See
-  [`RecursionLimiter`](crate::state::recursion_tracker::RecursionLimiter#default-limit) for the
-  full table. A grammar that parses deep untrusted input should still pick a limit against the
+  It is deliberately conservative, because the two failure modes are not symmetric — too low
+  returns a catchable error telling you to raise it, too high aborts the process with no
+  diagnostic. A grammar that parses deep untrusted input should still pick a limit against the
   stack it will actually run on rather than inherit this one.
+
+### The three published depths
+
+Read them, do not memorise them. Each is derived from measured frame prices against a **2 MiB**
+stack — what a spawned thread and a libtest harness thread get — and the derivation has already
+moved the shipped default more than once. This block is a doctest, so the numbers below cannot
+go stale quietly:
+
+```rust
+use tokora::state::recursion_tracker::RecursionLimiter;
+
+// Installed by default, in EVERY build including a release one.
+assert_eq!(RecursionLimiter::PARSE_DEFAULT_DEPTH, 32);
+
+// Published for a caller to pass; nothing installs it. A release build justifies it, and
+// a caller taking it takes responsibility for its own frame prices with it.
+assert_eq!(RecursionLimiter::OPTIMIZED_PARSE_DEPTH, 256);
+
+// `stacker` only, and defensible only when EVERY level of the descent is a segmented
+// Pratt frame. Nothing installs it either.
+assert_eq!(RecursionLimiter::SEGMENTED_PRATT_DEPTH, 1024);
+
+// The trap: the type's own general-purpose constructor is NOT the parse default. It
+// assumes nothing about what one level costs, and tokora's wiring does not inherit it.
+assert_eq!(RecursionLimiter::new().limitation(), 500);
+```
+
+The default is one figure in both profiles on purpose. `debug_assertions` is not `opt-level` —
+a build with `debug-assertions = false` at `opt-level = 0` selects the release arm and pays debug
+frame prices — so a default that diverged by profile shipped a process-level abort once already.
+The release figure is real and published as `OPTIMIZED_PARSE_DEPTH` for a caller to opt into
+rather than shipped as the default. See
+[`PARSE_DEFAULT_DEPTH`](crate::state::recursion_tracker::RecursionLimiter::PARSE_DEFAULT_DEPTH)
+for the two-tier rule both parse-side figures are derived by, and the measured rows behind it.
+
+`SEGMENTED_PRATT_DEPTH` is the one that interacts with something else in this guide: it is 1024,
+and so is [`cst::MAX_TREE_DEPTH`](crate::cst::MAX_TREE_DEPTH). A caller who takes the full
+segmented budget **and** attaches a CST hook, whose grammar opens a node at every level, lands one
+past the tree ceiling once the root wrapper is counted — see
+[the lossless-CST chapter](super::ch16_lossless_cst#tree-depth-has-its-own-ceiling). The two
+numbers bound different resources and meet by coincidence; where they meet the answer is a typed
+refusal rather than an abort.
+
+- **`stacker` is not a substitute for the budget.** The feature puts a fresh heap stack segment
+  under each Pratt frame prologue, which is what makes `SEGMENTED_PRATT_DEPTH` defensible; it does
+  not make a too-deep input refusable. Without a budget a segmented run ends when the machine's
+  memory does.
 - **One budget per input, not per parser.** Two pratt parsers composed into one grammar share the
   depth, because what the limit protects — the native stack — is shared too. The root expression
   counts as one level.
