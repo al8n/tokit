@@ -49,7 +49,8 @@
 //!
 //! ## Zero-Copy Parsing
 //!
-//! ```rust,ignore
+//! ```rust
+//! # struct YulLang;
 //! use tokora::types::{Lit, LitDecimal, LitString};
 //! use tokora::SimpleSpan;
 //!
@@ -60,32 +61,43 @@
 //!
 //! let generic = YulLit::new(SimpleSpan::new(0, 2), "42");
 //! let num = YulDecimal::new(SimpleSpan::new(0, 2), "42");
-//! let str = YulString::new(SimpleSpan::new(5, 12), "\"hello\"");
+//! let text = YulString::new(SimpleSpan::new(5, 12), "\"hello\"");
+//!
+//! assert_eq!(generic.data_ref(), &"42");
+//! assert_eq!(num.data_ref(), &"42");
+//! assert_eq!(text.span(), SimpleSpan::new(5, 12));
 //! ```
 //!
 //! ## Owned Literals
 //!
-//! ```rust,ignore
+//! ```rust
+//! # struct MyLang;
+//! # let span = tokora::SimpleSpan::new(0, 2);
+//! # let source = "42";
+//! use tokora::{SimpleSpan, types::LitDecimal};
+//!
 //! // Store literals in AST nodes
 //! type OwnedDecimal = LitDecimal<String, SimpleSpan, MyLang>;
 //!
 //! let lit = OwnedDecimal::new(span, source.to_string());
+//! assert_eq!(lit.data_ref(), "42");
 //! ```
 //!
 //! # Error Recovery
 //!
 //! All literal types implement [`ErrorNode`] when `S: ErrorNode`:
 //!
-//! ```rust,ignore
-//! use tokora::types::{LitDecimal, RecoveryState};
-//! use tokora::error::ErrorNode;
+//! ```rust
+//! # struct YulLang;
+//! # let span = tokora::SimpleSpan::new(0, 2);
+//! use tokora::{SimpleSpan, error::ErrorNode, types::{LitDecimal, recovery::RecoveryState}};
 //!
 //! // Create placeholder for malformed literal
-//! let bad_lit = LitDecimal::<String, SimpleSpan, YulLang>::error(span);
+//! let bad_lit = LitDecimal::<&str, SimpleSpan, YulLang>::error(span);
 //! assert!(bad_lit.is_error());
 //!
 //! // Create placeholder for missing literal
-//! let missing_lit = LitDecimal::<String, SimpleSpan, YulLang>::missing(span);
+//! let missing_lit = LitDecimal::<&str, SimpleSpan, YulLang>::missing(span);
 //! assert!(missing_lit.is_missing());
 //! ```
 //!
@@ -142,12 +154,15 @@ macro_rules! define_literal {
       ///
       /// ## With Error Recovery
       ///
-      /// ```rust,ignore
+      /// ```rust
       #[doc = "use tokora::types::" $name ";"]
-      /// use tokora::error::ErrorNode;
+      /// use tokora::{SimpleSpan, error::ErrorNode, types::recovery::RecoveryState};
+      /// # struct MyLang;
+      /// # let span = SimpleSpan::new(0, 4);
       ///
       #[doc = "// " $example_desc]
-      #[doc = "let bad_lit = " $name "::<String, SimpleSpan, YulLang>::error(span);"]
+      #[doc = "let bad_lit = " $name "::<&str, SimpleSpan, MyLang>::error(span);"]
+      /// assert!(bad_lit.is_error());
       /// ```
       // `PartialEq`/`Eq` are derived while the other four are written out. A derive constrains
       // every type parameter, which is why the other four are hand-written — none of them reads

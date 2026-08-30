@@ -142,11 +142,66 @@ where
   /// [`RecursionLimiter::new`]'s own (unrelated) general-purpose default of 500. **Read that
   /// constant rather than assuming a number.**
   ///
-  /// ```rust,ignore
+  /// ```rust
+/// # use core::convert::Infallible;
+/// # use tokora::{
+/// #   InputRef, Lexer, Parse as _, Parser, SimpleSpan, Source, Token,
+/// #   emitter::Fatal, input::TokenBudget, span::Span as _,
+/// #   state::recursion_tracker::RecursionLimiter,
+/// # };
+/// # use tokora::ParserContext;
+/// # #[derive(Debug, PartialEq)] struct Error;
+/// # impl From<Infallible> for Error { fn from(e: Infallible) -> Self { match e {} } }
+/// # impl tokora::error::MaybeIncomplete for Error {}
+/// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<tokora::error::token::UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: tokora::error::token::UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized> From<tokora::error::RecursionLimitReached<O, Lang>> for Error { fn from(_: tokora::error::RecursionLimitReached<O, Lang>) -> Self { Error } }
+/// # #[derive(Debug, Clone, PartialEq)] struct Digit(u32);
+/// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)] struct DigitKind;
+/// # impl core::fmt::Display for DigitKind { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { f.write_str("digit") } }
+/// # impl Token<'_> for Digit {
+/// #   type Kind = DigitKind;
+/// #   type Error = Infallible;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
+/// #   fn kind(&self) -> DigitKind { DigitKind }
+/// #   fn is_trivia(&self) -> bool { false }
+/// # }
+/// # struct Mini<'a> { src: &'a str, pos: usize, tok: SimpleSpan, state: () }
+/// # impl<'a> Lexer<'a> for Mini<'a> {
+/// #   type State = (); type Source = str; type Token = Digit; type Span = SimpleSpan; type Offset = usize;
+/// #   fn new(src: &'a str) -> Self { Self { src, pos: 0, tok: SimpleSpan::new(0, 0), state: () } }
+/// #   fn with_state(src: &'a str, _: ()) -> Self { Self::new(src) }
+/// #   fn check(&self) -> Result<(), Infallible> { Ok(()) }
+/// #   fn state(&self) -> &() { &self.state }
+/// #   fn state_mut(&mut self) -> &mut () { &mut self.state }
+/// #   fn into_state(self) {}
+/// #   fn source(&self) -> &'a str { self.src }
+/// #   fn span(&self) -> SimpleSpan { self.tok }
+/// #   fn slice(&self) -> &'a str { &self.src[self.tok.start()..self.tok.end()] }
+/// #   fn lex(&mut self) -> Option<Result<Digit, Infallible>> {
+/// #     let byte = *self.src.as_bytes().get(self.pos)?;
+/// #     let start = self.pos;
+/// #     self.pos += 1;
+/// #     self.tok = SimpleSpan::new(start, self.pos);
+/// #     Some(Ok(Digit(u32::from(byte - b'0'))))
+/// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
+/// #   fn bump(&mut self, n: &usize) { self.pos += n; }
+/// # }
+/// # type Ctx<'a> = ParserContext<'a, Mini<'a>, Fatal<Error>>;
+/// # // A hand-written production: no combinator feature, so this compiles in every leg.
+/// # fn expr<'inp>(inp: &mut InputRef<'inp, '_, Mini<'inp>, Ctx<'inp>>) -> Result<u32, Error> {
+/// #   let mut total = 0;
+/// #   while let Some(tok) = inp.next()? { total += tok.into_data().0; }
+/// #   Ok(total)
+/// # }
+/// # fn main() -> Result<(), Error> {
+/// # let src = "42";
   /// // Deep but bounded grammar: raise the ceiling for this parse only.
   /// let ctx = ParserContext::of(Fatal::of())
   ///   .with_recursion_limiter(RecursionLimiter::with_limitation(4_000));
   /// let value = Parser::with_context(ctx).apply(expr).parse_str(src)?;
+  /// assert_eq!(value, 6);
+  /// # Ok(()) }
   /// ```
   #[inline(always)]
   pub const fn with_recursion_limiter(mut self, recursion: RecursionLimiter) -> Self {
@@ -161,10 +216,66 @@ where
   /// counts. The default is [`TokenBudget::unlimited`] — protection **off**, unlike the recursion
   /// budget beside it — so nothing changes for a parse that does not ask.
   ///
-  /// ```rust,ignore
+  /// ```rust
+/// # use core::convert::Infallible;
+/// # use tokora::{
+/// #   InputRef, Lexer, Parse as _, Parser, SimpleSpan, Source, Token,
+/// #   emitter::Fatal, input::TokenBudget, span::Span as _,
+/// #   state::recursion_tracker::RecursionLimiter,
+/// # };
+/// # use tokora::ParserContext;
+/// # #[derive(Debug, PartialEq)] struct Error;
+/// # impl From<Infallible> for Error { fn from(e: Infallible) -> Self { match e {} } }
+/// # impl tokora::error::MaybeIncomplete for Error {}
+/// # impl<'a, T, K: Clone, S, Lang: ?Sized> From<tokora::error::token::UnexpectedToken<'a, T, K, S, Lang>> for Error { fn from(_: tokora::error::token::UnexpectedToken<'a, T, K, S, Lang>) -> Self { Error } }
+/// # impl<O, Lang: ?Sized> From<tokora::error::RecursionLimitReached<O, Lang>> for Error { fn from(_: tokora::error::RecursionLimitReached<O, Lang>) -> Self { Error } }
+/// # #[derive(Debug, Clone, PartialEq)] struct Digit(u32);
+/// # #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)] struct DigitKind;
+/// # impl core::fmt::Display for DigitKind { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { f.write_str("digit") } }
+/// # impl Token<'_> for Digit {
+/// #   type Kind = DigitKind;
+/// #   type Error = Infallible;
+/// #   const SCAN_LOOKAHEAD: tokora::ScanLookahead = tokora::ScanLookahead::Unbounded;
+/// #   fn kind(&self) -> DigitKind { DigitKind }
+/// #   fn is_trivia(&self) -> bool { false }
+/// # }
+/// # struct Mini<'a> { src: &'a str, pos: usize, tok: SimpleSpan, state: () }
+/// # impl<'a> Lexer<'a> for Mini<'a> {
+/// #   type State = (); type Source = str; type Token = Digit; type Span = SimpleSpan; type Offset = usize;
+/// #   fn new(src: &'a str) -> Self { Self { src, pos: 0, tok: SimpleSpan::new(0, 0), state: () } }
+/// #   fn with_state(src: &'a str, _: ()) -> Self { Self::new(src) }
+/// #   fn check(&self) -> Result<(), Infallible> { Ok(()) }
+/// #   fn state(&self) -> &() { &self.state }
+/// #   fn state_mut(&mut self) -> &mut () { &mut self.state }
+/// #   fn into_state(self) {}
+/// #   fn source(&self) -> &'a str { self.src }
+/// #   fn span(&self) -> SimpleSpan { self.tok }
+/// #   fn slice(&self) -> &'a str { &self.src[self.tok.start()..self.tok.end()] }
+/// #   fn lex(&mut self) -> Option<Result<Digit, Infallible>> {
+/// #     let byte = *self.src.as_bytes().get(self.pos)?;
+/// #     let start = self.pos;
+/// #     self.pos += 1;
+/// #     self.tok = SimpleSpan::new(start, self.pos);
+/// #     Some(Ok(Digit(u32::from(byte - b'0'))))
+/// #   }
+/// #   fn read_frontier(&self) -> tokora::ReadFrontier<usize> { tokora::ReadFrontier::SpanEnd }
+/// #   fn bump(&mut self, n: &usize) { self.pos += n; }
+/// # }
+/// # type Ctx<'a> = ParserContext<'a, Mini<'a>, Fatal<Error>>;
+/// # // A hand-written production: no combinator feature, so this compiles in every leg.
+/// # fn expr<'inp>(inp: &mut InputRef<'inp, '_, Mini<'inp>, Ctx<'inp>>) -> Result<u32, Error> {
+/// #   let mut total = 0;
+/// #   while let Some(tok) = inp.next()? { total += tok.into_data().0; }
+/// #   Ok(total)
+/// # }
+/// # fn main() -> Result<(), Error> {
+/// # let src = "42";
   /// // Untrusted input: refuse past a million lexed items, tokens and errors alike.
   /// let ctx = ParserContext::of(Fatal::of())
   ///   .with_token_budget(TokenBudget::with_limitation(1_000_000));
+  /// let value = Parser::with_context(ctx).apply(expr).parse_str(src)?;
+  /// assert_eq!(value, 6);
+  /// # Ok(()) }
   /// ```
   #[inline(always)]
   pub const fn with_token_budget(mut self, token_budget: TokenBudget) -> Self {
