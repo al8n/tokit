@@ -1177,7 +1177,7 @@ jobs:
         run: bash ci/icount/run.sh "${{ github.event.pull_request.base.sha || 'origin/main' }}"
       - name: Upload both sides' readings
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           # The head side's file is the per-axis baseline #259 starts from, so it is kept
           # whether the job passed or failed.
@@ -1362,7 +1362,7 @@ jobs:
           fi
       - name: Upload the interleaved readings
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           # Every round of every side, not just the folded verdict: the minimum discards the
           # rounds it did not pick, and those rounds are the record of what the runner was doing
