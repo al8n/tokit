@@ -105,6 +105,29 @@
 //! `the_guide_digests_agree_with_the_items_they_quote` pins the number of digests checked and the
 //! number discovered: a filtered run that matches nothing exits `ok`, and so does a census whose
 //! readers found nothing at all.
+//!
+//! # Not a Miri subject
+//!
+//! The five tests below carry `cfg_attr(miri, ignore)`, each with its own reason string. Miri
+//! exists to find undefined behaviour, and this module gives it none to find: no `unsafe`, no
+//! pointer or aliasing behaviour, nothing but `std::fs`, `include_str!`, and a `syn` parse of
+//! source text. Interpreting that under Miri finds nothing, and it cost hours.
+//!
+//! On the last Miri run before this module existed — #339 @ `c09692f`, run 33251809138, all 25
+//! jobs green — the two `--lib` shards for each target and borrow model (the ones that would go on
+//! to compile this module) ran 1h23m–1h49m under Stacked Borrows and 2h33m–4h39m under Tree
+//! Borrows. `#341` (`4bdc529`) added this module, and every Miri run since — including the run
+//! against this repository's own `main` — has reported `cancelled=12, success=13`: exactly those
+//! twelve `--lib` shards (`ci/miri_shard.py` puts `--lib` on shard 0 for the `logos` pass and
+//! shard 1 for the `raw` pass) now hit GitHub's default job ceiling — a cancelled run's annotation
+//! reads "exceeded the maximum execution time of 6h0m0s" — and `miri.yml` sets no
+//! `timeout-minutes` of its own, so a run that cannot finish is reported `cancelled` rather than
+//! `failed`.
+//!
+//! This is the crate's first use of `cfg_attr(miri, ignore)`; the next module reaching for the
+//! same exemption should read this note rather than re-derive it, and should reach for it only
+//! when, like this one, it has no UB for Miri to find — being slow is not by itself the qualifying
+//! condition.
 
 use std::{
   collections::{BTreeMap, BTreeSet},
