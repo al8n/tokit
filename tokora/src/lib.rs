@@ -4,6 +4,14 @@
 #![cfg_attr(docsrs, allow(unused_attributes))]
 #![allow(clippy::double_parens, clippy::type_complexity)]
 #![deny(missing_docs, warnings)]
+// `generic_arraydeque`'s capacity bound is proved through `IsWithinUsizeBound`, a type-level
+// `Shl` chain whose depth tracks the 64-bit word width, not the deque's own capacity — a fixed
+// cost of that bound, not a defect here, and the standard remedy for typenum-bounded code.
+// `recursion_depth_exceeding_limit` (rust-lang/rust#159228) is future-incompat and becomes a
+// hard error; it fires against typenum < 1.20.1 (bisected floor: 137), which a resolver can
+// still land on since neither this crate nor `generic-arraydeque` pins the fix directly. 256
+// keeps a comfortable margin over that floor.
+#![recursion_limit = "256"]
 // With `unstable-raw` off, `InputRef::{save, restore, commit}` are `pub(crate)`, so the many
 // public items documenting the raw checkpoint contract (the `Checkpoint` type, the transaction
 // guards, `ParseState`, `attempt`) link to crate-private methods. Those links are intentionally
