@@ -3171,6 +3171,34 @@ and will red until they do.
   the collision rows, and it is what separates fixing the collision from flipping the order
   globally.
 
+- **`#![recursion_limit = "256"]` in `tokora/src/lib.rs`, and two new CI jobs so a publish-time
+  failure surfaces at merge time instead.** `cargo +nightly package -p tokora` failed at "failed
+  to verify package tarball": `generic_arraydeque::generic_array::IsWithinUsizeBound` proves a
+  typenum integer fits `usize` through a type-level `Shl` chain whose depth tracks the 64-bit
+  word width rather than the deque's own capacity, and against typenum < 1.20.1 that chain
+  overflows the default 128-frame limit while checking the blanket `impl Default for Parser<(),
+  L, O, FatalContext<'inp, L, E, Lang>>`. `#![deny(warnings)]` turns the new
+  `recursion_depth_exceeding_limit` lint (rust-lang/rust#159228) — future-incompat, and it becomes
+  a hard error — into exactly that build failure, so shielding a downstream build with
+  `--cap-lints allow` would not have survived the lint's graduation. Bisected floor against the
+  pre-fix pair is 137; the crate now carries 256.
+
+  **Neither this crate nor its dependency pins the fix, so a fresh `cargo publish` succeeding
+  today is not proof the class is closed.** `generic-arraydeque` requires only
+  `generic-array = "1"`, and `generic-array` itself required just `typenum ^1.19` before its own
+  1.4.3 raised that to `^1.20.1` — so today's freshest resolution sails past this defect by
+  picking the newest pair, while a downstream consumer's own lockfile, or any resolution that
+  lands on `generic-array` < 1.4.3, can still reach the overflow. Reproduced directly by pinning
+  back to generic-array 1.4.2 and typenum 1.19.0, which hits the identical diagnostic.
+
+  **No CI job ran either shape of the failing command.** Every check, test and clippy line in
+  `ci.yml` type-checks `tokora` as a workspace member; `cargo package`'s isolated, re-resolved
+  verify build is a different one, and nothing ran it. Nor did the by-hand set's own
+  `cargo +nightly check -p tokora --all-targets --all-features` line, which was never mirrored
+  into CI. `package (publish verification)` — `cargo +stable package -p tokora`, merge-blocking
+  — and `nightly check (advisory)` — the bare check, then that by-hand line, both
+  `continue-on-error: true` like `semver-checks` — close both gaps.
+
 
 ### Source-breaking additions that can change behaviour with *no diagnostic at the call site*
 
