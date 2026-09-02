@@ -10,6 +10,7 @@ name: CI
 #     cargo test --all-features
 #     cargo test --release --all-features
 #     cargo test -p tokora --features logos,std
+#     cargo +stable package -p tokora
 #     cargo +nightly check -p tokora --all-targets --all-features
 #     cargo check -p tokora --no-default-features
 #     cargo bench -p tokora-benches --no-run
@@ -84,7 +85,7 @@ name: CI
 # `tokora` dependency, which is also why its bench targets no longer carry `required-features`
 # and so can no longer be silently skipped.
 #
-# Six of the remaining lines look redundant beside a broader command and are not — each catches
+# Seven of the remaining lines look redundant beside a broader command and are not — each catches
 # a class no other line in the set can:
 #
 #   * the bare-config rustdoc build is the only leg that sees bare-config intra-doc breakage:
@@ -118,6 +119,14 @@ name: CI
 #     #340's intra-doc link to `SEGMENTED_PRATT_DEPTH` was invisible to every other line here
 #     and reached `main` as `error: could not document tokora`, `#![deny(warnings)]` at
 #     `lib.rs:6` turning the unresolved link into a build failure.
+#   * `cargo +stable package -p tokora` is the only line that builds the crate the way `cargo
+#     publish` does — an isolated extraction of just this package, verified with a real build
+#     rather than type-checked inside the workspace. Every other line here resolves dependencies
+#     as a member of this workspace; packaging re-resolves them alone, so it is also the only
+#     line positioned to catch a resolution a downstream consumer's own graph, or an isolated
+#     `cargo publish`, could still produce. A future-incompat lint promoted to a hard error by
+#     `#![deny(warnings)]` reached "failed to verify package tarball" while every other line
+#     above stayed green.
 #
 # Features work the same way: only the `--all-features` / `--features rowan` legs compile the
 # `rowan`-gated lossless path, so a configuration no line above names is a configuration
@@ -416,6 +425,40 @@ jobs:
           fi
           echo "diagnostics: ${count} trybuild case(s) executed on the pinned toolchain"
 
+  # ── Gate: package verification (what `cargo publish` runs before upload) ────
+  # `cargo publish` extracts the package in isolation and builds THAT copy before it will upload
+  # — "failed to verify package tarball" is that build failing — and no other line in this
+  # workflow runs it. Every other job here type-checks or tests `tokora` as a member of this
+  # workspace; packaging re-resolves its dependencies alone, so it is also the only job
+  # positioned to see a resolution that only an isolated `cargo publish`, or a downstream
+  # consumer's own graph, would otherwise produce. A future-incompat lint that `nightly` promotes
+  # to a hard error via `#![deny(warnings)]` reached exactly this step, undetected, before this
+  # job existed: `cargo +nightly package` red with a typenum recursion overflow that no `cargo
+  # check` at any feature point in this workflow was positioned to see.
+  #
+  # `+stable` is deliberate: this mirrors the toolchain a real `cargo publish` runs on, and it is
+  # the merge-blocking half of the pair — the job below tracks nightly's own, faster-moving lints
+  # separately and advisory, so this one stays a stable, dependable release gate.
+  package:
+    name: package (publish verification)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache cargo build and registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-package-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-package-
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: cargo +stable package -p tokora
+        run: cargo +stable package -p tokora
+
   # ── Gate: full test suite ───────────────────────────────────────────────────
   test:
     name: test (all-features)
@@ -513,6 +556,55 @@ jobs:
         run: cargo install cargo-semver-checks --locked --version 0.49.0
       - name: cargo semver-checks against the published baseline
         run: cargo semver-checks check-release -p tokora --all-features
+
+  # ── Gate: nightly check (advisory) ──────────────────────────────────────────
+  # `cargo +nightly check -p tokora --all-targets --all-features` has been the by-hand set's own
+  # line since before this job existed, and nothing in CI ever ran it: the other nightly legs
+  # build rustdoc JSON, docs.rs rustdoc, and a `-Zbuild-std` no-std check, and none of them is a
+  # plain `cargo check`. A future-incompat lint that `nightly` denies by default and
+  # `#![deny(warnings)]` turns into a hard error —`recursion_depth_exceeding_limit`,
+  # rust-lang/rust#159228 — reached `cargo publish` itself before anything here caught it.
+  #
+  # `continue-on-error` for the same reason `semver-checks` carries it: nightly's lint set moves
+  # under a crate that has not changed, so this can redden on a toolchain bump alone and blocks
+  # nothing until it has a quiet week on `main`. `package (publish verification)` above is the
+  # merge-blocking half of this pair, pinned to `+stable`; this is the early-warning half, run on
+  # whichever nightly the runner resolves.
+  #
+  # The bare invocation runs first because it is the minimal reproduction of the defect this job
+  # exists for — unconditional on any feature, since the failing `impl` carries no `cfg` — and it
+  # is worth the second, cheap step in CI even though a human would not run both by hand: the
+  # broader `--all-targets --all-features` line already covers everything the bare one does for
+  # any defect that IS feature-conditional, which is why only the broader line earns a spot in
+  # the by-hand set above.
+  #
+  # A developer running a bare, unprefixed `cargo check` on a machine where `rustup default` is
+  # `nightly` — as opposed to a typical machine, or this workflow's runners, where it is
+  # `stable` — is already running everything below against nightly without asking for it. Naming
+  # the toolchain explicitly here, in both steps, is what keeps that distinction visible in CI
+  # regardless of what any one contributor's machine defaults to.
+  nightly-check:
+    name: nightly check (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache cargo build and registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-nightly-check-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-nightly-check-
+      - name: Install Rust
+        run: rustup toolchain install nightly --no-self-update
+      - name: cargo +nightly check -p tokora
+        run: cargo +nightly check -p tokora
+      - name: cargo +nightly check -p tokora --all-targets --all-features
+        run: cargo +nightly check -p tokora --all-targets --all-features
 
   # ── Gate: name-collision probe ──────────────────────────────────────────────
   # Adding a public name is not additive at the source level, and no rule about *when* a
