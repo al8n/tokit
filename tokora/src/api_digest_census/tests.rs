@@ -41,6 +41,10 @@ fn patch(files: &[(String, String)], file: &str, from: &str, to: &str) -> Vec<(S
 /// so does a census whose readers found no digest at all; pinning both numbers means a run that
 /// covered less than it claims reds instead of passing quietly.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "not a Miri subject: no UB for Miri to find; see the module doc"
+)]
 fn the_guide_digests_agree_with_the_items_they_quote() {
   let (files, traits) = tree();
   let (checked, discovered) = census(&files, &traits);
@@ -66,6 +70,10 @@ fn the_guide_digests_agree_with_the_items_they_quote() {
 /// shipped. The control on the control is the first line: the unmutated tree passes, so a red
 /// below is the plant and not the harness.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "not a Miri subject: no UB for Miri to find; see the module doc"
+)]
 fn the_census_reds_on_the_drift_it_claims() {
   let (files, traits) = tree();
   census(&files, &traits);
@@ -277,6 +285,10 @@ fn the_census_reds_on_the_drift_it_claims() {
 /// changes the text without changing the claim, and every one must stay green. A plant that reds
 /// for the wrong reason is worse than no plant; these are what tell the two apart.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "not a Miri subject: no UB for Miri to find; see the module doc"
+)]
 fn the_census_is_green_on_a_digest_rewritten_without_changing_its_meaning() {
   let (files, traits) = tree();
 
@@ -347,6 +359,10 @@ fn the_census_is_green_on_a_digest_rewritten_without_changing_its_meaning() {
 /// API_DIGEST_CENSUS — the readers themselves, over inputs that are wrong in each way a fence can
 /// be wrong. The real chapters cannot exercise a fence that does not exist in them.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "not a Miri subject: no UB for Miri to find; see the module doc"
+)]
 fn the_fence_reader_sees_what_the_renderers_see() {
   // Indented under a list item, and behind a doc-comment prefix: both were missed on this exact
   // file set before, and a reader anchored to the start of the line sees neither.
@@ -382,6 +398,10 @@ fn the_fence_reader_sees_what_the_renderers_see() {
 
 /// API_DIGEST_CENSUS — the spelling normalizer tolerates one equivalence and nothing else.
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "not a Miri subject: no UB for Miri to find; see the module doc"
+)]
 fn a_type_spelling_drops_only_its_module_path() {
   let spelling = |src: &str| spell(&syn::parse_str::<syn::Type>(src).expect("a type"));
 
